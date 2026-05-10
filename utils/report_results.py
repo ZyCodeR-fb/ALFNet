@@ -69,8 +69,10 @@ def report_error(y_pred, y, AAS, VS, FS, NAS, model_name, reports_file: str):
 
 if __name__ == "__main__":
     path = "predictions/MoGERNN-METRLA-12-12-0-12-v-v-t_mark-False-pos_mark-False-seed-32/best_total_y.pkl"
-    y_pred, y, AAS, VS, FS, NAS, model_name, *args = load_prediction(path, "val")
+    y_pred, y, AAS, VS, FS, NAS = load_prediction(path, "val")
+    model_name = os.path.basename(os.path.dirname(path))
     report_error(y_pred, y, AAS, VS, FS, NAS, model_name, "./reports.csv")
-    path = "predictions/MoGERNN-PEMSBAY-12-12-0-12-v-v-t_mark-False-pos_mark-False-seed-42/best_total_y.pkl"
-    y_pred, y, AAS, VS, FS, NAS, model_name, *args = load_prediction(path, "val")
-    report_error(y_pred, y, AAS, VS, FS, NAS, model_name, "./reports.csv")
+    # path = "predictions/MoGERNN-PEMSBAY-12-12-0-12-v-v-t_mark-False-pos_mark-False-seed-42/best_total_y.pkl"
+    # y_pred, y, AAS, VS, FS, NAS = load_prediction(path, "val")
+    # model_name = os.path.basename(os.path.dirname(path))
+    # report_error(y_pred, y, AAS, VS, FS, NAS, model_name, "./reports.csv")

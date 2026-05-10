@@ -61,7 +61,7 @@ def initialize_args():
     parser.add_argument("--slide_step", type=int, default=1, help="step for sliding window")
     parser.add_argument("--target_features", type=str, required=True, choices=["q", "o", "v", "qv", "qov"], help="q is flow, v is speed, o is occupancy")
     parser.add_argument("--input_features", type=str, required=True, choices=["q", "o", "v", "qv", "qov"], help="q is flow, v is speed, o is occupancy")
-    parser.add_argument("--train_ratio", type=float, default=0.6, help="train ratio")
+    parser.add_argument("--train_ratio", type=float, default=0.6, help="train ratio")  # 当前 loader 实际写死 70/30，val 与 train 同段
     parser.add_argument("--valid_ratio", type=float, default=0.2, help="validation ratio")
 
     parser.add_argument("--inverse", action="store_true", help="inverse the data for better results presentation")

@@ -22,9 +22,7 @@ class PinBallLoss(nn.Module):
         super(PinBallLoss, self).__init__()
 
     def forward(self, y_pred, y_true):
-        return torch.mean(
-            torch.max(self.quantile * (y_true - y_pred),
-                      (1 - self.quantile) * (y_pred - y_true)))
+        return torch.mean(torch.max(self.quantile * (y_true - y_pred), (1 - self.quantile) * (y_pred - y_true)))
 
 
 class MultiPinBallLoss(nn.Module):
@@ -40,12 +38,12 @@ class MultiPinBallLoss(nn.Module):
         for i in range(len(self.quantiles)):
             pinball += torch.mean(
                 torch.max(
-                    self.quantiles[i] *
-                    (y_trues[~y_omi] - y_preds[..., i:i + 1][~y_omi]),
-                    (1 - self.quantiles[i]) *
-                    (y_preds[..., i:i + 1][~y_omi] - y_trues[~y_omi])))
+                    self.quantiles[i] * (y_trues[~y_omi] - y_preds[..., i : i + 1][~y_omi]),
+                    (1 - self.quantiles[i]) * (y_preds[..., i : i + 1][~y_omi] - y_trues[~y_omi]),
+                )
+            )
         quantiles = torch.tensor(self.quantiles).to(y_preds.device)
-        #给数据重新排序 0.1,0.5,0.9，计算单调性损失
+        # 给数据重新排序 0.1,0.5,0.9，计算单调性损失
         y_preds = y_preds[..., torch.argsort(quantiles)]
         monotonicity = monotonicity_regularization(y_preds)
         return pinball + monotonicity
@@ -72,70 +70,61 @@ class MSEPinballLoss(nn.Module):
         for i in range(len(self.quantiles)):
             pinball += torch.mean(
                 torch.max(
-                    self.quantiles[i] *
-                    (y_trues[~y_omi] - y_preds[..., i:i + 1][~y_omi]),
-                    (1 - self.quantiles[i]) *
-                    (y_preds[..., i:i + 1][~y_omi] - y_trues[~y_omi])))
-        mse = torch.nn.functional.mse_loss(y_preds[..., i + 1:][~y_omi],
-                                           y_trues[~y_omi])
+                    self.quantiles[i] * (y_trues[~y_omi] - y_preds[..., i : i + 1][~y_omi]),
+                    (1 - self.quantiles[i]) * (y_preds[..., i : i + 1][~y_omi] - y_trues[~y_omi]),
+                )
+            )
+        mse = torch.nn.functional.mse_loss(y_preds[..., i + 1 :][~y_omi], y_trues[~y_omi])
         return pinball + mse
 
 
 def variance(y1, y2):
     mean = (y1 + y2) / 2
-    return (y1 - mean)**2 + (y2 - mean)**2
+    return (y1 - mean) ** 2 + (y2 - mean) ** 2
 
 
 def contrastive_loss(output1, output2, label, margin=1.0):
     euclidean_distance = F.pairwise_distance(output1, output2)
-    loss = torch.mean(
-        (1 - label) * torch.pow(euclidean_distance, 2) + label *
-        torch.pow(torch.clamp(margin - euclidean_distance, min=0.0), 2))
+    loss = torch.mean((1 - label) * torch.pow(euclidean_distance, 2) + label * torch.pow(torch.clamp(margin - euclidean_distance, min=0.0), 2))
     return loss
 
 
-class SlitPhyLoss():
+class SlitPhyLoss:
 
-    def __init__(self, features, criterias=['mape', 'mae', 'rmse']):
+    def __init__(self, features, criterias=["mape", "mae", "rmse"]):
         target = {
-            'q': [0],
-            'o': [1],
-            'v': [2],
-            'qv': [0, 2],
-            'qov': [0, 1, 2],
+            "q": [0],
+            "o": [1],
+            "v": [2],
+            "qv": [0, 2],
+            "qov": [0, 1, 2],
         }
-        names = ['flow (veh/h/lane)', 'occupancy', 'speed (km/h)']
+        names = ["flow (veh/h/lane)", "occupancy", "speed (mph)"]
         self.features = [names[ind] for ind in target[features]]
         self.criterias = criterias
-        self.sub_metrics = [
-            f'{feature}/{criteria}' for feature in self.features
-            for criteria in criterias
-        ]
+        self.sub_metrics = [f"{feature}/{criteria}" for feature in self.features for criteria in criterias]
 
     def __call__(self, y_pred, y_true, miss_indicator):
         """
         miss_indicator: 1 for missing, 0 for not missing
         """
-        assert torch.min(
-            y_true[~miss_indicator]
-        ) >= 0, 'there should have no negative value in y_true'
+        assert torch.min(y_true[~miss_indicator]) >= 0, "there should have no negative value in y_true"
         loss = {}
         for i, feature in enumerate(self.features):
             feature_y_pred = y_pred[..., i][~miss_indicator[..., i]]
             feature_y_true = y_true[..., i][~miss_indicator[..., i]]
             for criteria in self.criterias:
-                if criteria == 'mape':
+                if criteria == "mape":
                     metric = mape_loss(feature_y_pred, feature_y_true).item()
-                elif criteria == 'rmse':
+                elif criteria == "rmse":
                     metric = rmse_loss(feature_y_pred, feature_y_true).item()
-                elif criteria == 'mse':
-                    metric = torch.nn.functional.mse_loss(
-                        feature_y_pred, feature_y_true).item()
-                elif criteria == 'mae':
+                elif criteria == "mse":
+                    metric = torch.nn.functional.mse_loss(feature_y_pred, feature_y_true).item()
+                elif criteria == "mae":
                     metric = mae_loss(feature_y_pred, feature_y_true).item()
                 else:
-                    raise ValueError(f'criteria {criteria} not supported')
-                loss.update({f'{feature}/{criteria}': metric})
+                    raise ValueError(f"criteria {criteria} not supported")
+                loss.update({f"{feature}/{criteria}": metric})
         return loss
 
 
@@ -143,12 +132,12 @@ def kde(data, sample, data_dim=1):
     data = data.reshape(-1)
     sample = sample.reshape(-1)
     n = data.shape[0]
-    bandwidth = n**(-1 / (data_dim + 4))
+    bandwidth = n ** (-1 / (data_dim + 4))
 
     diff = sample[:, None] - data[None, :]
     bandwidth = torch.tensor(bandwidth, dtype=torch.float32)
     const = torch.sqrt(torch.tensor(2 * torch.pi, dtype=torch.float32))
-    kernels = torch.exp(-0.5 * (diff / bandwidth)**2) / (bandwidth * const)
+    kernels = torch.exp(-0.5 * (diff / bandwidth) ** 2) / (bandwidth * const)
     return torch.sum(kernels, dim=1) / n
 
 
