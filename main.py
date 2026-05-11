@@ -1,25 +1,32 @@
-import torch
-from torch import nn
-import pytorch_lightning as pl
-from data_provider.data_factory import data_provider
-from args import initialize_args
-from utils.logtool import print_config, print_header, print_train, set_wandb
-from experiments import train_model, inference_model
-from utils.evaluation import SlitPhyLoss, PinBallLoss, rmse_loss, MSEPinballLoss, MultiPinBallLoss, masked_gaussian_nll_loss
-from omegaconf import OmegaConf
-from model.regist_model import model_dict
-from utils.report_results import report_error, load_prediction
-import numpy as np
+import os
 
-if __name__ == "__main__":
-    args = initialize_args()
-    args.exp_id = f"{args.input_len}-{args.pred_len}-{args.look_back}-{args.slide_step}-{args.input_features}-{args.target_features}-t_mark-{args.t_mark}-pos_mark-{args.pos_mark}-seed-{args.seed}"
+import numpy as np
+import pytorch_lightning as pl
+import torch
+from omegaconf import OmegaConf
+from torch import nn
+
+from args import initialize_args
+from data_provider.data_factory import data_provider
+from experiments import async_lifecycle_inference, inference_model, train_model
+from model.regist_model import model_dict
+from utils.evaluation import MSEPinballLoss, MultiPinBallLoss, SlitPhyLoss, masked_gaussian_nll_loss, rmse_loss
+from utils.logtool import print_config, print_header, print_train, set_wandb
+from utils.report_results import load_prediction, report_error
+
+
+def build_exp_id(args):
+    exp_id = (
+        f"{args.input_len}-{args.pred_len}-{args.look_back}-{args.slide_step}-"
+        f"{args.input_features}-{args.target_features}-t_mark-{args.t_mark}-"
+        f"pos_mark-{args.pos_mark}-seed-{args.seed}"
+    )
     if args.unknown_nodes_path:
         per = args.unknown_nodes_path.split("/")[-1].split("_")[-1].split(".")[0]
         if "%" in per:
-            args.exp_id = f"{args.dloader_name}-{per}-{args.exp_id}"
+            exp_id = f"{args.dloader_name}-{per}-{exp_id}"
         else:
-            args.exp_id = f"{args.dloader_name}-{args.exp_id}"
+            exp_id = f"{args.dloader_name}-{exp_id}"
 
     if args.model == "woMoERNN":
         if args.mean_expert and args.weight_expert and args.max_expert and args.min_expert and args.diffusion_expert:
@@ -36,12 +43,71 @@ if __name__ == "__main__":
             model_wo = "diffusion"
         else:
             raise NotImplementedError
-        args.exp_id = f"{args.model}-{model_wo}-{args.exp_id}"
-    else:
-        args.exp_id = f"{args.model}-{args.exp_id}"
+        return f"{args.model}-{model_wo}-{exp_id}"
+    return f"{args.model}-{exp_id}"
+
+
+def load_pretrained_model(model, args):
+    checkpoint_dir = args.best_checkpoint_path + args.exp_id + "/"
+    if args.pretrained_model_path is None:
+        try:
+            checkpoint = torch.load(checkpoint_dir + "best_val_checkpoint.pth", weights_only=False)
+            print(f"├── load pretrained from {checkpoint_dir}")
+        except FileNotFoundError:
+            checkpoint = torch.load(checkpoint_dir + "best_train_checkpoint.pth", weights_only=False)
+            print(f"├── load pretrained from {checkpoint_dir}")
+        model.load_state_dict(checkpoint["state_dict"])
+        return model, checkpoint_dir
+
+    loaded = torch.load(args.pretrained_model_path, weights_only=False)
+    if isinstance(loaded, dict) and "state_dict" in loaded:
+        model.load_state_dict(loaded["state_dict"])
+        return model, checkpoint_dir
+    return loaded, checkpoint_dir
+
+
+if __name__ == "__main__":
+    args = initialize_args()
+    args.exp_id = build_exp_id(args)
     wandb = set_wandb(args)
     configs = OmegaConf.create(vars(args))
     pl.seed_everything(args.seed)
+    loss_candidate = dict(
+        zip(
+            ["mse", "huber", "mae", "rmse", "msepinball", "multipinball", "nll"],
+            [nn.MSELoss(), nn.HuberLoss(), nn.L1Loss(), rmse_loss, MSEPinballLoss(), MultiPinBallLoss(), masked_gaussian_nll_loss],
+        )
+    )
+    loss = loss_candidate[args.loss]
+    criterions = dict(zip([args.loss, "split_phy_loss"], [loss, SlitPhyLoss(features=args.target_features)]))
+    model = model_dict[args.model].Model(args).float()
+    model_parameters = filter(lambda p: p.requires_grad, model.parameters())
+    args.num_params = sum([np.prod(p.size()) for p in model_parameters])
+    if args.verbose:
+        print_header("*** Model Configurations ***")
+        print(model)
+    print_header("*** Experiment Configurations *** ")
+    print_config(configs)
+    print_train(args)
+
+    if args.test_for_async_lifecycle:
+        model, args.best_checkpoint_path = load_pretrained_model(model, args)
+        args.slide_step = 12
+        test_loader = data_provider(args, "test")
+        print(f"├── async test data dim: {len(test_loader.dataset)}")  # type: ignore
+        model.to(args.device).float()
+        async_lifecycle_inference(model, test_loader, args, criterions)
+        exit()
+
+    if args.test_for_changed or args.inference_only:
+        model, args.best_checkpoint_path = load_pretrained_model(model, args)
+        args.slide_step = 12
+        test_loader = data_provider(args, "test")
+        print(f"├── test  data dim: {len(test_loader.dataset)}")  # type: ignore
+        model.to(args.device).float()
+        inference_model(model, test_loader, args, criterions)
+        exit()
+
     slide_step = args.slide_step
     args.slide_step = 1  # use 1 for train to collect more data
     train_loader = data_provider(args, "train")
@@ -49,35 +115,6 @@ if __name__ == "__main__":
     val_loader = data_provider(args, "val")
     test_loader = data_provider(args, "test")
     data_loaders = dict(zip(["train", "val", "test"], [train_loader, val_loader, test_loader]))
-    loss_candidate = dict(
-        zip(
-            ["mse", "huber", "mae", "rmse", "msepinball", "multipinball", "nll"],
-            [nn.MSELoss(), nn.HuberLoss(), nn.L1Loss(), MSEPinballLoss(), MultiPinBallLoss(), masked_gaussian_nll_loss],
-        )
-    )
-    loss = loss_candidate[args.loss]
-    criterions = dict(zip([args.loss, "split_phy_loss"], [loss, SlitPhyLoss(features=args.target_features)]))
-    model = model_dict[args.model].Model(args).float()
-    if args.test_for_changed or args.inference_only:
-        args.best_checkpoint_path = args.best_checkpoint_path + args.exp_id + "/"
-        if args.pretrained_model_path is None:
-            try:
-                model_dict = torch.load(args.best_checkpoint_path + "best_val_checkpoint.pth", weights_only=False)["state_dict"]
-                print(f"load pretrained from {args.best_checkpoint_path}")
-            except FileNotFoundError:
-                model_dict = torch.load(args.best_checkpoint_path + "best_train_checkpoint.pth", weights_only=False)["state_dict"]
-                print(f"load pretrained from {args.best_checkpoint_path}")
-            model.load_state_dict(model_dict)
-        else:
-            model = torch.load(args.pretrained_model_path, weights_only=False)
-        model.to(args.device).float()
-        args.slide_step = 12
-        test_loader = data_provider(args, "test")
-        inference_model(model, test_loader, args, criterions)
-        exit()
-
-    model_parameters = filter(lambda p: p.requires_grad, model.parameters())
-    args.num_params = sum([np.prod(p.size()) for p in model_parameters])
     optimizers = {"adamw": torch.optim.AdamW, "adam": torch.optim.Adam, "sgd": torch.optim.SGD}
     optimizer = optimizers[args.optimizer](model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     schdulers = {

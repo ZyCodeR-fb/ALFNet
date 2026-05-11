@@ -1,16 +1,18 @@
-from data_provider.graph_data_loader import StaticPEMS, DynamicPEMS
+from data_provider.graph_data_loader import AsyncLifecyclePEMS, DynamicPEMS, StaticPEMS
 from torch.utils.data import DataLoader
 
 
 def data_provider(args, flag):
-    if args.test_for_changed:
+    if args.test_for_async_lifecycle and flag == "test":
+        Dataset = AsyncLifecyclePEMS
+    elif args.test_for_changed:
         Dataset = DynamicPEMS
     else:
         Dataset = StaticPEMS
     if flag != 'train':
         shuffle_flag = False
         drop_last = False
-        batch_size = 256
+        batch_size = 1 if args.test_for_async_lifecycle and flag == "test" else 256
         # if not (args.test_for_changed
         #  or args.inference_only) else 1
         freq = args.freq
@@ -20,20 +22,30 @@ def data_provider(args, flag):
         batch_size = args.batch_size  # bsz for train and valid
         freq = args.freq
 
-    data_set = Dataset(data_path=args.data_path,
-                       size=[args.input_len, args.look_back, args.pred_len],
-                       flag=flag,
-                       scale=not args.no_scale,
-                       freq=freq,
-                       inverse=args.inverse,
-                       target_features=args.target_features,
-                       input_features=args.input_features,
-                       dloader_name=args.dloader_name,
-                       step=args.slide_step,
-                       splits=[args.train_ratio, args.valid_ratio],
-                       unknown_nodes_path=args.unknown_nodes_path,
-                       unknown_nodes_num=args.unknown_nodes_num,
-                       unknown_nodes_list=args.unknown_nodes_list)
+    dataset_kwargs = dict(
+        data_path=args.data_path,
+        size=[args.input_len, args.look_back, args.pred_len],
+        flag=flag,
+        scale=not args.no_scale,
+        freq=freq,
+        inverse=args.inverse,
+        target_features=args.target_features,
+        input_features=args.input_features,
+        dloader_name=args.dloader_name,
+        step=args.slide_step,
+        splits=[args.train_ratio, args.valid_ratio],
+        unknown_nodes_path=args.unknown_nodes_path,
+        unknown_nodes_num=args.unknown_nodes_num,
+        unknown_nodes_list=args.unknown_nodes_list,
+    )
+    if Dataset is AsyncLifecyclePEMS:
+        dataset_kwargs.update(
+            async_num_events=args.async_num_events,
+            async_commissioning_k=args.async_commissioning_k,
+            async_event_seed=args.async_event_seed,
+        )
+
+    data_set = Dataset(**dataset_kwargs)
 
     return DataLoader(data_set,
                       batch_size=batch_size,

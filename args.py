@@ -46,9 +46,20 @@ def initialize_args():
     )
     parser.add_argument("--return_best", action="store_true", help="return best model")
     parser.add_argument("--test_for_changed", action="store_true", help="test pretrained model in changed sensor network")
+    parser.add_argument("--test_for_async_lifecycle", action="store_true", help="test pretrained model in async lifecycle sensor network")
     parser.add_argument("--read_only", action="store_true", help="read only")
     parser.add_argument("--inference_only", action="store_true", help="inference only")
     parser.add_argument("--pretrained_model_path", default=None, help="path to pretrained model")
+    parser.add_argument(
+        "--async_adaptor",
+        type=str,
+        default="base",
+        choices=["base", "st_ttc", "adcsd", "cosa", "petsa"],
+        help="async lifecycle adaptor",
+    )
+    parser.add_argument("--async_num_events", type=int, default=4, help="number of lifecycle events during async test")
+    parser.add_argument("--async_commissioning_k", type=int, default=12, help="number of commissioning windows per event")
+    parser.add_argument("--async_event_seed", type=int, default=0, help="seed for async lifecycle event generation")
 
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--no_scale", action="store_true")
