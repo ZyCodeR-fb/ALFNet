@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 def data_provider(args, flag):
     if args.test_for_async_lifecycle and flag == "test":
         Dataset = AsyncLifecyclePEMS
-    elif args.train_for_async_lifecycle and flag in {"train", "val"}:
+    elif args.train_for_async_lifecycle and flag in {"train", "val", "test"}:
         Dataset = LifecycleTrainPEMS
     elif args.test_for_changed:
         Dataset = DynamicPEMS

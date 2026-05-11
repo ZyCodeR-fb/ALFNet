@@ -470,8 +470,8 @@ class LifecycleTrainPEMS(StaticPEMS):
         lifecycle_role_features: bool = False,
         lifecycle_history_age_feature: bool = False,
     ):
-        if flag not in {"train", "val"}:
-            raise ValueError("LifecycleTrainPEMS only supports train/val splits")
+        if flag not in {"train", "val", "test"}:
+            raise ValueError("LifecycleTrainPEMS only supports train/val/test splits")
         self.lifecycle_seed = lifecycle_seed
         self.async_num_events = async_num_events
         self.lifecycle_event_sampling = lifecycle_event_sampling
@@ -505,7 +505,7 @@ class LifecycleTrainPEMS(StaticPEMS):
         self.current_epoch = int(epoch)
 
     def _build_rng(self, index):
-        if self.flag == "val":
+        if self.flag in {"val", "test"}:
             seed = self.lifecycle_seed + index
         else:
             seed = self.lifecycle_seed + self.current_epoch * max(1, len(self)) + index

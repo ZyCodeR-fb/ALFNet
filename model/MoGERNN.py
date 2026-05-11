@@ -84,6 +84,13 @@ class DataPreparation(nn.Module):
         self.gating = SparseGatingNetwork(configs)
 
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None):
+        if x_enc.size(-1) != self.total_enc_in:
+            raise ValueError(
+                f"Lifecycle input channel mismatch: model expects {self.total_enc_in} channels "
+                f"(raw={self.raw_enc_in}, extra={self.total_enc_in - self.raw_enc_in}), "
+                f"but dataloader produced {x_enc.size(-1)}. "
+                "Ensure train/test use the same lifecycle feature flags and dataset branch."
+            )
         raw_x = x_enc[..., :self.raw_enc_in]
         extra_x = x_enc[..., self.raw_enc_in:] if self.total_enc_in > self.raw_enc_in else None
         batch_unknown_nodes = torch.where(
