@@ -47,6 +47,7 @@ def initialize_args():
     parser.add_argument("--return_best", action="store_true", help="return best model")
     parser.add_argument("--test_for_changed", action="store_true", help="test pretrained model in changed sensor network")
     parser.add_argument("--test_for_async_lifecycle", action="store_true", help="test pretrained model in async lifecycle sensor network")
+    parser.add_argument("--train_for_async_lifecycle", action="store_true", help="train model with lifecycle-aware window simulation")
     parser.add_argument("--read_only", action="store_true", help="read only")
     parser.add_argument("--inference_only", action="store_true", help="inference only")
     parser.add_argument("--pretrained_model_path", default=None, help="path to pretrained model")
@@ -60,6 +61,20 @@ def initialize_args():
     parser.add_argument("--async_num_events", type=int, default=4, help="number of lifecycle events during async test")
     parser.add_argument("--async_commissioning_k", type=int, default=12, help="number of commissioning windows per event")
     parser.add_argument("--async_event_seed", type=int, default=0, help="seed for async lifecycle event generation")
+    parser.add_argument("--lifecycle_role_features", action="store_true", help="append lifecycle role one-hot features to async lifecycle inputs")
+    parser.add_argument("--lifecycle_history_age_feature", action="store_true", help="append lifecycle history-age feature to async lifecycle inputs")
+    parser.add_argument(
+        "--lifecycle_event_sampling",
+        type=str,
+        default="mixed",
+        choices=["random", "clustered", "mixed"],
+        help="node sampling strategy for lifecycle-aware training events",
+    )
+    parser.add_argument(
+        "--lifecycle_keep_random_mask",
+        action="store_true",
+        help="keep the legacy extra random masking on the raw observation channel during lifecycle-aware train/val",
+    )
 
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--no_scale", action="store_true")
@@ -109,8 +124,19 @@ def initialize_args():
     args.ori_unknown_nodes_list = [int(x) for x in args.ori_unknown_nodes_list.split(",") if x]
     args.unknown_nodes_list = [x for x in args.unknown_nodes_list if x not in args.ori_unknown_nodes_list]
     assert args.input_features in args.target_features, "input_features should be in target_features"
+    lifecycle_feature_enabled = args.lifecycle_role_features or args.lifecycle_history_age_feature
+    if lifecycle_feature_enabled and not (args.train_for_async_lifecycle or args.test_for_async_lifecycle):
+        raise ValueError("lifecycle input augmentation flags require train_for_async_lifecycle or test_for_async_lifecycle")
+    if args.train_for_async_lifecycle or lifecycle_feature_enabled:
+        if args.input_features != "v" or args.target_features != "v":
+            raise ValueError("lifecycle-aware training/input augmentation currently supports input_features=target_features=v only")
     args.c_out = len(args.target_features)
-    args.enc_in = len(args.input_features)
+    args.raw_enc_in = len(args.input_features)
+    args.enc_in = args.raw_enc_in
+    if args.lifecycle_role_features:
+        args.enc_in += 4
+    if args.lifecycle_history_age_feature:
+        args.enc_in += 1
     args.enc_mark_in = 3 * (args.t_mark) + 2 * (args.pos_mark)
     print(
         f"enc_in enc_mark_in, and c_out is set automatically based on input_features,target_features and t_mark,pos_mark",

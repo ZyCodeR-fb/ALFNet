@@ -49,6 +49,7 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
             adj = torch.from_numpy(adj).float().to(args.device)
             if pos_mark is not None:
                 pos_mark = torch.from_numpy(pos_mark).float().to(args.device)
+            raw_nan_mask = torch.isnan(x_enc[..., :args.raw_enc_in]).clone()
             x_enc[torch.isnan(x_enc)] = 0  # 在源数据集中，有些异常值被标注为0，这些异常值不参加任何评价计算
             x_dec[torch.isnan(x_dec)] = 0
             if mode != "test":
@@ -56,17 +57,21 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                 # batch_known_nodes = list(random.sample(range(0, x_enc.size(2)),int(x_enc.size(2) * 0.9)))
                 batch_known_nodes = list(range(0, x_enc.size(2)))
                 x_enc = x_enc[..., batch_known_nodes, :]
+                raw_nan_mask = raw_nan_mask[..., batch_known_nodes, :]
                 adj = adj[batch_known_nodes, :][:, batch_known_nodes]
                 if pos_mark is not None:
                     pos_mark = pos_mark[batch_known_nodes, :]
                 x_dec = x_dec[..., batch_known_nodes, :]
                 y = y[..., batch_known_nodes, :]
                 # 每次还得给一些节点(25%)赋值为0，保留图结构
-                missing_ix = torch.ones_like(x_enc).to(args.device)
-                batch_mask = random.sample(range(0, len(batch_known_nodes)), int(len(batch_known_nodes) * 0.25))
+                should_apply_random_mask = (not args.train_for_async_lifecycle) or args.lifecycle_keep_random_mask
+                if should_apply_random_mask:
+                    batch_mask = random.sample(range(0, len(batch_known_nodes)), int(len(batch_known_nodes) * 0.25))
+                else:
+                    batch_mask = torch.where(raw_nan_mask.any(dim=(0, 1, 3)))[0].cpu().tolist()
                 batch_unmask = list(set(range(0, len(batch_known_nodes))) - set(batch_mask))
-                missing_ix[..., batch_mask, :] = 0
-                x_enc = x_enc * missing_ix
+                if should_apply_random_mask and batch_mask:
+                    x_enc[..., batch_mask, :args.raw_enc_in] = 0
             if mode != "train":
                 x_dec = None
             y_hat = model(adj, x_enc, enc_t_mark, pos_mark, x_dec, dec_t_mark, epoch)
@@ -92,11 +97,15 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                     dataloader, criterions, args, mode + "_total ", metrics, y_omi, loss, inverse_y, inverse_y_hat, max_bacth_num, grad_enabled, batch_ix
                 )
                 for i, mask in enumerate([batch_mask, batch_unmask]):
+                    if len(mask) == 0:
+                        continue
                     inverse_y_hat_part = inverse_y_hat[..., mask, :]
                     inverse_y_part = inverse_y[..., mask, :]
                     y_hat_part = y_hat[..., mask, :]
                     y_part = y[..., mask, :]
                     y_omi_part = torch.isnan(inverse_y_part)
+                    if (~y_omi_part).sum() == 0:
+                        continue
                     loss = criterions[args.loss](y_hat_part[~y_omi_part], y_part[~y_omi_part])
                     if i == 0:
                         metrics2 = detail_metrics(

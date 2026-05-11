@@ -1,10 +1,12 @@
-from data_provider.graph_data_loader import AsyncLifecyclePEMS, DynamicPEMS, StaticPEMS
+from data_provider.graph_data_loader import AsyncLifecyclePEMS, DynamicPEMS, LifecycleTrainPEMS, StaticPEMS
 from torch.utils.data import DataLoader
 
 
 def data_provider(args, flag):
     if args.test_for_async_lifecycle and flag == "test":
         Dataset = AsyncLifecyclePEMS
+    elif args.train_for_async_lifecycle and flag in {"train", "val"}:
+        Dataset = LifecycleTrainPEMS
     elif args.test_for_changed:
         Dataset = DynamicPEMS
     else:
@@ -43,6 +45,16 @@ def data_provider(args, flag):
             async_num_events=args.async_num_events,
             async_commissioning_k=args.async_commissioning_k,
             async_event_seed=args.async_event_seed,
+            lifecycle_role_features=args.lifecycle_role_features,
+            lifecycle_history_age_feature=args.lifecycle_history_age_feature,
+        )
+    elif Dataset is LifecycleTrainPEMS:
+        dataset_kwargs.update(
+            lifecycle_seed=args.seed,
+            async_num_events=args.async_num_events,
+            lifecycle_event_sampling=args.lifecycle_event_sampling,
+            lifecycle_role_features=args.lifecycle_role_features,
+            lifecycle_history_age_feature=args.lifecycle_history_age_feature,
         )
 
     data_set = Dataset(**dataset_kwargs)

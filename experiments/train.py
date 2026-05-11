@@ -79,7 +79,20 @@ def save_checkpoint(model, optimizer, args, epoch, mode, now_metric, total_y, me
             setattr(args, f"best_{mode}_metric", now_metric)
             setattr(args, f"best_{mode}_metric_epoch", epoch)
             torch.save(
-                {"epoch": epoch, "val_metric": now_metric, "state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict()}, checkpoint_path
+                {
+                    "epoch": epoch,
+                    "val_metric": now_metric,
+                    "state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "config": {
+                        "enc_in": args.enc_in,
+                        "raw_enc_in": args.raw_enc_in,
+                        "c_out": args.c_out,
+                        "lifecycle_role_features": args.lifecycle_role_features,
+                        "lifecycle_history_age_feature": args.lifecycle_history_age_feature,
+                    },
+                },
+                checkpoint_path,
             )
             args.best_total_y.update({f"{mode}": total_y["test"]})
             print(f"-> New best {metric_name} loss at epoch {epoch}! ({metric_name} loss: {now_metric:.4f})")
@@ -124,6 +137,9 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
     wait_count = 0
     for epoch in range(1, args.max_epoch + 1):
         print(f"-> Epoch {epoch} started...")
+        train_dataset = data_loaders["train"].dataset
+        if hasattr(train_dataset, "set_epoch"):
+            train_dataset.set_epoch(epoch)
         st = time.time()
         _, metrics, _ = run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch)
 

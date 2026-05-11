@@ -43,8 +43,51 @@ def build_exp_id(args):
             model_wo = "diffusion"
         else:
             raise NotImplementedError
-        return f"{args.model}-{model_wo}-{exp_id}"
-    return f"{args.model}-{exp_id}"
+        exp_prefix = f"{args.model}-{model_wo}"
+    else:
+        exp_prefix = args.model
+
+    use_lifecycle_train_prefix = args.train_for_async_lifecycle or (
+        args.test_for_async_lifecycle and (args.lifecycle_role_features or args.lifecycle_history_age_feature)
+    )
+    if use_lifecycle_train_prefix:
+        exp_prefix = (
+            f"{exp_prefix}-lifecycle_train-"
+            f"sampling-{args.lifecycle_event_sampling}-"
+            f"role-{int(args.lifecycle_role_features)}-"
+            f"age-{int(args.lifecycle_history_age_feature)}-"
+            f"randmask-{int(args.lifecycle_keep_random_mask)}"
+        )
+    elif args.lifecycle_role_features or args.lifecycle_history_age_feature:
+        exp_prefix = (
+            f"{exp_prefix}-lifecycle_input-"
+            f"role-{int(args.lifecycle_role_features)}-"
+            f"age-{int(args.lifecycle_history_age_feature)}"
+        )
+    return f"{exp_prefix}-{exp_id}"
+
+
+def _validate_checkpoint_compatibility(checkpoint, args):
+    checkpoint_config = checkpoint.get("config")
+    if checkpoint_config is None:
+        return
+    expected_pairs = {
+        "enc_in": args.enc_in,
+        "raw_enc_in": args.raw_enc_in,
+        "c_out": args.c_out,
+        "lifecycle_role_features": args.lifecycle_role_features,
+        "lifecycle_history_age_feature": args.lifecycle_history_age_feature,
+    }
+    mismatches = []
+    for key, expected in expected_pairs.items():
+        if key in checkpoint_config and checkpoint_config[key] != expected:
+            mismatches.append(f"{key}: checkpoint={checkpoint_config[key]} current={expected}")
+    if mismatches:
+        mismatch_text = "; ".join(mismatches)
+        raise ValueError(
+            "Checkpoint lifecycle/input configuration does not match the current CLI flags. "
+            f"Please reuse the same lifecycle input switches during async test. {mismatch_text}"
+        )
 
 
 def load_pretrained_model(model, args):
@@ -56,11 +99,13 @@ def load_pretrained_model(model, args):
         except FileNotFoundError:
             checkpoint = torch.load(checkpoint_dir + "best_train_checkpoint.pth", weights_only=False)
             print(f"├── load pretrained from {checkpoint_dir}")
+        _validate_checkpoint_compatibility(checkpoint, args)
         model.load_state_dict(checkpoint["state_dict"])
         return model, checkpoint_dir
 
     loaded = torch.load(args.pretrained_model_path, weights_only=False)
     if isinstance(loaded, dict) and "state_dict" in loaded:
+        _validate_checkpoint_compatibility(loaded, args)
         model.load_state_dict(loaded["state_dict"])
         return model, checkpoint_dir
     return loaded, checkpoint_dir

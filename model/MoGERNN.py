@@ -19,7 +19,8 @@ class GatingNetwork(nn.Module):
 
     def __init__(self, configs):
         super(GatingNetwork, self).__init__()
-        self.fc1 = nn.Linear(configs.input_len, configs.d_model)
+        raw_enc_in = getattr(configs, "raw_enc_in", configs.enc_in)
+        self.fc1 = nn.Linear(configs.input_len * raw_enc_in, configs.d_model)
         self.fc2 = nn.Linear(configs.d_model, configs.num_experts)
         self.softmax = nn.Softmax(dim=-1)
 
@@ -35,7 +36,8 @@ class SparseGatingNetwork(nn.Module):
 
     def __init__(self, configs):
         super(SparseGatingNetwork, self).__init__()
-        self.fc1 = nn.Linear(configs.input_len, configs.d_model)
+        raw_enc_in = getattr(configs, "raw_enc_in", configs.enc_in)
+        self.fc1 = nn.Linear(configs.input_len * raw_enc_in, configs.d_model)
         self.fc2 = nn.Linear(configs.d_model, configs.num_experts)
         self.k = configs.num_used_experts
 
@@ -59,45 +61,51 @@ class DataPreparation(nn.Module):
 
     def __init__(self, configs):
         super(DataPreparation, self).__init__()
+        self.raw_enc_in = getattr(configs, "raw_enc_in", configs.enc_in)
+        self.total_enc_in = configs.enc_in
+        flattened_input_dim = configs.input_len * self.raw_enc_in
         experts = []
         if configs.mean_expert:
-            experts.append(MeanAggregator(configs.input_len,
-                                          configs.input_len))
+            experts.append(MeanAggregator(flattened_input_dim,
+                                          flattened_input_dim))
         if configs.weight_expert:
             experts.append(
-                WMeanAggregator(configs.input_len, configs.input_len))
+                WMeanAggregator(flattened_input_dim, flattened_input_dim))
         if configs.max_expert:
             experts.append(
-                MaxPoolingAggregator(configs.input_len, configs.input_len))
+                MaxPoolingAggregator(flattened_input_dim, flattened_input_dim))
         if configs.min_expert:
             experts.append(
-                MinPoolingAggregator(configs.input_len, configs.input_len))
+                MinPoolingAggregator(flattened_input_dim, flattened_input_dim))
         if configs.diffusion_expert:
             experts.append(
-                DiffusionAggregator(configs.input_len, configs.input_len))
+                DiffusionAggregator(flattened_input_dim, flattened_input_dim))
         self.experts = nn.ModuleList([Expert(expert) for expert in experts])
         self.gating = SparseGatingNetwork(configs)
 
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None):
-        x_enc = x_enc.squeeze(-1)
+        raw_x = x_enc[..., :self.raw_enc_in]
+        extra_x = x_enc[..., self.raw_enc_in:] if self.total_enc_in > self.raw_enc_in else None
         batch_unknown_nodes = torch.where(
-            torch.sum(x_enc, dim=(0, 1)) == 0)[0].cpu().tolist()
-        x_enc = rearrange(x_enc, 'b t n -> b n t')
-        gate_weights = self.gating(x_enc)
+            torch.sum(torch.abs(raw_x), dim=(0, 1, 3)) == 0)[0].cpu().tolist()
+        raw_x = rearrange(raw_x, 'b t n c -> b n (t c)')
+        gate_weights = self.gating(raw_x)
         adj_noselfloop = adj.clone()
         adj_noselfloop[torch.eye(adj.shape[0]).bool()] = 0
         expert_outputs = [
-            expert(adj_noselfloop, x_enc, batch_unknown_nodes)
+            expert(adj_noselfloop, raw_x, batch_unknown_nodes)
             for expert in self.experts
         ]
         expert_outputs_stack = torch.stack(expert_outputs, dim=2)
         combied_out = torch.sum(gate_weights.unsqueeze(-1) *
                                 expert_outputs_stack,
                                 dim=2)
-        miss_ix = (x_enc == 0).int()
-        x_enc = x_enc * (1 - miss_ix) + combied_out * miss_ix
-        x_enc = rearrange(x_enc, 'b n t -> b t n 1')
-        return x_enc
+        miss_ix = (raw_x == 0).int()
+        raw_x = raw_x * (1 - miss_ix) + combied_out * miss_ix
+        raw_x = rearrange(raw_x, 'b n (t c) -> b t n c', t=x_enc.shape[1], c=self.raw_enc_in)
+        if extra_x is None:
+            return raw_x
+        return torch.cat([raw_x, extra_x], dim=-1)
 
 
 class Encoder(nn.Module):
@@ -142,10 +150,12 @@ class Decoder(nn.Module):
                  input_size,
                  hidden_size,
                  out_seq_len,
+                 output_size=None,
                  num_layers=1,
                  k=2):
         super(Decoder, self).__init__()
         self.input_size = input_size
+        self.output_size = input_size if output_size is None else output_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.out_seq_len = out_seq_len
@@ -154,7 +164,7 @@ class Decoder(nn.Module):
             DCRNNCell(input_size if i == 0 else hidden_size, hidden_size, k)
             for i in range(num_layers)
         ])
-        self.fc = nn.Linear(hidden_size, input_size)
+        self.fc = nn.Linear(hidden_size, self.output_size)
 
     def forward(self,
                 intial_input,
@@ -190,15 +200,15 @@ class Decoder(nn.Module):
 
 class Seq2Seq(nn.Module):
 
-    def __init__(self, input_size, hidden_size, num_layers, out_seq_len, k=2):
+    def __init__(self, enc_input_size, dec_input_size, hidden_size, num_layers, out_seq_len, k=2):
         super(Seq2Seq, self).__init__()
-        self.encoder = Encoder(input_size, hidden_size, num_layers, k)
-        self.decoder = Decoder(input_size, hidden_size, out_seq_len,
-                               num_layers, k)
+        self.encoder = Encoder(enc_input_size, hidden_size, num_layers, k)
+        self.decoder = Decoder(dec_input_size, hidden_size, out_seq_len,
+                               output_size=dec_input_size, num_layers=num_layers, k=k)
 
-    def forward(self, x_enc, x_dec, A_q, A_h, teacher_forcing_ratio=0.5):
+    def forward(self, x_enc, x_dec, A_q, A_h, initial_input, teacher_forcing_ratio=0.5):
         h = self.encoder(x_enc, A_q, A_h)
-        dec_out = self.decoder(x_enc[:, -1], h, A_q, A_h, x_dec,
+        dec_out = self.decoder(initial_input, h, A_q, A_h, x_dec,
                                teacher_forcing_ratio)
         return dec_out
 
@@ -208,8 +218,9 @@ class Model(nn.Module):
     def __init__(self, configs):
         super(Model, self).__init__()
         self.out_len = configs.pred_len if configs.pred_len > 0 else configs.look_back
+        self.output_dim = configs.c_out
         self.data_pre = DataPreparation(configs)
-        self.seq2seq = Seq2Seq(configs.enc_in, configs.d_model,
+        self.seq2seq = Seq2Seq(configs.enc_in, configs.c_out, configs.d_model,
                                configs.e_layers, self.out_len, configs.k_hop)
 
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, *args):
@@ -220,5 +231,6 @@ class Model(nn.Module):
         x_enc = self.data_pre(adj, x_enc, x_t_mark, pos_mark)
         epoch = args[-1]
         teacher_forcing_ratio = 1 - (epoch / 40)
-        dec_out = self.seq2seq(x_enc, x_dec, A_q, A_h, teacher_forcing_ratio)
+        initial_input = x_enc[:, -1, :, : self.output_dim]
+        dec_out = self.seq2seq(x_enc, x_dec, A_q, A_h, initial_input, teacher_forcing_ratio)
         return dec_out

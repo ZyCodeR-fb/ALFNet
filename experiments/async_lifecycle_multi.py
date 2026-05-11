@@ -45,6 +45,8 @@ def _validate_async_args(args):
         raise ValueError("async_lifecycle currently supports commissioning_k in {6, 12, 24}")
     if args.test_for_changed:
         raise ValueError("test_for_changed and test_for_async_lifecycle should not be enabled together")
+    if args.enc_in != args.raw_enc_in and args.async_adaptor != "base":
+        raise ValueError("lifecycle input augmentation is currently only supported with async_adaptor=base")
 
 
 def _prepare_paths(args):
