@@ -1,6 +1,31 @@
 import torch
 from utils.logtool import detail_metrics
 import random
+import torch.nn.functional as F
+
+
+def _compute_weighted_train_loss(y_hat, y, y_omi, sample_role_weights, args):
+    if sample_role_weights is None:
+        return None
+    valid_mask = (~y_omi).to(dtype=y_hat.dtype)
+    weights = sample_role_weights.to(device=y_hat.device, dtype=y_hat.dtype) * valid_mask
+    if weights.sum() <= 0:
+        return None
+    diff = y_hat - y
+    if args.loss == "mse":
+        per_element = diff.pow(2)
+        return (per_element * weights).sum() / weights.sum()
+    if args.loss == "rmse":
+        per_element = diff.pow(2)
+        mse = (per_element * weights).sum() / weights.sum()
+        return torch.sqrt(mse)
+    if args.loss == "mae":
+        per_element = diff.abs()
+        return (per_element * weights).sum() / weights.sum()
+    if args.loss == "huber":
+        per_element = F.huber_loss(y_hat, y, reduction="none")
+        return (per_element * weights).sum() / weights.sum()
+    return None
 
 
 def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epoch):
@@ -38,7 +63,11 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
             if batch_ix >= max_bacth_num:
                 break
             batch = [x.float().to(args.device) for x in batch]
-            x_enc, x_dec, enc_t_mark, dec_t_mark = batch
+            sample_role_weights = None
+            if len(batch) == 5:
+                x_enc, x_dec, enc_t_mark, dec_t_mark, sample_role_weights = batch
+            else:
+                x_enc, x_dec, enc_t_mark, dec_t_mark = batch
             if not args.t_mark:
                 enc_t_mark = None
             y = x_dec[:, -args.pred_len :].clone()
@@ -63,6 +92,8 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                     pos_mark = pos_mark[batch_known_nodes, :]
                 x_dec = x_dec[..., batch_known_nodes, :]
                 y = y[..., batch_known_nodes, :]
+                if sample_role_weights is not None:
+                    sample_role_weights = sample_role_weights[..., batch_known_nodes, :]
                 # 每次还得给一些节点(25%)赋值为0，保留图结构
                 should_apply_random_mask = (not args.train_for_async_lifecycle) or args.lifecycle_keep_random_mask
                 if should_apply_random_mask:
@@ -79,8 +110,13 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
             if (~y_omi).sum() == 0:
                 continue
             loss = criterions[args.loss](y_hat[~y_omi], y[~y_omi])
+            optimize_loss = loss
             if grad_enabled:
-                loss.backward()
+                weighted_loss = _compute_weighted_train_loss(y_hat, y, y_omi, sample_role_weights, args)
+                if weighted_loss is not None:
+                    optimize_loss = weighted_loss
+            if grad_enabled:
+                optimize_loss.backward()
                 optimizer.step()
                 optimizer.zero_grad()
             y = y.detach().cpu()

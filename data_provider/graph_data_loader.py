@@ -19,16 +19,52 @@ LIFECYCLE_LOCAL_VS_RATIO = 0.25
 LIFECYCLE_MIXED_CLUSTER_PROB = 0.5
 LIFECYCLE_TRAINING_PROFILES = {
     "v1": {
-        "event_scale": 1.0,
+        "nas_scale": 1.0,
+        "fs_scale": 1.0,
         "vs_ratio": LIFECYCLE_LOCAL_VS_RATIO,
+        "event_time_mode": "uniform",
+        "role_loss_weights": {
+            ROLE_AAS: 1.0,
+            ROLE_NAS: 1.0,
+            ROLE_VS: 1.0,
+            ROLE_FS: 1.0,
+        },
     },
     "round1": {
-        "event_scale": 0.5,
+        "nas_scale": 0.5,
+        "fs_scale": 0.5,
         "vs_ratio": 0.10,
+        "event_time_mode": "uniform",
+        "role_loss_weights": {
+            ROLE_AAS: 1.0,
+            ROLE_NAS: 1.0,
+            ROLE_VS: 1.0,
+            ROLE_FS: 1.0,
+        },
     },
     "round2": {
-        "event_scale": 0.5,
+        "nas_scale": 0.5,
+        "fs_scale": 0.5,
         "vs_ratio": 0.0,
+        "event_time_mode": "uniform",
+        "role_loss_weights": {
+            ROLE_AAS: 1.0,
+            ROLE_NAS: 1.0,
+            ROLE_VS: 1.0,
+            ROLE_FS: 1.0,
+        },
+    },
+    "round3": {
+        "nas_scale": 0.5,
+        "fs_scale": 0.75,
+        "vs_ratio": 0.05,
+        "event_time_mode": "early",
+        "role_loss_weights": {
+            ROLE_AAS: 1.0,
+            ROLE_NAS: 1.0,
+            ROLE_VS: 1.35,
+            ROLE_FS: 1.60,
+        },
     },
 }
 
@@ -108,6 +144,17 @@ def _compose_lifecycle_input_features(seq_x, visibility_mask, role_ids, use_role
     if len(features) == 1:
         return masked_seq_x
     return np.concatenate(features, axis=-1).astype(np.float32, copy=False)
+
+
+def _build_target_role_weights(seq_y, nas_nodes, vs_nodes, fs_nodes, role_loss_weights):
+    target_weights = np.ones_like(seq_y, dtype=np.float32)
+    if nas_nodes:
+        target_weights[:, nas_nodes, :] = float(role_loss_weights[ROLE_NAS])
+    if vs_nodes:
+        target_weights[:, vs_nodes, :] = float(role_loss_weights[ROLE_VS])
+    if fs_nodes:
+        target_weights[:, fs_nodes, :] = float(role_loss_weights[ROLE_FS])
+    return target_weights
 
 
 class StaticPEMS(Dataset):
@@ -520,10 +567,11 @@ class LifecycleTrainPEMS(StaticPEMS):
         )
         total_nas, total_fs = _resolve_async_event_node_counts(self.full_num_nodes)
         profile = _resolve_lifecycle_training_profile(self.lifecycle_training_strategy)
+        self.lifecycle_profile = profile
         base_nas_count = max(1, total_nas // self.async_num_events)
         base_fs_count = max(1, total_fs // self.async_num_events)
-        self.local_nas_count = max(1, int(np.ceil(base_nas_count * profile["event_scale"])))
-        self.local_fs_count = max(1, int(np.ceil(base_fs_count * profile["event_scale"])))
+        self.local_nas_count = max(1, int(np.ceil(base_nas_count * profile["nas_scale"])))
+        self.local_fs_count = max(1, int(np.ceil(base_fs_count * profile["fs_scale"])))
         if profile["vs_ratio"] <= 0:
             self.local_vs_count = 0
         else:
@@ -538,6 +586,15 @@ class LifecycleTrainPEMS(StaticPEMS):
         else:
             seed = self.lifecycle_seed + self.current_epoch * max(1, len(self)) + index
         return np.random.default_rng(seed)
+
+    def _sample_event_time(self, rng):
+        event_time_mode = self.lifecycle_profile["event_time_mode"]
+        if event_time_mode == "uniform":
+            return int(rng.integers(1, self.input_len))
+        if event_time_mode == "early":
+            upper_bound = max(2, self.input_len // 3 + 1)
+            return int(rng.integers(1, upper_bound))
+        raise ValueError(f"Unsupported lifecycle event_time_mode: {event_time_mode}")
 
     def _sample_local_role_groups(self, rng):
         sampling_mode = self.lifecycle_event_sampling
@@ -581,7 +638,7 @@ class LifecycleTrainPEMS(StaticPEMS):
         seq_x = self.data[input_begin:input_end].copy()
         seq_y = self.data_y[output_begin:output_end]
         rng = self._build_rng(sample_index)
-        event_time = int(rng.integers(1, self.input_len))
+        event_time = self._sample_event_time(rng)
         _, nas_nodes, vs_nodes, fs_nodes = self._sample_local_role_groups(rng)
         role_ids, visibility_mask = self._build_local_role_state(event_time, nas_nodes, vs_nodes, fs_nodes)
         seq_x = _compose_lifecycle_input_features(
@@ -591,11 +648,18 @@ class LifecycleTrainPEMS(StaticPEMS):
             self.lifecycle_role_features,
             self.lifecycle_history_age_feature,
         )
+        target_role_weights = _build_target_role_weights(
+            seq_y,
+            nas_nodes,
+            vs_nodes,
+            fs_nodes,
+            self.lifecycle_profile["role_loss_weights"],
+        )
         x_t_mark, y_t_mark = np.zeros_like(seq_x), np.zeros_like(seq_y)
         if self.time_mark is not None:
             x_t_mark = self.time_mark[input_begin:input_end]
             y_t_mark = self.time_mark[output_begin:output_end]
-        return seq_x, seq_y, x_t_mark, y_t_mark
+        return seq_x, seq_y, x_t_mark, y_t_mark, target_role_weights
 
 
 def _unwrap_raw_data(raw_data):
