@@ -1,4 +1,6 @@
 import os
+import hashlib
+import json
 
 import numpy as np
 import pytorch_lightning as pl
@@ -15,11 +17,47 @@ from utils.logtool import print_config, print_header, print_train, set_wandb
 from utils.report_results import load_prediction, report_error
 
 
+def _format_float_token(value):
+    token = f"{value:.0e}" if value != 0 and (abs(value) <= 1e-3 or abs(value) >= 1e2) else f"{value:g}"
+    return token.replace("+0", "").replace("+", "").replace("-0", "-")
+
+
+def _build_train_signature(args):
+    expert_bits = f"{int(args.mean_expert)}{int(args.weight_expert)}{int(args.max_expert)}{int(args.min_expert)}{int(args.diffusion_expert)}"
+    signature_payload = {
+        "d_model": args.d_model,
+        "k_hop": args.k_hop,
+        "e_layers": args.e_layers,
+        "d_layers": args.d_layers,
+        "activation": args.activation,
+        "loss": args.loss,
+        "optimizer": args.optimizer,
+        "scheduler": args.scheduler,
+        "scheduler_patience": args.scheduler_patience,
+        "lr": args.lr,
+        "weight_decay": args.weight_decay,
+        "batch_size": args.batch_size,
+        "max_epoch": args.max_epoch,
+        "patience": args.patience,
+        "stop_based": args.stop_based,
+        "num_used_experts": args.num_used_experts,
+        "expert_bits": expert_bits,
+    }
+    signature_hash = hashlib.md5(json.dumps(signature_payload, sort_keys=True).encode("utf-8")).hexdigest()[:8]
+    readable = (
+        f"dm{args.d_model}-kh{args.k_hop}-"
+        f"lr{_format_float_token(args.lr)}-wd{_format_float_token(args.weight_decay)}-"
+        f"bs{args.batch_size}"
+    )
+    return f"{readable}-cfg{signature_hash}"
+
+
 def build_exp_id(args):
     exp_id = (
         f"{args.input_len}-{args.pred_len}-{args.look_back}-{args.slide_step}-"
         f"{args.input_features}-{args.target_features}-t_mark-{args.t_mark}-"
-        f"pos_mark-{args.pos_mark}-seed-{args.seed}"
+        f"pos_mark-{args.pos_mark}-seed-{args.seed}-"
+        f"{_build_train_signature(args)}"
     )
     if args.unknown_nodes_path:
         per = args.unknown_nodes_path.split("/")[-1].split("_")[-1].split(".")[0]

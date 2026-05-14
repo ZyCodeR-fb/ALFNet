@@ -66,6 +66,30 @@ LIFECYCLE_TRAINING_PROFILES = {
             ROLE_FS: 1.60,
         },
     },
+    "round3_event_only": {
+        "nas_scale": 0.5,
+        "fs_scale": 0.75,
+        "vs_ratio": 0.05,
+        "event_time_mode": "early",
+        "role_loss_weights": {
+            ROLE_AAS: 1.0,
+            ROLE_NAS: 1.0,
+            ROLE_VS: 1.0,
+            ROLE_FS: 1.0,
+        },
+    },
+    "round3_weight_only": {
+        "nas_scale": 0.5,
+        "fs_scale": 0.5,
+        "vs_ratio": 0.0,
+        "event_time_mode": "uniform",
+        "role_loss_weights": {
+            ROLE_AAS: 1.0,
+            ROLE_NAS: 1.0,
+            ROLE_VS: 1.0,
+            ROLE_FS: 1.60,
+        },
+    },
 }
 
 

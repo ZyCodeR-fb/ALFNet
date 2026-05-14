@@ -79,8 +79,8 @@ def initialize_args():
         "--lifecycle_training_strategy",
         type=str,
         default="v1",
-        choices=["v1", "round1", "round2", "round3"],
-        help="lifecycle-aware training recipe: v1=original heavy local lifecycle simulation, round1=lighter events + keep legacy random mask, round2=round1 without local VS nodes, round3=round2 plus small VS rehearsal and FS/VS-focused optimization",
+        choices=["v1", "round1", "round2", "round3", "round3_event_only", "round3_weight_only"],
+        help="lifecycle-aware training recipe: v1=original heavy local lifecycle simulation, round1=lighter events + keep legacy random mask, round2=round1 without local VS nodes, round3=combined event+weight tuning, round3_event_only=only the event-profile changes from round3, round3_weight_only=only the optimizer weighting changes on top of round2-style events",
     )
 
     parser.add_argument("--batch_size", type=int, default=32)
@@ -137,7 +137,7 @@ def initialize_args():
     if args.train_for_async_lifecycle or lifecycle_feature_enabled:
         if args.input_features != "v" or args.target_features != "v":
             raise ValueError("lifecycle-aware training/input augmentation currently supports input_features=target_features=v only")
-    if args.train_for_async_lifecycle and args.lifecycle_training_strategy in {"round1", "round2", "round3"}:
+    if args.train_for_async_lifecycle and args.lifecycle_training_strategy in {"round1", "round2", "round3", "round3_event_only", "round3_weight_only"}:
         args.lifecycle_keep_random_mask = True
     args.c_out = len(args.target_features)
     args.raw_enc_in = len(args.input_features)
