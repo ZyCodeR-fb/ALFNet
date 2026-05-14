@@ -88,6 +88,8 @@ def save_checkpoint(model, optimizer, args, epoch, mode, now_metric, total_y, me
                         "enc_in": args.enc_in,
                         "raw_enc_in": args.raw_enc_in,
                         "c_out": args.c_out,
+                        "lifecycle_training_strategy": args.lifecycle_training_strategy,
+                        "lifecycle_keep_random_mask": args.lifecycle_keep_random_mask,
                         "lifecycle_role_features": args.lifecycle_role_features,
                         "lifecycle_history_age_feature": args.lifecycle_history_age_feature,
                     },

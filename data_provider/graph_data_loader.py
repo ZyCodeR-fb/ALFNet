@@ -17,12 +17,32 @@ ASYNC_EVENT_NODE_COUNTS = {
 }
 LIFECYCLE_LOCAL_VS_RATIO = 0.25
 LIFECYCLE_MIXED_CLUSTER_PROB = 0.5
+LIFECYCLE_TRAINING_PROFILES = {
+    "v1": {
+        "event_scale": 1.0,
+        "vs_ratio": LIFECYCLE_LOCAL_VS_RATIO,
+    },
+    "round1": {
+        "event_scale": 0.5,
+        "vs_ratio": 0.10,
+    },
+    "round2": {
+        "event_scale": 0.5,
+        "vs_ratio": 0.0,
+    },
+}
 
 
 def _resolve_async_event_node_counts(num_nodes):
     if num_nodes in ASYNC_EVENT_NODE_COUNTS:
         return ASYNC_EVENT_NODE_COUNTS[num_nodes]
     raise ValueError("num_nodes should be 207 or 325")
+
+
+def _resolve_lifecycle_training_profile(strategy):
+    if strategy not in LIFECYCLE_TRAINING_PROFILES:
+        raise ValueError(f"Unsupported lifecycle_training_strategy: {strategy}")
+    return LIFECYCLE_TRAINING_PROFILES[strategy]
 
 
 def _sample_random_nodes(eligible_nodes, count, rng):
@@ -467,6 +487,7 @@ class LifecycleTrainPEMS(StaticPEMS):
         lifecycle_seed: int = 42,
         async_num_events: int = 4,
         lifecycle_event_sampling: str = "mixed",
+        lifecycle_training_strategy: str = "v1",
         lifecycle_role_features: bool = False,
         lifecycle_history_age_feature: bool = False,
     ):
@@ -475,6 +496,7 @@ class LifecycleTrainPEMS(StaticPEMS):
         self.lifecycle_seed = lifecycle_seed
         self.async_num_events = async_num_events
         self.lifecycle_event_sampling = lifecycle_event_sampling
+        self.lifecycle_training_strategy = lifecycle_training_strategy
         self.lifecycle_role_features = lifecycle_role_features
         self.lifecycle_history_age_feature = lifecycle_history_age_feature
         self.current_epoch = 0
@@ -497,9 +519,15 @@ class LifecycleTrainPEMS(StaticPEMS):
             unknown_nodes_num=unknown_nodes_num,
         )
         total_nas, total_fs = _resolve_async_event_node_counts(self.full_num_nodes)
-        self.local_nas_count = max(1, total_nas // self.async_num_events)
-        self.local_fs_count = max(1, total_fs // self.async_num_events)
-        self.local_vs_count = max(1, round(LIFECYCLE_LOCAL_VS_RATIO * self.num_nodes))
+        profile = _resolve_lifecycle_training_profile(self.lifecycle_training_strategy)
+        base_nas_count = max(1, total_nas // self.async_num_events)
+        base_fs_count = max(1, total_fs // self.async_num_events)
+        self.local_nas_count = max(1, int(np.ceil(base_nas_count * profile["event_scale"])))
+        self.local_fs_count = max(1, int(np.ceil(base_fs_count * profile["event_scale"])))
+        if profile["vs_ratio"] <= 0:
+            self.local_vs_count = 0
+        else:
+            self.local_vs_count = max(1, int(round(profile["vs_ratio"] * self.num_nodes)))
 
     def set_epoch(self, epoch):
         self.current_epoch = int(epoch)

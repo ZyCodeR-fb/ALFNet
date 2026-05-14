@@ -75,6 +75,13 @@ def initialize_args():
         action="store_true",
         help="keep the legacy extra random masking on the raw observation channel during lifecycle-aware train/val",
     )
+    parser.add_argument(
+        "--lifecycle_training_strategy",
+        type=str,
+        default="v1",
+        choices=["v1", "round1", "round2"],
+        help="lifecycle-aware training recipe: v1=original heavy local lifecycle simulation, round1=lighter events + keep legacy random mask, round2=round1 without local VS nodes",
+    )
 
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--no_scale", action="store_true")
@@ -130,6 +137,8 @@ def initialize_args():
     if args.train_for_async_lifecycle or lifecycle_feature_enabled:
         if args.input_features != "v" or args.target_features != "v":
             raise ValueError("lifecycle-aware training/input augmentation currently supports input_features=target_features=v only")
+    if args.train_for_async_lifecycle and args.lifecycle_training_strategy in {"round1", "round2"}:
+        args.lifecycle_keep_random_mask = True
     args.c_out = len(args.target_features)
     args.raw_enc_in = len(args.input_features)
     args.enc_in = args.raw_enc_in

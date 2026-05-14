@@ -48,11 +48,19 @@ def build_exp_id(args):
         exp_prefix = args.model
 
     use_lifecycle_train_prefix = args.train_for_async_lifecycle or (
-        args.test_for_async_lifecycle and (args.lifecycle_role_features or args.lifecycle_history_age_feature)
+        args.test_for_async_lifecycle
+        and (
+            args.lifecycle_role_features
+            or args.lifecycle_history_age_feature
+            or args.lifecycle_training_strategy != "v1"
+            or args.lifecycle_keep_random_mask
+        )
     )
     if use_lifecycle_train_prefix:
+        strategy_prefix = "" if args.lifecycle_training_strategy == "v1" else f"strategy-{args.lifecycle_training_strategy}-"
         exp_prefix = (
             f"{exp_prefix}-lifecycle_train-"
+            f"{strategy_prefix}"
             f"sampling-{args.lifecycle_event_sampling}-"
             f"role-{int(args.lifecycle_role_features)}-"
             f"age-{int(args.lifecycle_history_age_feature)}-"

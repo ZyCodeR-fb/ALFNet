@@ -53,6 +53,7 @@ def data_provider(args, flag):
             lifecycle_seed=args.seed,
             async_num_events=args.async_num_events,
             lifecycle_event_sampling=args.lifecycle_event_sampling,
+            lifecycle_training_strategy=args.lifecycle_training_strategy,
             lifecycle_role_features=args.lifecycle_role_features,
             lifecycle_history_age_feature=args.lifecycle_history_age_feature,
         )
