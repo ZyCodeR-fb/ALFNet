@@ -7,23 +7,26 @@ import torch.nn.functional as F
 def _compute_weighted_train_loss(y_hat, y, y_omi, sample_role_weights, args):
     if sample_role_weights is None:
         return None
-    valid_mask = (~y_omi).to(dtype=y_hat.dtype)
+    valid_mask_bool = (~y_omi) & torch.isfinite(y_hat) & torch.isfinite(y)
+    valid_mask = valid_mask_bool.to(dtype=y_hat.dtype)
     weights = sample_role_weights.to(device=y_hat.device, dtype=y_hat.dtype) * valid_mask
     if weights.sum() <= 0:
         return None
-    diff = y_hat - y
+    safe_y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+    safe_diff = torch.where(valid_mask_bool, y_hat - safe_y, torch.zeros_like(y_hat))
     if args.loss == "mse":
-        per_element = diff.pow(2)
+        per_element = safe_diff.pow(2)
         return (per_element * weights).sum() / weights.sum()
     if args.loss == "rmse":
-        per_element = diff.pow(2)
+        per_element = safe_diff.pow(2)
         mse = (per_element * weights).sum() / weights.sum()
         return torch.sqrt(mse)
     if args.loss == "mae":
-        per_element = diff.abs()
+        per_element = safe_diff.abs()
         return (per_element * weights).sum() / weights.sum()
     if args.loss == "huber":
-        per_element = F.huber_loss(y_hat, y, reduction="none")
+        per_element = F.huber_loss(y_hat, safe_y, reduction="none")
+        per_element = torch.where(valid_mask_bool, per_element, torch.zeros_like(per_element))
         return (per_element * weights).sum() / weights.sum()
     return None
 
@@ -115,6 +118,10 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                 weighted_loss = _compute_weighted_train_loss(y_hat, y, y_omi, sample_role_weights, args)
                 if weighted_loss is not None:
                     optimize_loss = weighted_loss
+            if not torch.isfinite(optimize_loss):
+                if grad_enabled:
+                    optimizer.zero_grad()
+                continue
             if grad_enabled:
                 optimize_loss.backward()
                 optimizer.step()

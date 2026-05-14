@@ -2,6 +2,7 @@
 Training functions and helpers
 """
 
+import math
 import torch
 import pickle
 import torch
@@ -74,6 +75,9 @@ def better_metric(metric_a, metric_b):
 def save_checkpoint(model, optimizer, args, epoch, mode, now_metric, total_y, metric_name):
     checkpoint_path = args.best_checkpoint_path + f"best_{mode}_checkpoint.pth"
     best_metric = getattr(args, f"best_{mode}_metric")
+    if not math.isfinite(now_metric):
+        print(f"-> Skip saving best {metric_name}: metric is non-finite ({now_metric})")
+        return
     try:  # try-except here because checkpoint fname could be too long
         if better_metric(now_metric, best_metric) or epoch == 0:
             setattr(args, f"best_{mode}_metric", now_metric)
@@ -188,6 +192,11 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
         print(f"-> Saved best val model checkpoint at epoch {args.best_val_metric_epoch}!")
     print(f"-> Saved best test model checkpoint at epoch {args.best_test_metric_epoch}!")
     print(f"   - Saved to: {args.best_checkpoint_path}")
+
+    if "val" in args.stop_based and args.best_val_metric_epoch < 0:
+        raise RuntimeError("Training finished without any finite validation checkpoint. The training loss likely became NaN or Inf.")
+    if "train" in args.stop_based and args.best_train_metric_epoch < 0:
+        raise RuntimeError("Training finished without any finite training checkpoint. The training loss likely became NaN or Inf.")
 
     print("-> save predictions and metrics...")
     with open(args.best_prediction_path + "best_total_y.pkl", "wb") as f:
