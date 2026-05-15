@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from .async_calibrators import ADCSDModule, Calibration, CorrCoefLoss, FRPlusModule, SimpleOutputAdapter
+from utils.model_output import unpack_model_output
 
 ASYNC_TTC_QUEUE_LEN = 6
 ASYNC_TTC_NAS_LOSS_WEIGHT = 0.8
@@ -78,9 +79,7 @@ def _prepare_st_ttc_input(x_enc_filled, observed_mask, FRP):
 
 
 def _forward_model(model, adj, model_input, enc_t_mark, pos_mark, dec_t_mark):
-    y_hat = model(adj, model_input, enc_t_mark, pos_mark, None, dec_t_mark, 0)
-    if isinstance(y_hat, tuple):
-        y_hat = y_hat[-1]
+    y_hat, _ = unpack_model_output(model(adj, model_input, enc_t_mark, pos_mark, None, dec_t_mark, 0))
     return y_hat
 
 

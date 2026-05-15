@@ -1,1 +1,1 @@
-from model import MoGERNN
+from model import MoGERNN, STFiT, STGCN, STGODE

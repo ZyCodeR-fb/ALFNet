@@ -1,13 +1,37 @@
 import argparse
+from copy import deepcopy
+
+from omegaconf import OmegaConf
 
 
-def initialize_args():
-    parser = argparse.ArgumentParser(description="Arguments")
+CONFIG_SECTION_KEYS = {
+    "runtime",
+    "dataset",
+    "training",
+    "lifecycle",
+    "async_test",
+    "save",
+    "logging",
+    "wandb_cfg",
+}
 
+
+def _add_arguments(parser):
+    parser.add_argument("-c", "--config", type=str, default=None, help="single-file experiment yaml")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default=None,
+        choices=["train", "test_async", "test_changed", "inference"],
+        help="optional high-level run mode override",
+    )
     parser.add_argument("--project_name", type=str, default="MoGERNN")
 
     # Model
     parser.add_argument("--model", type=str, default="MoGERNN")
+    parser.add_argument("--model_variant", type=str, default="default", help="optional model-family-specific variant name")
+    parser.add_argument("--model_recipe", type=str, default="base", help="optional model-family-specific training recipe name")
+    parser.add_argument("--model_config_path", default=None, help="optional external model yaml/config path used to build family-specific hyperparameters")
     parser.add_argument("--d_model", type=int, default=64)
     parser.add_argument("--k_hop", type=int, default=1, help="k_hop for graph")
     parser.add_argument("--activation", type=str, default="gelu")
@@ -93,12 +117,12 @@ def initialize_args():
     parser.add_argument("--num_workers", type=int, default=2)
 
     # task
-    parser.add_argument("--input_len", type=int, required=True)
-    parser.add_argument("--pred_len", type=int, required=True)
+    parser.add_argument("--input_len", type=int, default=None)
+    parser.add_argument("--pred_len", type=int, default=None)
     parser.add_argument("--look_back", type=int, default=0)
     parser.add_argument("--slide_step", type=int, default=1, help="step for sliding window")
-    parser.add_argument("--target_features", type=str, required=True, choices=["q", "o", "v", "qv", "qov"], help="q is flow, v is speed, o is occupancy")
-    parser.add_argument("--input_features", type=str, required=True, choices=["q", "o", "v", "qv", "qov"], help="q is flow, v is speed, o is occupancy")
+    parser.add_argument("--target_features", type=str, default=None, choices=["q", "o", "v", "qv", "qov"], help="q is flow, v is speed, o is occupancy")
+    parser.add_argument("--input_features", type=str, default=None, choices=["q", "o", "v", "qv", "qov"], help="q is flow, v is speed, o is occupancy")
     parser.add_argument("--train_ratio", type=float, default=0.6, help="train ratio")  # 当前 loader 实际写死 70/30，val 与 train 同段
     parser.add_argument("--valid_ratio", type=float, default=0.2, help="validation ratio")
 
@@ -117,7 +141,7 @@ def initialize_args():
 
     parser.add_argument("--save_model", action="store_true", help="save model not model state dict")
     # dataset
-    parser.add_argument("--unknown_nodes_path", type=str, help="path for unobserved sensors id in the train data")
+    parser.add_argument("--unknown_nodes_path", type=str, default="", help="path for unobserved sensors id in the train data")
     parser.add_argument("--unknown_nodes_list", type=str, default="", help="unobserved sensors in the train data")
     parser.add_argument("--unknown_nodes_num", type=int, default=0, help="number of unobserved sensors  in the training data")
     parser.add_argument("--ori_unknown_nodes_list", type=str, default="", help="unobserved sensors in the original data")
@@ -128,13 +152,106 @@ def initialize_args():
         choices=["METRLA", "PEMSBAY", "METRLA-dynamic", "PEMSBAY-dynamic"],
         help="dynamic denotes the scenario where the scensor is changing",
     )
-    parser.add_argument("--data_path", type=str)
+    parser.add_argument("--data_path", type=str, default=None)
     parser.add_argument("--freq", type=str, default="min")
 
-    args = parser.parse_args()
-    args.unknown_nodes_list = [int(x) for x in args.unknown_nodes_list.split(",") if x]
-    args.ori_unknown_nodes_list = [int(x) for x in args.ori_unknown_nodes_list.split(",") if x]
+def _collect_known_dests(parser):
+    return {action.dest for action in parser._actions if action.dest != "help"}
+
+
+def _merge_family_sections(raw_config):
+    family_cfg = deepcopy(raw_config.get("family", {})) if isinstance(raw_config.get("family"), dict) else {}
+    for key in ("model_cfg", "recipe_cfg", "assets"):
+        value = raw_config.get(key)
+        if isinstance(value, dict):
+            merged_key = key.replace("_cfg", "")
+            current = family_cfg.get(merged_key, {})
+            if not isinstance(current, dict):
+                current = {}
+            current = deepcopy(current)
+            current.update(value)
+            family_cfg[merged_key] = current
+    return family_cfg
+
+
+def _flatten_config_defaults(raw_config, known_dests):
+    defaults = {}
+    for key, value in raw_config.items():
+        if key in {"family", "model_cfg", "recipe_cfg", "assets"}:
+            continue
+        if key in known_dests:
+            defaults[key] = value
+            continue
+        if isinstance(value, dict) and key in CONFIG_SECTION_KEYS:
+            for sub_key, sub_value in value.items():
+                if sub_key in known_dests:
+                    defaults[sub_key] = sub_value
+    return defaults
+
+
+def _load_config_payload(config_path, parser):
+    if not config_path:
+        return {}, {}
+    raw_cfg = OmegaConf.load(config_path)
+    raw_cfg = OmegaConf.to_container(raw_cfg, resolve=True)
+    if raw_cfg is None:
+        raw_cfg = {}
+    if not isinstance(raw_cfg, dict):
+        raise ValueError("config yaml must resolve to a mapping/dict")
+    defaults = _flatten_config_defaults(raw_cfg, _collect_known_dests(parser))
+    defaults["config"] = config_path
+    return defaults, _merge_family_sections(raw_cfg)
+
+
+def _normalize_node_lists(args):
+    if isinstance(args.unknown_nodes_list, str):
+        args.unknown_nodes_list = [int(x) for x in args.unknown_nodes_list.split(",") if x]
+    else:
+        args.unknown_nodes_list = [int(x) for x in args.unknown_nodes_list]
+    if isinstance(args.ori_unknown_nodes_list, str):
+        args.ori_unknown_nodes_list = [int(x) for x in args.ori_unknown_nodes_list.split(",") if x]
+    else:
+        args.ori_unknown_nodes_list = [int(x) for x in args.ori_unknown_nodes_list]
     args.unknown_nodes_list = [x for x in args.unknown_nodes_list if x not in args.ori_unknown_nodes_list]
+
+
+def _apply_mode_overrides(args):
+    if args.mode is None:
+        return
+    args.test_for_changed = False
+    args.test_for_async_lifecycle = False
+    args.inference_only = False
+    if args.mode == "test_async":
+        args.test_for_async_lifecycle = True
+    elif args.mode == "test_changed":
+        args.test_for_changed = True
+    elif args.mode == "inference":
+        args.inference_only = True
+
+
+def _validate_required_fields(args):
+    required = ["input_len", "pred_len", "input_features", "target_features", "data_path"]
+    missing = [name for name in required if getattr(args, name) in {None, ""}]
+    if missing:
+        raise ValueError(f"Missing required arguments after config merge: {', '.join(missing)}")
+
+
+def initialize_args():
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("-c", "--config", type=str, default=None)
+    pre_args, remaining = pre_parser.parse_known_args()
+
+    parser = argparse.ArgumentParser(description="Arguments")
+    _add_arguments(parser)
+    config_defaults, family_cfg = _load_config_payload(pre_args.config, parser)
+    if config_defaults:
+        parser.set_defaults(**config_defaults)
+    args = parser.parse_args(remaining if pre_args.config else None)
+    args.model_family_cfg = family_cfg
+    _normalize_node_lists(args)
+    _apply_mode_overrides(args)
+    _validate_required_fields(args)
+
     assert args.input_features in args.target_features, "input_features should be in target_features"
     lifecycle_feature_enabled = args.lifecycle_role_features or args.lifecycle_history_age_feature
     if lifecycle_feature_enabled and not (args.train_for_async_lifecycle or args.test_for_async_lifecycle):

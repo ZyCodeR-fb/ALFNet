@@ -25,7 +25,12 @@ def _format_float_token(value):
 def _build_train_signature(args):
     expert_bits = f"{int(args.mean_expert)}{int(args.weight_expert)}{int(args.max_expert)}{int(args.min_expert)}{int(args.diffusion_expert)}"
     warm_start_path = os.path.normpath(args.train_init_checkpoint_path) if args.train_init_checkpoint_path else ""
+    model_config_path = os.path.normpath(args.model_config_path) if args.model_config_path else ""
     signature_payload = {
+        "model_variant": args.model_variant,
+        "model_recipe": args.model_recipe,
+        "model_config_path": model_config_path,
+        "model_family_cfg": getattr(args, "model_family_cfg", {}),
         "d_model": args.d_model,
         "k_hop": args.k_hop,
         "e_layers": args.e_layers,
@@ -90,6 +95,11 @@ def build_exp_id(args):
         exp_prefix = f"{args.model}-{model_wo}"
     else:
         exp_prefix = args.model
+
+    if args.model_variant != "default":
+        exp_prefix = f"{exp_prefix}-var-{args.model_variant}"
+    if args.model_recipe != "base":
+        exp_prefix = f"{exp_prefix}-recipe-{args.model_recipe}"
 
     use_lifecycle_train_prefix = args.train_for_async_lifecycle or (
         args.test_for_async_lifecycle

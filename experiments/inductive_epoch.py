@@ -2,6 +2,7 @@ import torch
 from utils.logtool import detail_metrics
 import random
 import torch.nn.functional as F
+from utils.model_output import sum_aux_losses, unpack_model_output
 
 
 def _compute_weighted_train_loss(y_hat, y, y_omi, sample_role_weights, args):
@@ -48,6 +49,8 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
         model.train()
         model.zero_grad()
         grad_enabled = True
+        if hasattr(model, "on_train_epoch_start"):
+            model.on_train_epoch_start(epoch)
     else:
         model.eval()
         grad_enabled = False
@@ -108,16 +111,23 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                     x_enc[..., batch_mask, :args.raw_enc_in] = 0
             if mode != "train":
                 x_dec = None
-            y_hat = model(adj, x_enc, enc_t_mark, pos_mark, x_dec, dec_t_mark, epoch)
-            y_omi = torch.isnan(y)
+            model_output = model(adj, x_enc, enc_t_mark, pos_mark, x_dec, dec_t_mark, epoch)
+            y_hat, output_meta = unpack_model_output(model_output)
+            y_for_loss = output_meta.get("target", y)
+            if sample_role_weights is not None and sample_role_weights.shape != y_hat.shape:
+                sample_role_weights = None
+            y_omi = torch.isnan(y_for_loss)
             if (~y_omi).sum() == 0:
                 continue
-            loss = criterions[args.loss](y_hat[~y_omi], y[~y_omi])
+            loss = criterions[args.loss](y_hat[~y_omi], y_for_loss[~y_omi])
             optimize_loss = loss
             if grad_enabled:
-                weighted_loss = _compute_weighted_train_loss(y_hat, y, y_omi, sample_role_weights, args)
+                weighted_loss = _compute_weighted_train_loss(y_hat, y_for_loss, y_omi, sample_role_weights, args)
                 if weighted_loss is not None:
                     optimize_loss = weighted_loss
+                aux_loss = sum_aux_losses(output_meta.get("aux_losses"), device=y_hat.device)
+                if aux_loss is not None:
+                    optimize_loss = optimize_loss + aux_loss
             if not torch.isfinite(optimize_loss):
                 if grad_enabled:
                     optimizer.zero_grad()
@@ -126,7 +136,7 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                 optimize_loss.backward()
                 optimizer.step()
                 optimizer.zero_grad()
-            y = y.detach().cpu()
+            y = y_for_loss.detach().cpu()
             y_hat = y_hat.detach().cpu()
             y_omi = y_omi.detach().cpu()
             inverse_y = inverse_transform(y)
