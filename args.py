@@ -48,6 +48,7 @@ def initialize_args():
     parser.add_argument("--test_for_changed", action="store_true", help="test pretrained model in changed sensor network")
     parser.add_argument("--test_for_async_lifecycle", action="store_true", help="test pretrained model in async lifecycle sensor network")
     parser.add_argument("--train_for_async_lifecycle", action="store_true", help="train model with lifecycle-aware window simulation")
+    parser.add_argument("--train_init_checkpoint_path", default=None, help="optional checkpoint path used to initialize model weights before training/fine-tuning")
     parser.add_argument("--read_only", action="store_true", help="read only")
     parser.add_argument("--inference_only", action="store_true", help="inference only")
     parser.add_argument("--pretrained_model_path", default=None, help="path to pretrained model")
@@ -82,6 +83,10 @@ def initialize_args():
         choices=["v1", "round1", "round2", "round3", "round3_event_only", "round3_weight_only"],
         help="lifecycle-aware training recipe: v1=original heavy local lifecycle simulation, round1=lighter events + keep legacy random mask, round2=round1 without local VS nodes, round3=combined event+weight tuning, round3_event_only=only the event-profile changes from round3, round3_weight_only=only the optimizer weighting changes on top of round2-style events",
     )
+    parser.add_argument("--lifecycle_aas_loss_weight", type=float, default=None, help="optional training loss weight override for AAS nodes in lifecycle-aware training")
+    parser.add_argument("--lifecycle_nas_loss_weight", type=float, default=None, help="optional training loss weight override for NAS nodes in lifecycle-aware training")
+    parser.add_argument("--lifecycle_vs_loss_weight", type=float, default=None, help="optional training loss weight override for VS nodes in lifecycle-aware training")
+    parser.add_argument("--lifecycle_fs_loss_weight", type=float, default=None, help="optional training loss weight override for FS nodes in lifecycle-aware training")
 
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--no_scale", action="store_true")
@@ -139,6 +144,23 @@ def initialize_args():
             raise ValueError("lifecycle-aware training/input augmentation currently supports input_features=target_features=v only")
     if args.train_for_async_lifecycle and args.lifecycle_training_strategy in {"round1", "round2", "round3", "round3_event_only", "round3_weight_only"}:
         args.lifecycle_keep_random_mask = True
+    strategy_weight_defaults = {
+        "v1": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
+        "round1": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
+        "round2": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
+        "round3": {"aas": 1.0, "nas": 1.0, "vs": 1.35, "fs": 1.60},
+        "round3_event_only": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
+        "round3_weight_only": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.60},
+    }
+    default_weights = strategy_weight_defaults[args.lifecycle_training_strategy]
+    if args.lifecycle_aas_loss_weight is None:
+        args.lifecycle_aas_loss_weight = default_weights["aas"]
+    if args.lifecycle_nas_loss_weight is None:
+        args.lifecycle_nas_loss_weight = default_weights["nas"]
+    if args.lifecycle_vs_loss_weight is None:
+        args.lifecycle_vs_loss_weight = default_weights["vs"]
+    if args.lifecycle_fs_loss_weight is None:
+        args.lifecycle_fs_loss_weight = default_weights["fs"]
     args.c_out = len(args.target_features)
     args.raw_enc_in = len(args.input_features)
     args.enc_in = args.raw_enc_in

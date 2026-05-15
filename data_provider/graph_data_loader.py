@@ -561,6 +561,10 @@ class LifecycleTrainPEMS(StaticPEMS):
         lifecycle_training_strategy: str = "v1",
         lifecycle_role_features: bool = False,
         lifecycle_history_age_feature: bool = False,
+        lifecycle_aas_loss_weight: float = 1.0,
+        lifecycle_nas_loss_weight: float = 1.0,
+        lifecycle_vs_loss_weight: float = 1.0,
+        lifecycle_fs_loss_weight: float = 1.0,
     ):
         if flag not in {"train", "val", "test"}:
             raise ValueError("LifecycleTrainPEMS only supports train/val/test splits")
@@ -570,6 +574,12 @@ class LifecycleTrainPEMS(StaticPEMS):
         self.lifecycle_training_strategy = lifecycle_training_strategy
         self.lifecycle_role_features = lifecycle_role_features
         self.lifecycle_history_age_feature = lifecycle_history_age_feature
+        self.lifecycle_role_loss_weights = {
+            ROLE_AAS: float(lifecycle_aas_loss_weight),
+            ROLE_NAS: float(lifecycle_nas_loss_weight),
+            ROLE_VS: float(lifecycle_vs_loss_weight),
+            ROLE_FS: float(lifecycle_fs_loss_weight),
+        }
         self.current_epoch = 0
         if self.async_num_events <= 0:
             raise ValueError("async_num_events should be positive for lifecycle-aware training")
@@ -677,7 +687,7 @@ class LifecycleTrainPEMS(StaticPEMS):
             nas_nodes,
             vs_nodes,
             fs_nodes,
-            self.lifecycle_profile["role_loss_weights"],
+            self.lifecycle_role_loss_weights,
         )
         x_t_mark, y_t_mark = np.zeros_like(seq_x), np.zeros_like(seq_y)
         if self.time_mark is not None:

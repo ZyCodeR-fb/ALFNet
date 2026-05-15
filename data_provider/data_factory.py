@@ -56,6 +56,10 @@ def data_provider(args, flag):
             lifecycle_training_strategy=args.lifecycle_training_strategy,
             lifecycle_role_features=args.lifecycle_role_features,
             lifecycle_history_age_feature=args.lifecycle_history_age_feature,
+            lifecycle_aas_loss_weight=args.lifecycle_aas_loss_weight,
+            lifecycle_nas_loss_weight=args.lifecycle_nas_loss_weight,
+            lifecycle_vs_loss_weight=args.lifecycle_vs_loss_weight,
+            lifecycle_fs_loss_weight=args.lifecycle_fs_loss_weight,
         )
 
     data_set = Dataset(**dataset_kwargs)

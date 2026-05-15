@@ -24,6 +24,7 @@ def _format_float_token(value):
 
 def _build_train_signature(args):
     expert_bits = f"{int(args.mean_expert)}{int(args.weight_expert)}{int(args.max_expert)}{int(args.min_expert)}{int(args.diffusion_expert)}"
+    warm_start_path = os.path.normpath(args.train_init_checkpoint_path) if args.train_init_checkpoint_path else ""
     signature_payload = {
         "d_model": args.d_model,
         "k_hop": args.k_hop,
@@ -42,12 +43,17 @@ def _build_train_signature(args):
         "stop_based": args.stop_based,
         "num_used_experts": args.num_used_experts,
         "expert_bits": expert_bits,
+        "train_init_checkpoint_path": warm_start_path,
+        "lifecycle_aas_loss_weight": args.lifecycle_aas_loss_weight,
+        "lifecycle_nas_loss_weight": args.lifecycle_nas_loss_weight,
+        "lifecycle_vs_loss_weight": args.lifecycle_vs_loss_weight,
+        "lifecycle_fs_loss_weight": args.lifecycle_fs_loss_weight,
     }
     signature_hash = hashlib.md5(json.dumps(signature_payload, sort_keys=True).encode("utf-8")).hexdigest()[:8]
     readable = (
         f"dm{args.d_model}-kh{args.k_hop}-"
         f"lr{_format_float_token(args.lr)}-wd{_format_float_token(args.weight_decay)}-"
-        f"bs{args.batch_size}"
+        f"bs{args.batch_size}-ws{int(bool(args.train_init_checkpoint_path))}"
     )
     return f"{readable}-cfg{signature_hash}"
 
@@ -138,6 +144,32 @@ def _validate_checkpoint_compatibility(checkpoint, args):
         )
 
 
+def _validate_checkpoint_shape_compatibility(checkpoint, args):
+    checkpoint_config = checkpoint.get("config")
+    if checkpoint_config is None:
+        return
+    expected_pairs = {
+        "enc_in": args.enc_in,
+        "raw_enc_in": args.raw_enc_in,
+        "c_out": args.c_out,
+    }
+    mismatches = []
+    for key, expected in expected_pairs.items():
+        if key in checkpoint_config and checkpoint_config[key] != expected:
+            mismatches.append(f"{key}: checkpoint={checkpoint_config[key]} current={expected}")
+    if mismatches:
+        mismatch_text = "; ".join(mismatches)
+        raise ValueError(f"Checkpoint model dimensions are incompatible with the current training configuration. {mismatch_text}")
+
+
+def _load_model_state(model, loaded, args, validator):
+    if isinstance(loaded, dict) and "state_dict" in loaded:
+        validator(loaded, args)
+        model.load_state_dict(loaded["state_dict"])
+        return model
+    return loaded
+
+
 def load_pretrained_model(model, args):
     checkpoint_dir = args.best_checkpoint_path + args.exp_id + "/"
     if args.pretrained_model_path is None:
@@ -147,16 +179,21 @@ def load_pretrained_model(model, args):
         except FileNotFoundError:
             checkpoint = torch.load(checkpoint_dir + "best_train_checkpoint.pth", weights_only=False)
             print(f"├── load pretrained from {checkpoint_dir}")
-        _validate_checkpoint_compatibility(checkpoint, args)
-        model.load_state_dict(checkpoint["state_dict"])
+        model = _load_model_state(model, checkpoint, args, _validate_checkpoint_compatibility)
         return model, checkpoint_dir
 
     loaded = torch.load(args.pretrained_model_path, weights_only=False)
-    if isinstance(loaded, dict) and "state_dict" in loaded:
-        _validate_checkpoint_compatibility(loaded, args)
-        model.load_state_dict(loaded["state_dict"])
-        return model, checkpoint_dir
-    return loaded, checkpoint_dir
+    model = _load_model_state(model, loaded, args, _validate_checkpoint_compatibility)
+    return model, checkpoint_dir
+
+
+def initialize_training_from_checkpoint(model, args):
+    if args.train_init_checkpoint_path is None:
+        return model
+    loaded = torch.load(args.train_init_checkpoint_path, weights_only=False)
+    model = _load_model_state(model, loaded, args, _validate_checkpoint_shape_compatibility)
+    print(f"-> Initialize training weights from {args.train_init_checkpoint_path}")
+    return model
 
 
 if __name__ == "__main__":
@@ -174,6 +211,8 @@ if __name__ == "__main__":
     loss = loss_candidate[args.loss]
     criterions = dict(zip([args.loss, "split_phy_loss"], [loss, SlitPhyLoss(features=args.target_features)]))
     model = model_dict[args.model].Model(args).float()
+    if not (args.test_for_async_lifecycle or args.test_for_changed or args.inference_only):
+        model = initialize_training_from_checkpoint(model, args)
     model_parameters = filter(lambda p: p.requires_grad, model.parameters())
     args.num_params = sum([np.prod(p.size()) for p in model_parameters])
     if args.verbose:
