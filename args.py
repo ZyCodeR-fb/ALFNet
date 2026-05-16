@@ -236,18 +236,7 @@ def _validate_required_fields(args):
         raise ValueError(f"Missing required arguments after config merge: {', '.join(missing)}")
 
 
-def initialize_args():
-    pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("-c", "--config", type=str, default=None)
-    pre_args, remaining = pre_parser.parse_known_args()
-
-    parser = argparse.ArgumentParser(description="Arguments")
-    _add_arguments(parser)
-    config_defaults, family_cfg = _load_config_payload(pre_args.config, parser)
-    if config_defaults:
-        parser.set_defaults(**config_defaults)
-    args = parser.parse_args(remaining if pre_args.config else None)
-    args.model_family_cfg = family_cfg
+def finalize_args(args):
     _normalize_node_lists(args)
     _apply_mode_overrides(args)
     _validate_required_fields(args)
@@ -291,3 +280,37 @@ def initialize_args():
     )
     args.num_experts = 1 * (args.mean_expert) + 1 * (args.weight_expert) + 1 * (args.max_expert) + 1 * (args.min_expert) + 1 * (args.diffusion_expert)
     return args
+
+
+def load_args_from_config(config_path, overrides=None):
+    parser = argparse.ArgumentParser(description="Arguments")
+    _add_arguments(parser)
+    config_defaults, family_cfg = _load_config_payload(config_path, parser)
+    if config_defaults:
+        parser.set_defaults(**config_defaults)
+    override_list = []
+    for key, value in (overrides or {}).items():
+        flag = f"--{key}"
+        if isinstance(value, bool):
+            if value:
+                override_list.append(flag)
+        elif value is not None:
+            override_list.extend([flag, str(value)])
+    args = parser.parse_args(override_list if override_list else [])
+    args.model_family_cfg = family_cfg
+    return finalize_args(args)
+
+
+def initialize_args():
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("-c", "--config", type=str, default=None)
+    pre_args, remaining = pre_parser.parse_known_args()
+
+    parser = argparse.ArgumentParser(description="Arguments")
+    _add_arguments(parser)
+    config_defaults, family_cfg = _load_config_payload(pre_args.config, parser)
+    if config_defaults:
+        parser.set_defaults(**config_defaults)
+    args = parser.parse_args(remaining if pre_args.config else None)
+    args.model_family_cfg = family_cfg
+    return finalize_args(args)

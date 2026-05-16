@@ -206,6 +206,10 @@ def initialize_training_from_checkpoint(model, args):
     return model
 
 
+def should_skip_model_checkpoint_load(args):
+    return args.model == "RoleFusion" and args.model_recipe == "hard_route"
+
+
 if __name__ == "__main__":
     args = initialize_args()
     args.exp_id = build_exp_id(args)
@@ -233,7 +237,10 @@ if __name__ == "__main__":
     print_train(args)
 
     if args.test_for_async_lifecycle:
-        model, args.best_checkpoint_path = load_pretrained_model(model, args)
+        if should_skip_model_checkpoint_load(args):
+            print("-> RoleFusion hard_route uses expert checkpoints from family config; skip self-checkpoint loading")
+        else:
+            model, args.best_checkpoint_path = load_pretrained_model(model, args)
         args.slide_step = 12
         test_loader = data_provider(args, "test")
         print(f"├── async test data dim: {len(test_loader.dataset)}")  # type: ignore
