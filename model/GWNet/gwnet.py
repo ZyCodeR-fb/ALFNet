@@ -69,6 +69,7 @@ class GWNET(BaseModel):
 
     def forward(self, input, label=None):  # (b, t, n, f)
         input = input.transpose(1,3)
+        support_device = input.device
         in_len = input.size(3)
         if in_len < self.receptive_field:
             x = nn.functional.pad(input,(self.receptive_field - in_len, 0, 0, 0))
@@ -76,11 +77,12 @@ class GWNET(BaseModel):
             x = input
 
         current_node_ids = getattr(self, "current_node_ids", None)
+        supports = [support.to(support_device) for support in self.supports]
         if current_node_ids is not None:
             node_index = torch.as_tensor(current_node_ids, device=input.device, dtype=torch.long)
-            support_bank = [support.index_select(0, node_index).index_select(1, node_index) for support in self.supports]
+            support_bank = [support.index_select(0, node_index).index_select(1, node_index) for support in supports]
         else:
-            support_bank = self.supports
+            support_bank = supports
 
         if self.adp_adj:
             adp = F.softmax(F.relu(torch.mm(self.nodevec1, self.nodevec2)), dim=1)
@@ -121,6 +123,7 @@ class GWNET(BaseModel):
 
     def extract_feature(self, input):
         input = input.transpose(1,3)
+        support_device = input.device
         in_len = input.size(3)
         if in_len < self.receptive_field:
             x = nn.functional.pad(input,(self.receptive_field - in_len, 0, 0, 0))
@@ -128,11 +131,12 @@ class GWNET(BaseModel):
             x = input
 
         current_node_ids = getattr(self, "current_node_ids", None)
+        supports = [support.to(support_device) for support in self.supports]
         if current_node_ids is not None:
             node_index = torch.as_tensor(current_node_ids, device=input.device, dtype=torch.long)
-            support_bank = [support.index_select(0, node_index).index_select(1, node_index) for support in self.supports]
+            support_bank = [support.index_select(0, node_index).index_select(1, node_index) for support in supports]
         else:
-            support_bank = self.supports
+            support_bank = supports
 
         adp = F.softmax(F.relu(torch.mm(self.nodevec1, self.nodevec2)), dim=1)
         if current_node_ids is not None:
