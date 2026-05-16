@@ -50,7 +50,7 @@ class Model(nn.Module):
             raise ValueError("RoleFusion requires lifecycle_role_features=true and lifecycle_history_age_feature=true")
         self.cfg = getattr(configs, "model_family_cfg", {}) or {}
         self.recipe = configs.model_recipe
-        if self.recipe not in {"hard_route", "soft_fuse"}:
+        if self.recipe not in {"hard_route", "soft_fuse", "soft_fuse_v2"}:
             raise ValueError(f"Unsupported RoleFusion recipe: {self.recipe}")
         experts_cfg = self.cfg.get("experts", {})
         if "graph" not in experts_cfg or "patch" not in experts_cfg:
@@ -73,6 +73,10 @@ class Model(nn.Module):
         gate_hidden_dim = int(model_cfg.get("gate_hidden_dim", 32))
         self.lambda_prior = float(recipe_cfg.get("lambda_prior", 0.1))
         self.lambda_entropy = float(recipe_cfg.get("lambda_entropy", 0.01))
+        self.lambda_residual = float(recipe_cfg.get("lambda_residual", 0.01))
+        self.lambda_smooth = float(recipe_cfg.get("lambda_smooth", 0.01))
+        self.residual_scale = float(recipe_cfg.get("residual_scale", 0.5))
+        self.gate_temperature = float(recipe_cfg.get("gate_temperature", 1.0))
         role_graph_prior = recipe_cfg.get(
             "role_graph_prior",
             {"aas": 0.3, "nas": 0.7, "vs": 0.8, "fs": 0.2},
@@ -102,9 +106,40 @@ class Model(nn.Module):
                 nn.ReLU(),
                 nn.Linear(gate_hidden_dim, 1),
             )
+            self.graph_confidence_head = nn.Identity()
+            self.patch_confidence_head = nn.Identity()
+            self.residual_head = nn.Identity()
+        elif self.recipe == "soft_fuse_v2":
+            self.state_encoder = nn.Sequential(
+                nn.Linear(ROLE_COUNT + 2, state_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(state_hidden_dim, state_dim),
+                nn.ReLU(),
+            )
+            confidence_input_dim = state_dim + 3
+            self.graph_confidence_head = nn.Sequential(
+                nn.Linear(confidence_input_dim, gate_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(gate_hidden_dim, 1),
+            )
+            self.patch_confidence_head = nn.Sequential(
+                nn.Linear(confidence_input_dim, gate_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(gate_hidden_dim, 1),
+            )
+            residual_input_dim = state_dim + 6
+            self.residual_head = nn.Sequential(
+                nn.Linear(residual_input_dim, gate_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(gate_hidden_dim, 1),
+            )
+            self.fusion_gate = nn.Identity()
         else:
             self.state_encoder = nn.Identity()
             self.fusion_gate = nn.Identity()
+            self.graph_confidence_head = nn.Identity()
+            self.patch_confidence_head = nn.Identity()
+            self.residual_head = nn.Identity()
 
         self._freeze_experts()
 
@@ -168,11 +203,55 @@ class Model(nn.Module):
             "rolefusion_entropy": self.lambda_entropy * entropy,
         }
 
+    def _soft_fuse_v2(self, x_enc, y_graph, y_patch):
+        node_state, _ = self._build_gate_features(x_enc)
+        state_t = node_state.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
+        last_obs = x_enc[:, -1, :, : self.output_dim].unsqueeze(1).expand_as(y_graph)
+
+        graph_prev = torch.cat([last_obs[:, :1], y_graph[:, :-1]], dim=1)
+        patch_prev = torch.cat([last_obs[:, :1], y_patch[:, :-1]], dim=1)
+        graph_delta_last = torch.abs(y_graph - last_obs)
+        patch_delta_last = torch.abs(y_patch - last_obs)
+        graph_step_change = torch.abs(y_graph - graph_prev)
+        patch_step_change = torch.abs(y_patch - patch_prev)
+
+        graph_conf_input = torch.cat([state_t, y_graph, graph_delta_last, graph_step_change], dim=-1)
+        patch_conf_input = torch.cat([state_t, y_patch, patch_delta_last, patch_step_change], dim=-1)
+        graph_logit = self.graph_confidence_head(graph_conf_input)
+        patch_logit = self.patch_confidence_head(patch_conf_input)
+        conf_logits = torch.cat([graph_logit, patch_logit], dim=-1) / max(self.gate_temperature, 1e-6)
+        alpha = torch.softmax(conf_logits, dim=-1)[..., :1]
+
+        fused = alpha * y_graph + (1.0 - alpha) * y_patch
+        disagreement = torch.abs(y_graph - y_patch)
+        residual_input = torch.cat([state_t, alpha, y_graph, y_patch, disagreement, graph_logit, patch_logit], dim=-1)
+        residual = self.residual_scale * torch.tanh(self.residual_head(residual_input))
+        pred = fused + residual
+
+        eps = 1e-6
+        entropy = -(alpha * torch.log(alpha + eps) + (1.0 - alpha) * torch.log(1.0 - alpha + eps))
+        disagreement_weight = disagreement.detach() / (disagreement.detach().mean() + eps)
+        weighted_entropy = (disagreement_weight * entropy).mean()
+        residual_reg = residual.pow(2).mean()
+        if alpha.size(1) > 1:
+            smooth_reg = torch.abs(alpha[:, 1:] - alpha[:, :-1]).mean()
+        else:
+            smooth_reg = alpha.new_tensor(0.0)
+
+        return pred, {
+            "rolefusion_v2_entropy": self.lambda_entropy * weighted_entropy,
+            "rolefusion_v2_residual": self.lambda_residual * residual_reg,
+            "rolefusion_v2_smooth": self.lambda_smooth * smooth_reg,
+        }
+
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, x_dec=None, dec_t_mark=None, epoch=0):
         y_graph, y_patch = self._run_experts(adj, x_enc, x_t_mark, pos_mark, x_dec, dec_t_mark, epoch)
         if self.recipe == "hard_route":
             _, last_role, _, _ = self._extract_role_and_age(x_enc)
             pred = self._hard_route(y_graph, y_patch, last_role)
             return {"pred": pred}
-        pred, aux_losses = self._soft_fuse(x_enc, y_graph, y_patch)
+        if self.recipe == "soft_fuse_v2":
+            pred, aux_losses = self._soft_fuse_v2(x_enc, y_graph, y_patch)
+        else:
+            pred, aux_losses = self._soft_fuse(x_enc, y_graph, y_patch)
         return {"pred": pred, "aux_losses": aux_losses}
