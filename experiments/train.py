@@ -13,6 +13,28 @@ from .test import read_out
 from .inductive_epoch import shared_step
 
 
+def _resolve_return_checkpoint_path(args):
+    candidates = []
+    if "val" in args.stop_based:
+        candidates.extend(
+            [
+                args.best_checkpoint_path + "best_val_checkpoint.pth",
+                args.best_checkpoint_path + "best_train_checkpoint.pth",
+            ]
+        )
+    else:
+        candidates.extend(
+            [
+                args.best_checkpoint_path + "best_train_checkpoint.pth",
+                args.best_checkpoint_path + "best_val_checkpoint.pth",
+            ]
+        )
+    for check_point in candidates:
+        if os.path.exists(check_point):
+            return check_point
+    raise FileNotFoundError(f"No checkpoint found in {args.best_checkpoint_path}")
+
+
 def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch, train=True):
     metrics = {}
     total_y = {mode: {} for mode in data_loaders.keys()}
@@ -119,7 +141,8 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
         with open(prediction_path + "best_total_y.pkl", "rb") as f:
             args.best_total_y = pickle.load(f)
         read_out(data_loaders, check_point_path, criterions, args.exp_id, args)
-        check_point = check_point_path + "best_train_checkpoint.pth"
+        args.best_checkpoint_path = check_point_path
+        check_point = _resolve_return_checkpoint_path(args)
         best_model_dict = torch.load(check_point, weights_only=False)
         best_epoch = best_model_dict["epoch"]
         print(f"Returning best train model from epoch {best_epoch}")
@@ -213,10 +236,7 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
         ) = data_loaders["test"].dataset.get_know_unknow_nodes()
         pickle.dump(args.best_total_y, f)
     read_out(data_loaders, args.best_checkpoint_path, criterions, args.exp_id, args)
-    if "val" in args.stop_based:
-        check_point = args.best_checkpoint_path + "best_val_checkpoint.pth"
-    else:
-        check_point = args.best_checkpoint_path + "best_train_checkpoint.pth"
+    check_point = _resolve_return_checkpoint_path(args)
     best_model_dict = torch.load(check_point, weights_only=False)
     epoch = best_model_dict["epoch"]
     best_epoch = best_model_dict["epoch"]

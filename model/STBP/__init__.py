@@ -8,6 +8,12 @@ from model.family_utils import build_stbp_cfg
 from .stbp import STBP_Model
 
 
+class _SilentLogger:
+
+    def info(self, *args, **kwargs):
+        return None
+
+
 class Model(nn.Module):
 
     def __init__(self, configs):
@@ -25,7 +31,7 @@ class Model(nn.Module):
             base_node_size=self.full_num_nodes,
             year=int(self.cfg["year"]),
             model=self.cfg["model"],
-            logger=SimpleNamespace(info=lambda *args, **kwargs: None),
+            logger=_SilentLogger(),
         )
         self.backbone = STBP_Model(self.model_args)
         self.register_buffer("full_adj", load_project_adjacency({"data_path": configs.data_path}), persistent=False)
