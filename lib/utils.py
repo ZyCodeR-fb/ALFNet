@@ -20,6 +20,11 @@ def load_project_adjacency(cfg):
     return torch.tensor(np.asarray(raw["adj"]), dtype=torch.float32)
 
 
+def load_project_positions(cfg):
+    raw = _load_raw_payload(cfg["data_path"])
+    return np.asarray(raw["pos_stamp"], dtype=np.float32)
+
+
 def infer_project_num_nodes(cfg):
     raw = _load_raw_payload(cfg["data_path"])
     return int(raw["data"].shape[1])
