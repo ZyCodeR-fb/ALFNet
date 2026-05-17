@@ -75,6 +75,7 @@ class Model(nn.Module):
         self.lambda_entropy = float(recipe_cfg.get("lambda_entropy", 0.01))
         self.lambda_residual = float(recipe_cfg.get("lambda_residual", 0.01))
         self.lambda_smooth = float(recipe_cfg.get("lambda_smooth", 0.01))
+        self.lambda_decisive = float(recipe_cfg.get("lambda_decisive", 0.02))
         self.residual_scale = float(recipe_cfg.get("residual_scale", 0.5))
         self.gate_temperature = float(recipe_cfg.get("gate_temperature", 1.0))
         role_graph_prior = recipe_cfg.get(
@@ -108,10 +109,12 @@ class Model(nn.Module):
             )
             self.graph_confidence_head = nn.Identity()
             self.patch_confidence_head = nn.Identity()
+            self.state_bias_head = nn.Identity()
             self.residual_head = nn.Identity()
         elif self.recipe == "soft_fuse_v2":
+            state_input_dim = ROLE_COUNT + 5
             self.state_encoder = nn.Sequential(
-                nn.Linear(ROLE_COUNT + 2, state_hidden_dim),
+                nn.Linear(state_input_dim, state_hidden_dim),
                 nn.ReLU(),
                 nn.Linear(state_hidden_dim, state_dim),
                 nn.ReLU(),
@@ -127,6 +130,11 @@ class Model(nn.Module):
                 nn.ReLU(),
                 nn.Linear(gate_hidden_dim, 1),
             )
+            self.state_bias_head = nn.Sequential(
+                nn.Linear(state_dim, gate_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(gate_hidden_dim, 1),
+            )
             residual_input_dim = state_dim + 6
             self.residual_head = nn.Sequential(
                 nn.Linear(residual_input_dim, gate_hidden_dim),
@@ -139,6 +147,7 @@ class Model(nn.Module):
             self.fusion_gate = nn.Identity()
             self.graph_confidence_head = nn.Identity()
             self.patch_confidence_head = nn.Identity()
+            self.state_bias_head = nn.Identity()
             self.residual_head = nn.Identity()
 
         self._freeze_experts()
@@ -170,6 +179,32 @@ class Model(nn.Module):
         _, last_role, last_age, visibility_ratio = self._extract_role_and_age(x_enc)
         state_input = torch.cat([last_role, last_age, visibility_ratio], dim=-1)
         return self.state_encoder(state_input), last_role
+
+    def _build_confidence_state(self, x_enc):
+        role_seq, last_role, last_age, visibility_ratio = self._extract_role_and_age(x_enc)
+        raw_seq = x_enc[..., : self.output_dim]
+        visible_mask = (role_seq[..., ROLE_AAS] + role_seq[..., ROLE_NAS]) > 0.5
+        visible_mask_f = visible_mask.unsqueeze(-1).to(dtype=raw_seq.dtype)
+        visible_count = visible_mask_f.sum(dim=1, keepdim=False).clamp_min(1.0)
+        visible_mean = (raw_seq * visible_mask_f).sum(dim=1, keepdim=False) / visible_count
+        centered = (raw_seq - visible_mean.unsqueeze(1)) * visible_mask_f
+        visible_std = torch.sqrt((centered.pow(2).sum(dim=1, keepdim=False) / visible_count).clamp_min(1e-6))
+
+        last_visible = torch.zeros_like(raw_seq[:, 0])
+        prev_visible = torch.zeros_like(raw_seq[:, 0])
+        found_last = torch.zeros_like(raw_seq[:, 0], dtype=torch.bool)
+        found_prev = torch.zeros_like(raw_seq[:, 0], dtype=torch.bool)
+        for t in range(raw_seq.size(1) - 1, -1, -1):
+            current_mask = visible_mask[:, t].unsqueeze(-1)
+            take_last = (~found_last) & current_mask
+            last_visible = torch.where(take_last, raw_seq[:, t], last_visible)
+            found_last = found_last | current_mask
+            take_prev = found_last & (~found_prev) & current_mask & (~take_last)
+            prev_visible = torch.where(take_prev, raw_seq[:, t], prev_visible)
+            found_prev = found_prev | take_prev
+        recent_trend = torch.where(found_prev, last_visible - prev_visible, torch.zeros_like(last_visible))
+        state_input = torch.cat([last_role, last_age, visibility_ratio, last_visible, recent_trend, visible_std], dim=-1)
+        return self.state_encoder(state_input), last_role, last_visible
 
     def _run_experts(self, adj, x_enc, x_t_mark, pos_mark, x_dec, dec_t_mark, epoch):
         raw_x_enc = x_enc[..., :self.raw_enc_in]
@@ -204,9 +239,9 @@ class Model(nn.Module):
         }
 
     def _soft_fuse_v2(self, x_enc, y_graph, y_patch):
-        node_state, _ = self._build_gate_features(x_enc)
+        node_state, _, last_visible = self._build_confidence_state(x_enc)
         state_t = node_state.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
-        last_obs = x_enc[:, -1, :, : self.output_dim].unsqueeze(1).expand_as(y_graph)
+        last_obs = last_visible.unsqueeze(1).expand_as(y_graph)
 
         graph_prev = torch.cat([last_obs[:, :1], y_graph[:, :-1]], dim=1)
         patch_prev = torch.cat([last_obs[:, :1], y_patch[:, :-1]], dim=1)
@@ -219,7 +254,8 @@ class Model(nn.Module):
         patch_conf_input = torch.cat([state_t, y_patch, patch_delta_last, patch_step_change], dim=-1)
         graph_logit = self.graph_confidence_head(graph_conf_input)
         patch_logit = self.patch_confidence_head(patch_conf_input)
-        conf_logits = torch.cat([graph_logit, patch_logit], dim=-1) / max(self.gate_temperature, 1e-6)
+        state_bias = self.state_bias_head(state_t)
+        conf_logits = torch.cat([graph_logit + state_bias, patch_logit - state_bias], dim=-1) / max(self.gate_temperature, 1e-6)
         alpha = torch.softmax(conf_logits, dim=-1)[..., :1]
 
         fused = alpha * y_graph + (1.0 - alpha) * y_patch
@@ -237,11 +273,13 @@ class Model(nn.Module):
             smooth_reg = torch.abs(alpha[:, 1:] - alpha[:, :-1]).mean()
         else:
             smooth_reg = alpha.new_tensor(0.0)
+        decisive_reg = (disagreement_weight * (alpha * (1.0 - alpha))).mean()
 
         return pred, {
             "rolefusion_v2_entropy": self.lambda_entropy * weighted_entropy,
             "rolefusion_v2_residual": self.lambda_residual * residual_reg,
             "rolefusion_v2_smooth": self.lambda_smooth * smooth_reg,
+            "rolefusion_v2_decisive": self.lambda_decisive * decisive_reg,
         }
 
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, x_dec=None, dec_t_mark=None, epoch=0):
