@@ -55,6 +55,8 @@ class Model(nn.Module):
         experts_cfg = self.cfg.get("experts", {})
         if "graph" not in experts_cfg or "patch" not in experts_cfg:
             raise ValueError("RoleFusion family.experts must define both graph and patch experts")
+        self.graph_trainable_patterns = list(experts_cfg["graph"].get("trainable_param_patterns", []) or [])
+        self.patch_trainable_patterns = list(experts_cfg["patch"].get("trainable_param_patterns", []) or [])
 
         self.graph_expert, self.graph_args, self.graph_checkpoint_path = _load_expert_from_spec(experts_cfg["graph"], configs.device, "graph")
         self.patch_expert, self.patch_args, self.patch_checkpoint_path = _load_expert_from_spec(experts_cfg["patch"], configs.device, "patch")
@@ -150,17 +152,26 @@ class Model(nn.Module):
             self.state_bias_head = nn.Identity()
             self.residual_head = nn.Identity()
 
-        self._freeze_experts()
+        self._configure_expert_trainability()
 
-    def _freeze_experts(self):
-        for expert in (self.graph_expert, self.patch_expert):
+    def _set_expert_trainability(self, expert, patterns):
+        for name, param in expert.named_parameters():
+            param.requires_grad = False
+            if patterns and any(pattern in name for pattern in patterns):
+                param.requires_grad = True
+        expert.eval()
+
+    def _configure_expert_trainability(self):
+        for expert, patterns in (
+            (self.graph_expert, self.graph_trainable_patterns),
+            (self.patch_expert, self.patch_trainable_patterns),
+        ):
             expert.eval()
-            for param in expert.parameters():
-                param.requires_grad = False
+            self._set_expert_trainability(expert, patterns)
 
     def train(self, mode=True):
         super().train(mode)
-        self._freeze_experts()
+        self._configure_expert_trainability()
         return self
 
     def _extract_role_and_age(self, x_enc):
