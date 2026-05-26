@@ -406,6 +406,20 @@ class STBPResidualAdapter(nn.Module):
         hidden_channel = int(recipe_cfg.get("hidden_channel", max(192, configs.d_model * 3)))
         dropout = float(recipe_cfg.get("dropout", 0.0))
         self.residual_scale = float(recipe_cfg.get("residual_scale", 0.2))
+        role_residual_scale = recipe_cfg.get("role_residual_scale", {}) or {}
+        self.register_buffer(
+            "role_residual_scale",
+            torch.tensor(
+                [
+                    float(role_residual_scale.get("aas", self.residual_scale)),
+                    float(role_residual_scale.get("nas", self.residual_scale)),
+                    float(role_residual_scale.get("vs", self.residual_scale)),
+                    float(role_residual_scale.get("fs", self.residual_scale)),
+                ],
+                dtype=torch.float32,
+            ),
+            persistent=False,
+        )
         self.output_dim = configs.c_out
         self.pred_len = configs.pred_len
         self.model_args = SimpleNamespace(
@@ -422,7 +436,7 @@ class STBPResidualAdapter(nn.Module):
         )
         self.backbone = STBP_Model(self.model_args)
 
-    def forward(self, pred, adj, current_node_ids=None):
+    def forward(self, pred, adj, current_node_ids=None, last_role=None):
         if pred.size(-1) != 1:
             raise ValueError("STBPResidualAdapter currently supports single-channel target_features=v")
         N = adj.shape[0]
@@ -447,7 +461,11 @@ class STBPResidualAdapter(nn.Module):
         residual = self.backbone.fc(self.backbone.activation(x))
         residual = F.dropout(residual, p=self.backbone.dropout, training=self.backbone.training)
         residual = residual.reshape(pred.shape[0], pred.shape[2], self.pred_len).permute(0, 2, 1).unsqueeze(-1).contiguous()
-        return pred + self.residual_scale * residual
+        if last_role is None:
+            return pred + self.residual_scale * residual
+        scale = torch.sum(last_role * self.role_residual_scale.view(1, 1, 4).to(last_role.device), dim=-1, keepdim=True)
+        scale = scale.unsqueeze(1).expand_as(residual)
+        return pred + scale * residual
 
 
 class Model(nn.Module):
@@ -542,6 +560,11 @@ class Model(nn.Module):
             return comp_x, aux_losses
         return torch.cat([comp_x, extra_x], dim=-1), aux_losses
 
+    def _last_role(self, x_enc):
+        if x_enc.size(-1) < self.role_end:
+            return None
+        return x_enc[:, -1, :, self.role_start:self.role_end]
+
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, x_dec=None, dec_t_mark=None, epoch=0):
         x_enc, aux_losses = self._compensate_input(adj, x_enc)
         backbone_x = x_enc[..., : self.raw_enc_in]
@@ -554,7 +577,7 @@ class Model(nn.Module):
         pred, backbone_meta = unpack_model_output(backbone_output)
         if self.stbp_residual is not None:
             current_node_ids = self._resolve_current_node_ids(pred.shape[2])
-            pred = self.stbp_residual(pred, adj, current_node_ids=current_node_ids)
+            pred = self.stbp_residual(pred, adj, current_node_ids=current_node_ids, last_role=self._last_role(x_enc))
         if backbone_meta.get("aux_losses"):
             aux_losses.update(backbone_meta["aux_losses"])
         return {"pred": pred, "aux_losses": aux_losses}
