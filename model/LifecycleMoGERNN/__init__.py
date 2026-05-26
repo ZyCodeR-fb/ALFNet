@@ -546,7 +546,7 @@ class Model(nn.Module):
         x_enc, aux_losses = self._compensate_input(adj, x_enc)
         backbone_x = x_enc[..., : self.raw_enc_in]
         backbone_x_dec = None if x_dec is None else x_dec[..., : self.output_dim]
-        if self.freeze_backbone:
+        if self.freeze_backbone and not self.training:
             with torch.no_grad():
                 backbone_output = self.backbone(adj, backbone_x, x_t_mark, pos_mark, backbone_x_dec, dec_t_mark, epoch)
         else:
