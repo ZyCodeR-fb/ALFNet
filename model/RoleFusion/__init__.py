@@ -86,6 +86,22 @@ class Model(nn.Module):
         self.lambda_decisive = float(recipe_cfg.get("lambda_decisive", 0.02))
         self.lambda_oracle = float(recipe_cfg.get("lambda_oracle", 0.1))
         self.residual_scale = float(recipe_cfg.get("residual_scale", 0.5))
+        role_residual_scale = recipe_cfg.get(
+            "role_residual_scale",
+            {"aas": self.residual_scale, "nas": self.residual_scale, "vs": self.residual_scale, "fs": self.residual_scale},
+        )
+        self.register_buffer(
+            "role_residual_scale",
+            torch.tensor(
+                [
+                    float(role_residual_scale.get("aas", self.residual_scale)),
+                    float(role_residual_scale.get("nas", self.residual_scale)),
+                    float(role_residual_scale.get("vs", self.residual_scale)),
+                    float(role_residual_scale.get("fs", self.residual_scale)),
+                ],
+                dtype=torch.float32,
+            ),
+        )
         self.gate_temperature = float(recipe_cfg.get("gate_temperature", 1.0))
         role_graph_prior = recipe_cfg.get(
             "role_graph_prior",
@@ -333,7 +349,10 @@ class Model(nn.Module):
             residual_input = torch.cat([state_t, fused, y_graph, y_patch, torch.abs(y_graph - y_patch)], dim=-1)
             role_residuals = torch.stack([head(residual_input) for head in self.role_residual_heads], dim=-2)
             residual = torch.sum(role_residuals * role_weights.unsqueeze(-1), dim=-2)
-            fused = fused + self.residual_scale * torch.tanh(residual)
+            residual_scale = torch.sum(last_role * self.role_residual_scale.view(1, 1, ROLE_COUNT), dim=-1, keepdim=True)
+            residual_scale = residual_scale.unsqueeze(1).expand_as(residual)
+            residual = residual_scale * torch.tanh(residual)
+            fused = fused + residual
             aux_losses["rolefusion_role_residual"] = self.lambda_residual * residual.pow(2).mean()
         return fused, aux_losses, {
             "alpha": alpha,
