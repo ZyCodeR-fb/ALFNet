@@ -128,6 +128,19 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                 aux_loss = sum_aux_losses(output_meta.get("aux_losses"), device=y_hat.device)
                 if aux_loss is not None:
                     optimize_loss = optimize_loss + aux_loss
+                oracle_routing = output_meta.get("oracle_routing")
+                if oracle_routing:
+                    alpha = oracle_routing["alpha"].clamp(1e-6, 1.0 - 1e-6)
+                    y_graph = oracle_routing["y_graph"]
+                    y_patch = oracle_routing["y_patch"]
+                    valid_mask = (~y_omi) & torch.isfinite(y_graph) & torch.isfinite(y_patch) & torch.isfinite(y_for_loss)
+                    if valid_mask.any():
+                        graph_err = torch.abs(y_graph - y_for_loss)
+                        patch_err = torch.abs(y_patch - y_for_loss)
+                        oracle_target = (graph_err <= patch_err).to(dtype=alpha.dtype)
+                        oracle_bce = F.binary_cross_entropy(alpha, oracle_target, reduction="none")
+                        oracle_loss = (oracle_bce * valid_mask.to(dtype=oracle_bce.dtype)).sum() / valid_mask.to(dtype=oracle_bce.dtype).sum()
+                        optimize_loss = optimize_loss + float(oracle_routing.get("lambda_oracle", 0.1)) * oracle_loss
             if not torch.isfinite(optimize_loss):
                 if grad_enabled:
                     optimizer.zero_grad()

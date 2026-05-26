@@ -11,6 +11,7 @@ model_dict = {
     'STID': STID,
     'PatchSTG': PatchSTG,
     'RoleFusion': RoleFusion,
+    'LifecycleMoGERNN': LifecycleMoGERNN,
     'SLPF': SLPF,
     'STBP': STBP,
 }

@@ -1,4 +1,5 @@
 import importlib
+import glob
 import os
 
 import torch
@@ -25,6 +26,11 @@ def _load_expert_from_spec(spec, device, expert_name):
     model_name = spec["model"]
     config_path = spec["config_path"]
     checkpoint_path = spec["checkpoint_path"]
+    if any(token in checkpoint_path for token in ["*", "?", "["]):
+        matches = glob.glob(checkpoint_path)
+        if not matches:
+            raise FileNotFoundError(f"RoleFusion {expert_name} expert checkpoint glob has no matches: {checkpoint_path}")
+        checkpoint_path = max(matches, key=os.path.getmtime)
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"RoleFusion {expert_name} expert config not found: {config_path}")
     if not os.path.exists(checkpoint_path):
@@ -50,7 +56,7 @@ class Model(nn.Module):
             raise ValueError("RoleFusion requires lifecycle_role_features=true and lifecycle_history_age_feature=true")
         self.cfg = getattr(configs, "model_family_cfg", {}) or {}
         self.recipe = configs.model_recipe
-        if self.recipe not in {"hard_route", "soft_fuse", "soft_fuse_v2"}:
+        if self.recipe not in {"hard_route", "soft_fuse", "soft_fuse_v2", "oracle_gate", "role_mmoe"}:
             raise ValueError(f"Unsupported RoleFusion recipe: {self.recipe}")
         experts_cfg = self.cfg.get("experts", {})
         if "graph" not in experts_cfg or "patch" not in experts_cfg:
@@ -78,6 +84,7 @@ class Model(nn.Module):
         self.lambda_residual = float(recipe_cfg.get("lambda_residual", 0.01))
         self.lambda_smooth = float(recipe_cfg.get("lambda_smooth", 0.01))
         self.lambda_decisive = float(recipe_cfg.get("lambda_decisive", 0.02))
+        self.lambda_oracle = float(recipe_cfg.get("lambda_oracle", 0.1))
         self.residual_scale = float(recipe_cfg.get("residual_scale", 0.5))
         self.gate_temperature = float(recipe_cfg.get("gate_temperature", 1.0))
         role_graph_prior = recipe_cfg.get(
@@ -97,7 +104,7 @@ class Model(nn.Module):
             ),
         )
 
-        if self.recipe == "soft_fuse":
+        if self.recipe in {"soft_fuse", "oracle_gate", "role_mmoe"}:
             self.state_encoder = nn.Sequential(
                 nn.Linear(ROLE_COUNT + 2, state_hidden_dim),
                 nn.ReLU(),
@@ -113,6 +120,34 @@ class Model(nn.Module):
             self.patch_confidence_head = nn.Identity()
             self.state_bias_head = nn.Identity()
             self.residual_head = nn.Identity()
+            if self.recipe in {"oracle_gate", "role_mmoe"}:
+                gate_input_dim = state_dim + 3 * self.output_dim
+                self.role_fusion_gates = nn.ModuleList(
+                    [
+                        nn.Sequential(
+                            nn.Linear(gate_input_dim, gate_hidden_dim),
+                            nn.ReLU(),
+                            nn.Linear(gate_hidden_dim, 1),
+                        )
+                        for _ in range(ROLE_COUNT)
+                    ]
+                )
+            else:
+                self.role_fusion_gates = nn.ModuleList()
+            if self.recipe == "role_mmoe":
+                residual_input_dim = state_dim + 4 * self.output_dim
+                self.role_residual_heads = nn.ModuleList(
+                    [
+                        nn.Sequential(
+                            nn.Linear(residual_input_dim, gate_hidden_dim),
+                            nn.ReLU(),
+                            nn.Linear(gate_hidden_dim, self.output_dim),
+                        )
+                        for _ in range(ROLE_COUNT)
+                    ]
+                )
+            else:
+                self.role_residual_heads = nn.ModuleList()
         elif self.recipe == "soft_fuse_v2":
             state_input_dim = ROLE_COUNT + 5
             self.state_encoder = nn.Sequential(
@@ -144,6 +179,8 @@ class Model(nn.Module):
                 nn.Linear(gate_hidden_dim, 1),
             )
             self.fusion_gate = nn.Identity()
+            self.role_fusion_gates = nn.ModuleList()
+            self.role_residual_heads = nn.ModuleList()
         else:
             self.state_encoder = nn.Identity()
             self.fusion_gate = nn.Identity()
@@ -151,6 +188,8 @@ class Model(nn.Module):
             self.patch_confidence_head = nn.Identity()
             self.state_bias_head = nn.Identity()
             self.residual_head = nn.Identity()
+            self.role_fusion_gates = nn.ModuleList()
+            self.role_residual_heads = nn.ModuleList()
 
         self._configure_expert_trainability()
 
@@ -249,6 +288,37 @@ class Model(nn.Module):
             "rolefusion_entropy": self.lambda_entropy * entropy,
         }
 
+    def _role_gate(self, x_enc, y_graph, y_patch, with_residual=False):
+        node_state, last_role = self._build_gate_features(x_enc)
+        state_t = node_state.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
+        gate_input = torch.cat([state_t, y_graph, y_patch, torch.abs(y_graph - y_patch)], dim=-1)
+        role_logits = torch.cat([gate(gate_input) for gate in self.role_fusion_gates], dim=-1)
+        role_weights = last_role.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
+        alpha = torch.sigmoid(torch.sum(role_logits * role_weights, dim=-1, keepdim=True))
+        fused = alpha * y_graph + (1.0 - alpha) * y_patch
+
+        prior = torch.sum(last_role * self.role_graph_prior.view(1, 1, ROLE_COUNT), dim=-1, keepdim=True)
+        prior = prior.unsqueeze(1).expand_as(alpha)
+        prior_loss = torch.mean((alpha - prior) ** 2)
+        eps = 1e-6
+        entropy = -(alpha * torch.log(alpha + eps) + (1.0 - alpha) * torch.log(1.0 - alpha + eps)).mean()
+        aux_losses = {
+            "rolefusion_prior": self.lambda_prior * prior_loss,
+            "rolefusion_entropy": self.lambda_entropy * entropy,
+        }
+        if with_residual:
+            residual_input = torch.cat([state_t, fused, y_graph, y_patch, torch.abs(y_graph - y_patch)], dim=-1)
+            role_residuals = torch.stack([head(residual_input) for head in self.role_residual_heads], dim=-2)
+            residual = torch.sum(role_residuals * role_weights.unsqueeze(-1), dim=-2)
+            fused = fused + self.residual_scale * torch.tanh(residual)
+            aux_losses["rolefusion_role_residual"] = self.lambda_residual * residual.pow(2).mean()
+        return fused, aux_losses, {
+            "alpha": alpha,
+            "y_graph": y_graph.detach(),
+            "y_patch": y_patch.detach(),
+            "lambda_oracle": self.lambda_oracle,
+        }
+
     def _soft_fuse_v2(self, x_enc, y_graph, y_patch):
         node_state, _, last_visible = self._build_confidence_state(x_enc)
         state_t = node_state.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
@@ -301,6 +371,12 @@ class Model(nn.Module):
             return {"pred": pred}
         if self.recipe == "soft_fuse_v2":
             pred, aux_losses = self._soft_fuse_v2(x_enc, y_graph, y_patch)
+        elif self.recipe == "oracle_gate":
+            pred, aux_losses, oracle_routing = self._role_gate(x_enc, y_graph, y_patch, with_residual=False)
+            return {"pred": pred, "aux_losses": aux_losses, "oracle_routing": oracle_routing}
+        elif self.recipe == "role_mmoe":
+            pred, aux_losses, oracle_routing = self._role_gate(x_enc, y_graph, y_patch, with_residual=True)
+            return {"pred": pred, "aux_losses": aux_losses, "oracle_routing": oracle_routing}
         else:
             pred, aux_losses = self._soft_fuse(x_enc, y_graph, y_patch)
         return {"pred": pred, "aux_losses": aux_losses}
