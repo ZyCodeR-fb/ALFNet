@@ -103,6 +103,22 @@ class Model(nn.Module):
                 dtype=torch.float32,
             ),
         )
+        role_graph_alpha_floor = recipe_cfg.get(
+            "role_graph_alpha_floor",
+            {"aas": 0.0, "nas": 0.0, "vs": 0.0, "fs": 0.0},
+        )
+        self.register_buffer(
+            "role_graph_alpha_floor",
+            torch.tensor(
+                [
+                    float(role_graph_alpha_floor.get("aas", 0.0)),
+                    float(role_graph_alpha_floor.get("nas", 0.0)),
+                    float(role_graph_alpha_floor.get("vs", 0.0)),
+                    float(role_graph_alpha_floor.get("fs", 0.0)),
+                ],
+                dtype=torch.float32,
+            ),
+        )
 
         if self.recipe in {"soft_fuse", "oracle_gate", "role_mmoe"}:
             self.state_encoder = nn.Sequential(
@@ -271,11 +287,17 @@ class Model(nn.Module):
         graph_mask = ((role_ids == ROLE_VS) | (role_ids == ROLE_NAS)).unsqueeze(1).unsqueeze(-1)
         return torch.where(graph_mask, y_graph, y_patch)
 
+    def _apply_alpha_floor(self, alpha, last_role):
+        floor = torch.sum(last_role * self.role_graph_alpha_floor.view(1, 1, ROLE_COUNT), dim=-1, keepdim=True)
+        floor = floor.unsqueeze(1).expand_as(alpha)
+        return floor + (1.0 - floor) * alpha
+
     def _soft_fuse(self, x_enc, y_graph, y_patch):
         node_state, last_role = self._build_gate_features(x_enc)
         state_t = node_state.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
         gate_input = torch.cat([state_t, y_graph, y_patch, torch.abs(y_graph - y_patch)], dim=-1)
         alpha = torch.sigmoid(self.fusion_gate(gate_input))
+        alpha = self._apply_alpha_floor(alpha, last_role)
         fused = alpha * y_graph + (1.0 - alpha) * y_patch
 
         prior = torch.sum(last_role * self.role_graph_prior.view(1, 1, ROLE_COUNT), dim=-1, keepdim=True)
@@ -295,6 +317,7 @@ class Model(nn.Module):
         role_logits = torch.cat([gate(gate_input) for gate in self.role_fusion_gates], dim=-1)
         role_weights = last_role.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
         alpha = torch.sigmoid(torch.sum(role_logits * role_weights, dim=-1, keepdim=True))
+        alpha = self._apply_alpha_floor(alpha, last_role)
         fused = alpha * y_graph + (1.0 - alpha) * y_patch
 
         prior = torch.sum(last_role * self.role_graph_prior.view(1, 1, ROLE_COUNT), dim=-1, keepdim=True)
