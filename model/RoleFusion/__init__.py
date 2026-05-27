@@ -56,7 +56,7 @@ class Model(nn.Module):
             raise ValueError("RoleFusion requires lifecycle_role_features=true and lifecycle_history_age_feature=true")
         self.cfg = getattr(configs, "model_family_cfg", {}) or {}
         self.recipe = configs.model_recipe
-        if self.recipe not in {"hard_route", "soft_fuse", "soft_fuse_v2", "oracle_gate", "role_mmoe"}:
+        if self.recipe not in {"hard_route", "soft_fuse", "soft_fuse_v2", "oracle_gate", "role_mmoe", "testam_role_mmoe"}:
             raise ValueError(f"Unsupported RoleFusion recipe: {self.recipe}")
         experts_cfg = self.cfg.get("experts", {})
         if "graph" not in experts_cfg or "patch" not in experts_cfg:
@@ -85,6 +85,9 @@ class Model(nn.Module):
         self.lambda_smooth = float(recipe_cfg.get("lambda_smooth", 0.01))
         self.lambda_decisive = float(recipe_cfg.get("lambda_decisive", 0.02))
         self.lambda_oracle = float(recipe_cfg.get("lambda_oracle", 0.1))
+        self.lambda_testam = float(recipe_cfg.get("lambda_testam", 0.0))
+        self.testam_warmup_epoch = int(recipe_cfg.get("testam_warmup_epoch", 0))
+        self.testam_threshold = float(recipe_cfg.get("testam_threshold", 0.0))
         self.residual_scale = float(recipe_cfg.get("residual_scale", 0.5))
         role_residual_scale = recipe_cfg.get(
             "role_residual_scale",
@@ -136,7 +139,7 @@ class Model(nn.Module):
             ),
         )
 
-        if self.recipe in {"soft_fuse", "oracle_gate", "role_mmoe"}:
+        if self.recipe in {"soft_fuse", "oracle_gate", "role_mmoe", "testam_role_mmoe"}:
             self.state_encoder = nn.Sequential(
                 nn.Linear(ROLE_COUNT + 2, state_hidden_dim),
                 nn.ReLU(),
@@ -152,7 +155,7 @@ class Model(nn.Module):
             self.patch_confidence_head = nn.Identity()
             self.state_bias_head = nn.Identity()
             self.residual_head = nn.Identity()
-            if self.recipe in {"oracle_gate", "role_mmoe"}:
+            if self.recipe in {"oracle_gate", "role_mmoe", "testam_role_mmoe"}:
                 gate_input_dim = state_dim + 3 * self.output_dim
                 self.role_fusion_gates = nn.ModuleList(
                     [
@@ -166,7 +169,7 @@ class Model(nn.Module):
                 )
             else:
                 self.role_fusion_gates = nn.ModuleList()
-            if self.recipe == "role_mmoe":
+            if self.recipe in {"role_mmoe", "testam_role_mmoe"}:
                 residual_input_dim = state_dim + 4 * self.output_dim
                 self.role_residual_heads = nn.ModuleList(
                     [
@@ -354,12 +357,21 @@ class Model(nn.Module):
             residual = residual_scale * torch.tanh(residual)
             fused = fused + residual
             aux_losses["rolefusion_role_residual"] = self.lambda_residual * residual.pow(2).mean()
-        return fused, aux_losses, {
+        routing_meta = {
             "alpha": alpha,
             "y_graph": y_graph.detach(),
             "y_patch": y_patch.detach(),
             "lambda_oracle": self.lambda_oracle,
         }
+        if self.lambda_testam > 0 or self.recipe == "testam_role_mmoe":
+            routing_meta["testam"] = {
+                "gate": torch.cat([alpha, 1.0 - alpha], dim=-1),
+                "expert_preds": torch.stack([y_graph.detach(), y_patch.detach()], dim=-1),
+                "lambda_testam": self.lambda_testam,
+                "warmup_epoch": self.testam_warmup_epoch,
+                "threshold": self.testam_threshold,
+            }
+        return fused, aux_losses, routing_meta
 
     def _soft_fuse_v2(self, x_enc, y_graph, y_patch):
         node_state, _, last_visible = self._build_confidence_state(x_enc)
@@ -416,9 +428,12 @@ class Model(nn.Module):
         elif self.recipe == "oracle_gate":
             pred, aux_losses, oracle_routing = self._role_gate(x_enc, y_graph, y_patch, with_residual=False)
             return {"pred": pred, "aux_losses": aux_losses, "oracle_routing": oracle_routing}
-        elif self.recipe == "role_mmoe":
-            pred, aux_losses, oracle_routing = self._role_gate(x_enc, y_graph, y_patch, with_residual=True)
-            return {"pred": pred, "aux_losses": aux_losses, "oracle_routing": oracle_routing}
+        elif self.recipe in {"role_mmoe", "testam_role_mmoe"}:
+            pred, aux_losses, routing_meta = self._role_gate(x_enc, y_graph, y_patch, with_residual=True)
+            output = {"pred": pred, "aux_losses": aux_losses, "oracle_routing": routing_meta}
+            if "testam" in routing_meta:
+                output["testam_routing"] = routing_meta["testam"]
+            return output
         else:
             pred, aux_losses = self._soft_fuse(x_enc, y_graph, y_patch)
         return {"pred": pred, "aux_losses": aux_losses}

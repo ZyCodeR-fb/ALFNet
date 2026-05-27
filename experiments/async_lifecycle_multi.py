@@ -38,6 +38,15 @@ ASYNC_PETSA_GCM_VAR_WISE = True
 ASYNC_PETSA_RANK = 16
 ASYNC_PETSA_LOSS_ALPHA = 0.1
 
+AVAILABILITY_STATE_ORDER = [
+    "zero_history_virtual",
+    "new_sensor_early",
+    "new_sensor_late",
+    "failed_sensor_early",
+    "failed_sensor_late",
+    "stable_observed",
+]
+
 
 def _validate_async_args(args):
     if args.input_len != 12 or args.pred_len != 12 or args.slide_step != 12:
@@ -46,8 +55,6 @@ def _validate_async_args(args):
         raise ValueError("async_lifecycle currently supports commissioning_k in {6, 12, 24}")
     if args.test_for_changed:
         raise ValueError("test_for_changed and test_for_async_lifecycle should not be enabled together")
-    if args.enc_in != args.raw_enc_in and args.async_adaptor != "base":
-        raise ValueError("lifecycle input augmentation is currently only supported with async_adaptor=base")
 
 
 def _prepare_paths(args):
@@ -73,9 +80,24 @@ def _apply_frp(FRP, tensor):
     return yc.reshape(batch_size, channels, num_nodes, time_steps).permute(0, 3, 2, 1)
 
 
-def _prepare_st_ttc_input(x_enc_filled, observed_mask, FRP):
-    x_calibrated = _apply_frp(FRP, x_enc_filled)
-    return x_calibrated * observed_mask.to(dtype=x_calibrated.dtype)
+def _merge_raw_with_extra(raw_tensor, source_tensor, raw_enc_in):
+    if source_tensor.shape[-1] == raw_enc_in:
+        return raw_tensor
+    return torch.cat([raw_tensor, source_tensor[..., raw_enc_in:]], dim=-1)
+
+
+def _get_raw_enc_in(dataset, fallback):
+    if hasattr(dataset, "in_feas"):
+        return len(dataset.in_feas)
+    return fallback
+
+
+def _prepare_st_ttc_input(x_enc_filled, observed_mask, FRP, raw_enc_in):
+    raw_x = x_enc_filled[..., :raw_enc_in]
+    raw_observed_mask = observed_mask[..., :raw_enc_in]
+    x_calibrated = _apply_frp(FRP, raw_x)
+    raw_model_input = x_calibrated * raw_observed_mask.to(dtype=x_calibrated.dtype)
+    return _merge_raw_with_extra(raw_model_input, x_enc_filled, raw_enc_in)
 
 
 def _forward_model(model, adj, model_input, enc_t_mark, pos_mark, dec_t_mark):
@@ -159,6 +181,61 @@ def _mean_metric_dicts(metric_dicts):
         return None
     keys = metric_dicts[0].keys()
     return {key: float(np.mean([metric[key] for metric in metric_dicts])) for key in keys}
+
+
+def _append_state_buffer(state_buffers, state_name, pred, target):
+    if pred is None:
+        return
+    state_buffers[state_name]["pred"].append(pred)
+    state_buffers[state_name]["true"].append(target)
+
+
+def _summarize_state_buffers(state_buffers):
+    state_metrics = {}
+    for state_name, buffers in state_buffers.items():
+        pred = _concat_or_none(buffers["pred"])
+        target = _concat_or_none(buffers["true"])
+        state_metrics[state_name] = None if pred is None else _compute_metrics(pred, target)
+
+    valid_metrics = [metrics for metrics in state_metrics.values() if metrics is not None]
+    macro_metrics = _mean_metric_dicts(valid_metrics)
+    worst_state = None
+    if valid_metrics:
+        worst_name, worst_metrics = max(
+            ((state_name, metrics) for state_name, metrics in state_metrics.items() if metrics is not None),
+            key=lambda item: item[1]["MAPE"],
+        )
+        worst_state = {"name": worst_name, "metrics": worst_metrics}
+    return state_metrics, macro_metrics, worst_state
+
+
+def _summarize_event_age_curve(event_metrics):
+    curves = {role: {} for role in ["NAS", "FS", "AAS", "VS"]}
+    for event_result in event_metrics.values():
+        for role_name, role_result in event_result.items():
+            for window_metric in role_result["window_metrics"]:
+                offset = str(window_metric["window_offset"])
+                curves[role_name].setdefault(offset, []).append(
+                    {key: window_metric[key] for key in ["MAPE", "MAE", "RMSE"]}
+                )
+    return {
+        role_name: {
+            offset: _mean_metric_dicts(metrics)
+            for offset, metrics in sorted(offset_metrics.items(), key=lambda item: int(item[0]))
+        }
+        for role_name, offset_metrics in curves.items()
+    }
+
+
+def _compute_role_gap(summary_metrics):
+    valid = [metrics for metrics in summary_metrics.values() if metrics is not None]
+    if not valid:
+        return None
+    return {
+        "MAPE": max(metric["MAPE"] for metric in valid) - min(metric["MAPE"] for metric in valid),
+        "MAE": max(metric["MAE"] for metric in valid) - min(metric["MAE"] for metric in valid),
+        "RMSE": max(metric["RMSE"] for metric in valid) - min(metric["RMSE"] for metric in valid),
+    }
 
 
 def _to_builtin(obj):
@@ -416,7 +493,8 @@ def _predict_window(adaptor_state, model, adj, x_enc_filled, observed_mask, enc_
 
     if adaptor_name == "st_ttc":
         with torch.no_grad():
-            model_input = _prepare_st_ttc_input(x_enc_filled, observed_mask, module)
+            raw_enc_in = _get_raw_enc_in(dataset, x_enc_filled.shape[-1])
+            model_input = _prepare_st_ttc_input(x_enc_filled, observed_mask, module, raw_enc_in)
             y_hat = _forward_model(model, adj, model_input, enc_t_mark, pos_mark, dec_t_mark)
             final_pred = _inverse_transform_with_grad(dataset, y_hat)
         return {"final_pred": final_pred}
@@ -443,8 +521,10 @@ def _predict_window(adaptor_state, model, adj, x_enc_filled, observed_mask, enc_
 
     if adaptor_name == "petsa":
         with torch.no_grad():
-            model_input, _, _, _ = module.input_calibration((x_enc_filled, enc_t_mark, None, dec_t_mark))
-            model_input = model_input * observed_mask.to(dtype=model_input.dtype)
+            raw_enc_in = _get_raw_enc_in(dataset, x_enc_filled.shape[-1])
+            raw_input, _, _, _ = module.input_calibration((x_enc_filled[..., :raw_enc_in], enc_t_mark, None, dec_t_mark))
+            raw_input = raw_input * observed_mask[..., :raw_enc_in].to(dtype=raw_input.dtype)
+            model_input = _merge_raw_with_extra(raw_input, x_enc_filled, raw_enc_in)
             y_hat = _forward_model(model, adj, model_input, enc_t_mark, pos_mark, dec_t_mark)
             base_pred = _inverse_transform_with_grad(dataset, y_hat)
             final_pred = module.output_calibration(base_pred)
@@ -485,7 +565,8 @@ def _run_commissioning_update(adaptor_state, event, model, adj, x_enc_filled, ob
         x_o, observed_mask_o, y_o, enc_t_mark_o, dec_t_mark_o = adaptor_state["queue"].get()
         module.train()
         optimizer.zero_grad()
-        model_input = _prepare_st_ttc_input(x_o, observed_mask_o, module)
+        raw_enc_in = _get_raw_enc_in(dataset, x_o.shape[-1])
+        model_input = _prepare_st_ttc_input(x_o, observed_mask_o, module, raw_enc_in)
         pred_o = _forward_model(model, adj, model_input, enc_t_mark_o, pos_mark, dec_t_mark_o)
         pred_o = _inverse_transform_with_grad(dataset, pred_o)
         y_o = _inverse_transform_with_grad(dataset, y_o)
@@ -552,8 +633,10 @@ def _run_commissioning_update(adaptor_state, event, model, adj, x_enc_filled, ob
         module.train()
         for _ in range(ASYNC_PETSA_STEPS):
             optimizer.zero_grad()
-            model_input, _, _, _ = module.input_calibration((x_enc_filled, enc_t_mark, None, dec_t_mark))
-            model_input = model_input * observed_mask.to(dtype=model_input.dtype)
+            raw_enc_in = _get_raw_enc_in(dataset, x_enc_filled.shape[-1])
+            raw_input, _, _, _ = module.input_calibration((x_enc_filled[..., :raw_enc_in], enc_t_mark, None, dec_t_mark))
+            raw_input = raw_input * observed_mask[..., :raw_enc_in].to(dtype=raw_input.dtype)
+            model_input = _merge_raw_with_extra(raw_input, x_enc_filled, raw_enc_in)
             pred = _forward_model(model, adj, model_input, enc_t_mark, pos_mark, dec_t_mark)
             pred = _inverse_transform_with_grad(dataset, pred)
             pred = module.output_calibration(pred)
@@ -642,6 +725,10 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
             role: {"pred": [], "true": [], "window_metrics": []}
             for role in ["NAS", "FS", "AAS", "VS"]
         }
+    state_buffers = {
+        state_name: {"pred": [], "true": []}
+        for state_name in AVAILABILITY_STATE_ORDER
+    }
 
     print("-> Start async lifecycle inference...")
     for batch_ix, batch in enumerate(data_loader):
@@ -704,6 +791,23 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
                             **metrics,
                         }
                     )
+            evaluation_start, evaluation_end = event["evaluation_window_range"]
+            evaluation_len = max(1, evaluation_end - evaluation_start + 1)
+            early_horizon = max(1, min(6, evaluation_len // 4))
+            window_offset = batch_ix - evaluation_start
+            for role_name, nodes in roles.items():
+                pred_part, target_part = _slice_role_tensors(inverse_y_hat_cpu, inverse_y_cpu, nodes)
+                if pred_part is None:
+                    continue
+                if role_name == "VS":
+                    state_name = "zero_history_virtual"
+                elif role_name == "AAS":
+                    state_name = "stable_observed"
+                elif role_name == "NAS":
+                    state_name = "new_sensor_early" if window_offset < early_horizon else "new_sensor_late"
+                else:
+                    state_name = "failed_sensor_early" if window_offset < early_horizon else "failed_sensor_late"
+                _append_state_buffer(state_buffers, state_name, pred_part, target_part)
 
     event_metrics = {}
     summary_metrics = {role: [] for role in ["NAS", "FS", "AAS", "VS"]}
@@ -722,6 +826,9 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
                 summary_metrics[role_name].append(metrics)
 
     summary_metrics = {role: _mean_metric_dicts(metrics) for role, metrics in summary_metrics.items()}
+    state_metrics, state_macro_metrics, worst_state = _summarize_state_buffers(state_buffers)
+    event_age_curve = _summarize_event_age_curve(event_metrics)
+    role_gap = _compute_role_gap(summary_metrics)
     results = {
         "config": {
             "async_adaptor": args.async_adaptor,
@@ -740,6 +847,11 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
         "adaptor_has_output_calibration": adaptor_state["has_output_calibration"],
         "event_plan": _to_builtin(event_plan),
         "summary_metrics": summary_metrics,
+        "availability_state_metrics": state_metrics,
+        "availability_state_macro_metrics": state_macro_metrics,
+        "worst_availability_state": worst_state,
+        "event_age_curve": event_age_curve,
+        "role_gap": role_gap,
         "event_metrics": event_metrics,
         "initial_aas_nodes": bundle["initial_aas_nodes"],
         "initial_vs_nodes": bundle["initial_vs_nodes"],
@@ -765,6 +877,41 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
                 f"MAPE={metrics['MAPE']:.4f} | "
                 f"MAE={metrics['MAE']:.4f} | "
                 f"RMSE={metrics['RMSE']:.4f}"
+            )
+            handle.write(line + "\n")
+            print(line)
+        if state_macro_metrics is not None:
+            line = (
+                f"AvailabilityMacro: "
+                f"MAPE={state_macro_metrics['MAPE']:.4f} | "
+                f"MAE={state_macro_metrics['MAE']:.4f} | "
+                f"RMSE={state_macro_metrics['RMSE']:.4f}"
+            )
+            handle.write(line + "\n")
+            print(line)
+        for state_name in AVAILABILITY_STATE_ORDER:
+            metrics = state_metrics[state_name]
+            if metrics is None:
+                continue
+            line = (
+                f"{state_name}: "
+                f"MAPE={metrics['MAPE']:.4f} | "
+                f"MAE={metrics['MAE']:.4f} | "
+                f"RMSE={metrics['RMSE']:.4f}"
+            )
+            handle.write(line + "\n")
+            print(line)
+        if worst_state is not None:
+            metrics = worst_state["metrics"]
+            line = f"WorstAvailabilityState: {worst_state['name']} | MAPE={metrics['MAPE']:.4f}"
+            handle.write(line + "\n")
+            print(line)
+        if role_gap is not None:
+            line = (
+                f"RoleGap: "
+                f"MAPE={role_gap['MAPE']:.4f} | "
+                f"MAE={role_gap['MAE']:.4f} | "
+                f"RMSE={role_gap['RMSE']:.4f}"
             )
             handle.write(line + "\n")
             print(line)

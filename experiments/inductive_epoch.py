@@ -32,6 +32,48 @@ def _compute_weighted_train_loss(y_hat, y, y_omi, sample_role_weights, args):
     return None
 
 
+def _compute_testam_routing_loss(testam_routing, y_for_loss, y_omi, epoch):
+    # Adapted from references/TESTAM/engine.py::get_label with the same
+    # worst-avoidance + best-choice pseudo-label routing idea.
+    lambda_testam = float(testam_routing.get("lambda_testam", 0.0))
+    warmup_epoch = int(testam_routing.get("warmup_epoch", 0))
+    if lambda_testam <= 0 or epoch <= warmup_epoch:
+        return None
+
+    gate = testam_routing["gate"].clamp(1e-6, 1.0 - 1e-6)
+    expert_preds = testam_routing["expert_preds"]
+    if gate.dim() == y_for_loss.dim():
+        gate = gate.unsqueeze(-2)
+    if gate.size(-2) == 1 and y_for_loss.size(-1) != 1:
+        gate = gate.expand(*gate.shape[:-2], y_for_loss.size(-1), gate.size(-1))
+
+    valid_mask = (~y_omi) & torch.isfinite(y_for_loss) & torch.isfinite(expert_preds).all(dim=-1)
+    if not valid_mask.any():
+        return None
+
+    ind_loss = torch.abs(expert_preds - y_for_loss.unsqueeze(-1))
+    empty_val = ~valid_mask.unsqueeze(-1).expand_as(gate)
+
+    max_error = ind_loss.argmax(dim=-1, keepdim=True)
+    cur_expert = gate.argmax(dim=-1, keepdim=True)
+    incorrect = max_error == cur_expert
+    selected = torch.zeros_like(gate).scatter(-1, cur_expert, 1.0)
+    scaling = torch.ones_like(gate) * ind_loss.detach()
+    scaling = scaling.scatter(-1, max_error, 0.0)
+    scaling = scaling / scaling.sum(dim=-1, keepdim=True).clamp_min(1e-6) * (1.0 - selected)
+    l_worst_avoidance = torch.where(incorrect, scaling, selected)
+    l_worst_avoidance = torch.where(empty_val, torch.zeros_like(gate), l_worst_avoidance).detach()
+
+    min_error = ind_loss.argmin(dim=-1, keepdim=True)
+    correct = min_error == cur_expert
+    scaling = torch.zeros_like(gate).scatter(-1, min_error, 1.0)
+    l_best_choice = torch.where(correct, selected, scaling)
+    l_best_choice = torch.where(empty_val, torch.zeros_like(gate), l_best_choice).detach()
+
+    routing_loss = -0.5 * l_worst_avoidance * torch.log(gate) - 0.5 * l_best_choice * torch.log(gate)
+    return lambda_testam * routing_loss[~empty_val].mean()
+
+
 def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epoch):
     # Save step-wise metrics
     inverse_transform = dataloader.dataset.inverse_transform
@@ -141,6 +183,11 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                         oracle_bce = F.binary_cross_entropy(alpha, oracle_target, reduction="none")
                         oracle_loss = (oracle_bce * valid_mask.to(dtype=oracle_bce.dtype)).sum() / valid_mask.to(dtype=oracle_bce.dtype).sum()
                         optimize_loss = optimize_loss + float(oracle_routing.get("lambda_oracle", 0.1)) * oracle_loss
+                testam_routing = output_meta.get("testam_routing")
+                if testam_routing:
+                    testam_loss = _compute_testam_routing_loss(testam_routing, y_for_loss, y_omi, epoch)
+                    if testam_loss is not None:
+                        optimize_loss = optimize_loss + testam_loss
             if not torch.isfinite(optimize_loss):
                 if grad_enabled:
                     optimizer.zero_grad()
