@@ -1,12 +1,14 @@
 import importlib
 import glob
 import os
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from args import load_args_from_config
+from model.STBP.stbp import STBP_Model
 from utils.model_output import unpack_model_output
 
 
@@ -200,6 +202,80 @@ class INCREASESpatialTransferHead(nn.Module):
         return pred + self.scale * residual, residual
 
 
+class _SilentLogger:
+
+    def info(self, *args, **kwargs):
+        return None
+
+
+class STBPPatternBankResidual(nn.Module):
+
+    def __init__(self, configs, num_nodes, recipe_cfg):
+        super().__init__()
+        hidden_channel = int(recipe_cfg.get("pattern_bank_hidden_channel", max(192, configs.d_model * 3)))
+        dropout = float(recipe_cfg.get("pattern_bank_dropout", 0.0))
+        self.residual_scale = float(recipe_cfg.get("pattern_bank_scale", 0.1))
+        role_residual_scale = recipe_cfg.get("pattern_bank_role_scale", {}) or {}
+        self.register_buffer(
+            "role_residual_scale",
+            torch.tensor(
+                [
+                    float(role_residual_scale.get("aas", 0.0)),
+                    float(role_residual_scale.get("nas", self.residual_scale)),
+                    float(role_residual_scale.get("vs", self.residual_scale)),
+                    float(role_residual_scale.get("fs", self.residual_scale)),
+                ],
+                dtype=torch.float32,
+            ),
+            persistent=False,
+        )
+        self.pred_len = configs.pred_len
+        self.model_args = SimpleNamespace(
+            dropout=dropout,
+            y_len=self.pred_len,
+            base_node_size=num_nodes,
+            year=0,
+            model={
+                "in_channel": self.pred_len,
+                "out_channel": self.pred_len,
+                "hidden_channel": hidden_channel,
+            },
+            logger=_SilentLogger(),
+        )
+        self.backbone = STBP_Model(self.model_args)
+
+    def forward(self, pred, adj, current_node_ids=None, last_role=None):
+        if pred.size(-1) != 1:
+            raise ValueError("STBPPatternBankResidual currently supports single-channel target_features=v")
+        N = adj.shape[0]
+        if N > self.backbone.num_nodes:
+            self.backbone.expand_adaptive_params(N)
+        x = pred[..., 0].permute(0, 2, 1).reshape((-1, N, self.backbone.args.model["in_channel"]))
+        B, N, T = x.shape
+        x = F.relu(self.backbone.fconv1(x))
+
+        if current_node_ids is None:
+            current_node_ids = list(range(N))
+        adaptive_params = self.backbone.pattern_bank[current_node_ids]
+
+        node_emb = adaptive_params.unsqueeze(0).expand(B, *adaptive_params.shape).permute(0,2,1).unsqueeze(-1)  # [bs, N, feature]
+        x = x.permute(0,2,1).unsqueeze(-1)
+
+        x = self.backbone.stmodule(x, node_emb).squeeze(-1)
+        x = x.permute(0,2,1).squeeze(-1)
+        x = self.backbone.fconv2(x)
+        x = x.reshape((-1, self.backbone.args.model["out_channel"]))
+        x = x + pred[..., 0].permute(0, 2, 1).reshape(-1, self.pred_len)
+        residual = self.backbone.fc(self.backbone.activation(x))
+        residual = F.dropout(residual, p=self.backbone.dropout, training=self.backbone.training)
+        residual = residual.reshape(pred.shape[0], pred.shape[2], self.pred_len).permute(0, 2, 1).unsqueeze(-1).contiguous()
+        if last_role is None:
+            return pred + self.residual_scale * residual, residual
+        scale = torch.sum(last_role * self.role_residual_scale.view(1, 1, ROLE_COUNT).to(last_role.device), dim=-1, keepdim=True)
+        scale = scale.unsqueeze(1).expand_as(residual)
+        return pred + scale * residual, residual
+
+
 def _resolve_model_module_name(model_name):
     if model_name == "GWNET":
         return "GWNet"
@@ -274,6 +350,7 @@ class Model(nn.Module):
         self.testam_threshold = float(recipe_cfg.get("testam_threshold", 0.0))
         self.lambda_fs_recovery = float(recipe_cfg.get("lambda_fs_recovery", 0.0))
         self.lambda_spatial_transfer = float(recipe_cfg.get("lambda_spatial_transfer", 0.0))
+        self.lambda_pattern_bank = float(recipe_cfg.get("lambda_pattern_bank", 0.0))
         self.residual_scale = float(recipe_cfg.get("residual_scale", 0.5))
         role_residual_scale = recipe_cfg.get(
             "role_residual_scale",
@@ -427,6 +504,13 @@ class Model(nn.Module):
                 pred_len=self.pred_len,
                 scale=float(recipe_cfg.get("spatial_transfer_scale", 0.1)),
             )
+        self.lifecycle_pattern_bank = None
+        if bool(recipe_cfg.get("use_lifecycle_pattern_bank", False)):
+            self.lifecycle_pattern_bank = STBPPatternBankResidual(
+                configs=configs,
+                num_nodes=int(recipe_cfg.get("pattern_bank_num_nodes", 207)),
+                recipe_cfg=recipe_cfg,
+            )
 
         self._configure_expert_trainability()
 
@@ -538,6 +622,9 @@ class Model(nn.Module):
         if self.spatial_transfer_head is not None:
             pred, residual = self.spatial_transfer_head(pred, adj, last_role)
             aux_losses["rolefusion_spatial_transfer"] = self.lambda_spatial_transfer * residual.pow(2).mean()
+        if self.lifecycle_pattern_bank is not None:
+            pred, residual = self.lifecycle_pattern_bank(pred, adj, last_role=last_role)
+            aux_losses["rolefusion_pattern_bank"] = self.lambda_pattern_bank * residual.pow(2).mean()
         return pred
 
     def _role_gate(self, adj, x_enc, y_graph, y_patch, with_residual=False):

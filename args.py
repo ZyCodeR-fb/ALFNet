@@ -107,7 +107,7 @@ def _add_arguments(parser):
         "--lifecycle_training_strategy",
         type=str,
         default="v1",
-        choices=["v1", "round1", "round2", "round3", "round3_event_only", "round3_weight_only"],
+        choices=["v1", "round1", "round2", "round3", "round3_event_only", "round3_weight_only", "round4_dense_event_only", "round4_dense_weighted"],
         help="lifecycle-aware training recipe: v1=original heavy local lifecycle simulation, round1=lighter events + keep legacy random mask, round2=round1 without local VS nodes, round3=combined event+weight tuning, round3_event_only=only the event-profile changes from round3, round3_weight_only=only the optimizer weighting changes on top of round2-style events",
     )
     parser.add_argument("--lifecycle_aas_loss_weight", type=float, default=None, help="optional training loss weight override for AAS nodes in lifecycle-aware training")
@@ -260,6 +260,8 @@ def finalize_args(args):
         "round3": {"aas": 1.0, "nas": 1.0, "vs": 1.35, "fs": 1.60},
         "round3_event_only": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
         "round3_weight_only": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.60},
+        "round4_dense_event_only": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
+        "round4_dense_weighted": {"aas": 1.0, "nas": 1.20, "vs": 1.20, "fs": 1.30},
     }
     default_weights = strategy_weight_defaults[args.lifecycle_training_strategy]
     if args.lifecycle_aas_loss_weight is None:
