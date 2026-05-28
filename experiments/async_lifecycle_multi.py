@@ -55,12 +55,41 @@ def _validate_async_args(args):
         raise ValueError("async_lifecycle currently supports commissioning_k in {6, 12, 24}")
     if args.test_for_changed:
         raise ValueError("test_for_changed and test_for_async_lifecycle should not be enabled together")
+    if args.async_adcsd_queue_len is not None and args.async_adcsd_queue_len <= 0:
+        raise ValueError("async_adcsd_queue_len must be positive")
+    if args.async_adcsd_moving_avg is not None and args.async_adcsd_moving_avg <= 0:
+        raise ValueError("async_adcsd_moving_avg must be positive")
+    if args.async_adcsd_moving_avg is not None and args.async_adcsd_moving_avg % 2 == 0:
+        raise ValueError("async_adcsd_moving_avg must be odd to preserve prediction length")
+    if args.async_adcsd_lr is not None and args.async_adcsd_lr <= 0:
+        raise ValueError("async_adcsd_lr must be positive")
+
+
+def _format_async_float(value):
+    return f"{value:g}".replace(".", "p").replace("-", "m")
+
+
+def _get_adcsd_hparams(args):
+    return {
+        "queue_len": int(args.async_adcsd_queue_len or ASYNC_ADCSD_QUEUE_LEN),
+        "moving_avg": int(args.async_adcsd_moving_avg or ASYNC_ADCSD_MOVING_AVG),
+        "lr": float(args.async_adcsd_lr or ASYNC_ADCSD_LR),
+    }
 
 
 def _prepare_paths(args):
+    adaptor_param_suffix = ""
+    if args.async_adaptor == "adcsd":
+        adcsd_hparams = _get_adcsd_hparams(args)
+        adaptor_param_suffix = (
+            f"-q-{adcsd_hparams['queue_len']}"
+            f"-ma-{adcsd_hparams['moving_avg']}"
+            f"-lr-{_format_async_float(adcsd_hparams['lr'])}"
+        )
     async_suffix = (
         f"async_lifecycle-{args.async_adaptor}-events-{args.async_num_events}-"
         f"k-{args.async_commissioning_k}-seed-{args.async_event_seed}"
+        f"{adaptor_param_suffix}"
     )
     output_dir = os.path.join(args.best_prediction_path, args.exp_id, async_suffix)
     os.makedirs(output_dir, exist_ok=True)
@@ -389,17 +418,18 @@ def _build_async_adaptor(args, dataset, model, event_plan):
         return adaptor_state
 
     if adaptor_name == "adcsd":
-        module = ADCSDModule(output_dim=output_channels, output_window=args.pred_len, num_nodes=dataset.num_nodes, moving_avg=ASYNC_ADCSD_MOVING_AVG).to(args.device)
-        optimizer = torch.optim.Adam(module.parameters(), lr=ASYNC_ADCSD_LR, eps=1e-8, weight_decay=0, amsgrad=False)
+        adcsd_hparams = _get_adcsd_hparams(args)
+        module = ADCSDModule(output_dim=output_channels, output_window=args.pred_len, num_nodes=dataset.num_nodes, moving_avg=adcsd_hparams["moving_avg"]).to(args.device)
+        optimizer = torch.optim.Adam(module.parameters(), lr=adcsd_hparams["lr"], eps=1e-8, weight_decay=0, amsgrad=False)
         adaptor_state.update(
             {
                 "module": module,
                 "optimizer": optimizer,
                 "has_output_calibration": True,
                 "metadata": {
-                    "queue_len": ASYNC_ADCSD_QUEUE_LEN,
-                    "moving_avg": ASYNC_ADCSD_MOVING_AVG,
-                    "lr": ASYNC_ADCSD_LR,
+                    "queue_len": adcsd_hparams["queue_len"],
+                    "moving_avg": adcsd_hparams["moving_avg"],
+                    "lr": adcsd_hparams["lr"],
                 },
             }
         )

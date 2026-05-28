@@ -86,6 +86,9 @@ def _add_arguments(parser):
     parser.add_argument("--async_num_events", type=int, default=4, help="number of lifecycle events during async test")
     parser.add_argument("--async_commissioning_k", type=int, default=12, help="number of commissioning windows per event")
     parser.add_argument("--async_event_seed", type=int, default=0, help="seed for async lifecycle event generation")
+    parser.add_argument("--async_adcsd_queue_len", type=int, default=None, help="optional ADCSD queue length override during async lifecycle test")
+    parser.add_argument("--async_adcsd_moving_avg", type=int, default=None, help="optional ADCSD moving-average kernel override during async lifecycle test")
+    parser.add_argument("--async_adcsd_lr", type=float, default=None, help="optional ADCSD learning-rate override during async lifecycle test")
     parser.add_argument("--lifecycle_role_features", action="store_true", help="append lifecycle role one-hot features to async lifecycle inputs")
     parser.add_argument("--lifecycle_history_age_feature", action="store_true", help="append lifecycle history-age feature to async lifecycle inputs")
     parser.add_argument(
