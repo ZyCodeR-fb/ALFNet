@@ -331,7 +331,7 @@ class TPBPatternInputAdapter(nn.Module):
     # Adapted from references/TPB/model/Meta_Models/meta_patch.py::PatternEncoder_patternkeyv2:
     # keep the pattern-key attention order, and add only a small projection so
     # matched patterns can be used as a lifecycle input prompt for frozen experts.
-    def __init__(self, input_len, input_dim, pattern_path, num_patterns, pattern_dim, role_scale):
+    def __init__(self, input_len, input_dim, pattern_path, num_patterns, pattern_dim, role_scale, allow_random_pattern=False):
         super(TPBPatternInputAdapter, self).__init__()
         self.input_len = int(input_len)
         self.input_dim = int(input_dim)
@@ -359,6 +359,13 @@ class TPBPatternInputAdapter(nn.Module):
             pattern_source = candidate_path
             break
         if pattern is None:
+            if not allow_random_pattern:
+                searched = ", ".join(candidate_paths) if candidate_paths else "<none>"
+                raise FileNotFoundError(
+                    "TPB pattern file not found. Put cosine_10_cl.pt under "
+                    "external_weights/tpb_patterns/ or set allow_random_tpb_pattern=true "
+                    f"for a random-pattern ablation. Searched: {searched}"
+                )
             pattern = torch.empty(int(num_patterns), int(pattern_dim)).uniform_(-0.1, 0.1)
             pattern_source = "random_trainable"
 
@@ -671,6 +678,7 @@ class Model(nn.Module):
                 num_patterns=int(recipe_cfg.get("tpb_num_patterns", 10)),
                 pattern_dim=int(recipe_cfg.get("tpb_pattern_dim", max(64, configs.d_model * 2))),
                 role_scale=recipe_cfg.get("tpb_role_scale", {}),
+                allow_random_pattern=bool(recipe_cfg.get("allow_random_tpb_pattern", False)),
             )
 
         self._configure_expert_trainability()
