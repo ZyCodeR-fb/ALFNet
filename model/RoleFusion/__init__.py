@@ -338,25 +338,40 @@ class TPBPatternInputAdapter(nn.Module):
         self.input_patch_dim = self.input_len * self.input_dim
 
         pattern = None
+        pattern_source = None
+        candidate_paths = []
         if pattern_path:
             pattern_path = os.path.normpath(pattern_path)
-            if not os.path.exists(pattern_path):
-                raise FileNotFoundError(f"TPB pattern file not found: {pattern_path}")
-            pattern = torch.load(pattern_path, map_location="cpu", weights_only=False)
+            candidate_paths.append(pattern_path)
+        candidate_paths.extend(sorted(glob.glob(os.path.join("external_weights", "tpb_patterns", "cosine_10_cl.pt"))))
+        candidate_paths.extend(sorted(glob.glob(os.path.join("external_weights", "tpb_patterns", "cosine_10_cl_1.pt"))))
+        candidate_paths.extend(sorted(glob.glob(os.path.join("references", "TPB", "pattern", "*", "cosine_10_cl.pt"))))
+        candidate_paths.extend(sorted(glob.glob(os.path.join("references", "MTPB", "pattern", "*", "cosine_10_cl_1.pt"))))
+        for candidate_path in candidate_paths:
+            if not candidate_path or not os.path.exists(candidate_path):
+                continue
+            pattern = torch.load(candidate_path, map_location="cpu", weights_only=False)
             if not isinstance(pattern, torch.Tensor):
-                raise ValueError(f"TPB pattern file must contain a tensor, got {type(pattern)}")
+                raise ValueError(f"TPB pattern file must contain a tensor, got {type(pattern)} from {candidate_path}")
             pattern = pattern.float()
             if pattern.dim() != 2:
-                raise ValueError(f"TPB pattern tensor must be 2-D [K,D], got {tuple(pattern.shape)}")
+                raise ValueError(f"TPB pattern tensor must be 2-D [K,D], got {tuple(pattern.shape)} from {candidate_path}")
+            pattern_source = candidate_path
+            break
         if pattern is None:
             pattern = torch.empty(int(num_patterns), int(pattern_dim)).uniform_(-0.1, 0.1)
+            pattern_source = "random_trainable"
 
         self.K, self.D = pattern.shape
         self.temporature = self.D ** 0.5
         self.Qnet = nn.Linear(self.input_patch_dim, self.D)
         self.qry_mat = nn.Parameter(torch.randn(self.D, self.K))
         self.out_proj = nn.Linear(self.D, self.input_patch_dim)
-        self.register_buffer("pattern", pattern, persistent=True)
+        self.pattern_source = pattern_source
+        if pattern_source == "random_trainable":
+            self.pattern = nn.Parameter(pattern)
+        else:
+            self.register_buffer("pattern", pattern, persistent=True)
         self.register_buffer(
             "role_input_scale",
             torch.tensor(
