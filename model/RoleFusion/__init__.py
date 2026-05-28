@@ -4,6 +4,7 @@ import os
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from args import load_args_from_config
 from utils.model_output import unpack_model_output
@@ -14,6 +15,189 @@ ROLE_NAS = 1
 ROLE_VS = 2
 ROLE_FS = 3
 ROLE_COUNT = 4
+
+
+class linear2d(nn.Module):
+    # Copied from references/GCN-M/models/memoryModule.py, with no logic change.
+    def __init__(self, c_in, c_out):
+        super(linear2d, self).__init__()
+        self.mlp = torch.nn.Conv2d(c_in, c_out, kernel_size=(1, 1), padding=(0, 0), stride=(1, 1), bias=True)
+
+    def forward(self, x):
+        return self.mlp(x)
+
+
+class linear3d(nn.Module):
+    # Copied from references/GCN-M/models/memoryModule.py, with no logic change.
+    def __init__(self, c_in, c_out):
+        super(linear3d, self).__init__()
+        self.mlp = torch.nn.Conv3d(c_in, c_out, kernel_size=(1, 1, 1), padding=(0, 0, 0), stride=(1, 1, 1), bias=True)
+
+    def forward(self, x):
+        return self.mlp(x)
+
+
+class MemoryModule(nn.Module):
+    # Copied from references/GCN-M/models/memoryModule.py, with shape comments preserved.
+    def __init__(self, c_in, c_out):
+        # c_in: local features z, by default: c_in = 1
+        # c_out: output channel, by default: c_out=32, same to the "start_conv" in the main model
+        super(MemoryModule, self).__init__()
+        # embeddings for Query, Input Memory, Output Memory
+        self.mlp_q = linear2d(c_in, c_out)
+        self.mlp_m = linear3d(c_in, c_out)
+        self.mlp_c = linear3d(c_in, c_out)
+
+    def forward(self, x_local, x_hist):
+        """
+            ccompute the weighted sum from historical samples
+        :param x_local: (B, L, D, F), (batch_size, L, nbr_node, nbr_feature), nbr_feature=1 or 3
+        :param x_hist: (B, L, n*tau, D, F), (B, L, n*tau, nbr_node, nbr_feature), nbr_feature=1 or 3
+        :return: e: (B, L, 1, D) (batch_size, L, nbr_feature, nbr_node), enriched traffic embeddings
+        """
+
+        # x_local: (B, L, D, F) -> (B, F, L, D)
+        x_local = x_local.permute((0, 3, 1, 2)).contiguous()
+        # x_hist: (B, L, n*tau, D, F) -> (B, F, n*tau, L, D)
+        x_hist = x_hist.permute((0, 4, 2, 1, 3)).contiguous()
+        q = self.mlp_q(x_local) #(B, F, L, D) -> (B, F', L, D)
+        q = torch.unsqueeze(q, dim=-1) #(B, F', L, D) -> (B, F', L, D, 1)
+
+        m = self.mlp_m(x_hist) #(B, F, n*tau, L, D) -> (B, F', n*tau, L, D)
+        c = self.mlp_c(x_hist) #(B, F, n*tau, L, D) -> (B, F', n*tau, L, D)
+        m = m.permute((0, 1, 3, 2, 4)).contiguous()  # (B, F', n*tau, L, D) -> (B, F', L, n*tau, D)
+        c = c.permute((0, 1, 3, 2, 4)).contiguous()  # (B, F', n*tau, L, D) -> (B, F', L, n*tau, D)
+
+        mq = torch.matmul(m, q) #(B, F', L, n*tau, 1)
+        mq = torch.squeeze(mq, dim=-1) #(B, F', L, n*tau)
+        q = torch.squeeze(q, dim=-1)  # (B, F', L, D)
+        attention_scores = F.softmax(F.relu(mq), dim=-1) ##(B, F', L, n*tau)
+
+        o = torch.einsum('bflt,bfltd->bfld', (attention_scores, c)).contiguous() #(B, F', L, D)
+        e = q.add(o)
+
+        return e #(B, F', L, D)
+
+
+class GCNMMemoryRecoveryHead(nn.Module):
+    def __init__(self, output_dim, hidden_dim, scale):
+        super().__init__()
+        self.memory_model = MemoryModule(output_dim, hidden_dim)
+        self.proj = nn.Conv2d(hidden_dim, output_dim, kernel_size=(1, 1))
+        self.scale = float(scale)
+
+    def forward(self, pred, raw_history, last_role):
+        x_local = pred
+        x_hist = raw_history.unsqueeze(1).expand(-1, pred.size(1), -1, -1, -1)
+        e = self.memory_model(x_local, x_hist)
+        residual = self.proj(F.relu(e)).permute(0, 2, 3, 1).contiguous()
+        fs_mask = last_role[..., ROLE_FS:ROLE_FS + 1].unsqueeze(1)
+        residual = fs_mask * torch.tanh(residual)
+        return pred + self.scale * residual, residual
+
+
+def _fc_block(in_dim, units, activations):
+    layers = []
+    current_dim = in_dim
+    for unit, activation in zip(units, activations):
+        layers.append(nn.Linear(current_dim, unit))
+        if activation == "relu":
+            layers.append(nn.ReLU())
+        elif activation == "tanh":
+            layers.append(nn.Tanh())
+        elif activation is not None:
+            raise ValueError(f"Unsupported activation in INCREASE-style FC: {activation}")
+        current_dim = unit
+    return nn.Sequential(*layers)
+
+
+class INCREASESpatialTransferHead(nn.Module):
+    def __init__(self, output_dim, hidden_dim, pred_len, scale):
+        super().__init__()
+        self.output_dim = output_dim
+        self.hidden_dim = hidden_dim
+        self.pred_len = pred_len
+        self.scale = float(scale)
+
+        # PyTorch port of references/INCREASE/METR-LA/INCREASE/model.py::model.
+        self.x_gp_fw_in = _fc_block(output_dim, [hidden_dim, hidden_dim], ["relu", None])
+        self.x_gp_bw_in = _fc_block(output_dim, [hidden_dim, hidden_dim], ["relu", None])
+        self.y_gp_fw_fc = _fc_block(hidden_dim, [hidden_dim, hidden_dim], ["relu", None])
+        self.y_gp_bw_fc = _fc_block(hidden_dim, [hidden_dim, hidden_dim], ["relu", None])
+        self.x_gp_fw_fc = _fc_block(hidden_dim, [hidden_dim, hidden_dim], ["relu", None])
+        self.x_gp_bw_fc = _fc_block(hidden_dim, [hidden_dim, hidden_dim], ["relu", None])
+        self.x_gp_fw_gate = _fc_block(hidden_dim, [hidden_dim, hidden_dim], ["relu", "tanh"])
+        self.x_gp_bw_gate = _fc_block(hidden_dim, [hidden_dim, hidden_dim], ["relu", "tanh"])
+        self.y_gp_fw_proj = _fc_block(hidden_dim, [hidden_dim], [None])
+        self.y_gp_bw_proj = _fc_block(hidden_dim, [hidden_dim], [None])
+        self.y_fc = _fc_block(2 * hidden_dim, [hidden_dim, hidden_dim], ["relu", None])
+        self.x_fc = _fc_block(2 * hidden_dim, [hidden_dim, hidden_dim], ["relu", None])
+        self.g1 = _fc_block(hidden_dim, [hidden_dim, hidden_dim], ["relu", "relu"])
+        self.te = nn.Embedding(pred_len, hidden_dim)
+        self.cell = nn.GRUCell(2 * hidden_dim, hidden_dim)
+        self.g2_state = nn.Linear(hidden_dim, hidden_dim)
+        self.g2_x = nn.Linear(hidden_dim, hidden_dim)
+        self.out = _fc_block(hidden_dim, [hidden_dim, hidden_dim, output_dim], ["relu", "relu", None])
+
+    def _support(self, adj):
+        adj = adj.to(dtype=torch.float32)
+        gp_fw = adj / adj.sum(1, keepdim=True).clamp_min(1e-6)
+        gp_bw = adj.T / adj.T.sum(1, keepdim=True).clamp_min(1e-6)
+        return gp_fw, gp_bw
+
+    def _aggregate(self, gp, x):
+        return torch.einsum("nm,btmd->btnd", gp, x).contiguous()
+
+    def forward(self, pred, adj, last_role):
+        gp_fw, gp_bw = self._support(adj)
+        x_gp_fw = self.x_gp_fw_in(pred)
+        x_gp_bw = self.x_gp_bw_in(pred)
+
+        # spatial aggregation
+        y_gp_fw = self._aggregate(gp_fw, x_gp_fw)
+        y_gp_bw = self._aggregate(gp_bw, x_gp_bw)
+        y_gp_fw = self.y_gp_fw_fc(y_gp_fw)
+        y_gp_bw = self.y_gp_bw_fc(y_gp_bw)
+        x_gp_fw = self.x_gp_fw_fc(x_gp_fw)
+        x_gp_bw = self.x_gp_bw_fc(x_gp_bw)
+        x_gp_fw = torch.abs(y_gp_fw - x_gp_fw)
+        x_gp_bw = torch.abs(y_gp_bw - x_gp_bw)
+        x_gp_fw = self._aggregate(gp_fw, x_gp_fw)
+        x_gp_bw = self._aggregate(gp_bw, x_gp_bw)
+        x_gp_fw = self.x_gp_fw_gate(x_gp_fw)
+        x_gp_bw = self.x_gp_bw_gate(x_gp_bw)
+        y_gp_fw = self.y_gp_fw_proj(y_gp_fw)
+        y_gp_bw = self.y_gp_bw_proj(y_gp_bw)
+        y_gp_fw = x_gp_fw + y_gp_fw
+        y_gp_bw = x_gp_bw + y_gp_bw
+
+        # temporal modeling
+        y = torch.cat((y_gp_fw, y_gp_bw), dim=-1)
+        y = self.y_fc(y)
+        x = torch.cat((x_gp_fw, x_gp_bw), dim=-1)
+        x = self.x_fc(x)
+        g1 = torch.exp(-self.g1(x))
+        y = g1 * y
+        time_idx = torch.arange(self.pred_len, device=pred.device)
+        TE = self.te(time_idx).view(1, self.pred_len, 1, self.hidden_dim).expand(pred.size(0), -1, pred.size(2), -1)
+        y = torch.cat((y, TE), dim=-1)
+
+        state = pred.new_zeros(pred.size(0) * pred.size(2), self.hidden_dim)
+        pred_steps = []
+        for i in range(self.pred_len):
+            if i == 0:
+                g2 = torch.relu(self.g2_state(state))
+            else:
+                g2 = torch.relu(self.g2_x(x[:, i - 1].reshape(-1, self.hidden_dim)))
+            g2 = torch.exp(-g2)
+            state = g2 * state
+            state = self.cell(y[:, i].reshape(-1, 2 * self.hidden_dim), state)
+            pred_steps.append(state.view(pred.size(0), pred.size(2), self.hidden_dim).unsqueeze(1))
+        residual = torch.cat(pred_steps, dim=1)
+        residual = self.out(residual)
+        lowvis_mask = (last_role[..., ROLE_NAS:ROLE_NAS + 1] + last_role[..., ROLE_VS:ROLE_VS + 1]).unsqueeze(1)
+        residual = lowvis_mask * torch.tanh(residual)
+        return pred + self.scale * residual, residual
 
 
 def _resolve_model_module_name(model_name):
@@ -88,6 +272,8 @@ class Model(nn.Module):
         self.lambda_testam = float(recipe_cfg.get("lambda_testam", 0.0))
         self.testam_warmup_epoch = int(recipe_cfg.get("testam_warmup_epoch", 0))
         self.testam_threshold = float(recipe_cfg.get("testam_threshold", 0.0))
+        self.lambda_fs_recovery = float(recipe_cfg.get("lambda_fs_recovery", 0.0))
+        self.lambda_spatial_transfer = float(recipe_cfg.get("lambda_spatial_transfer", 0.0))
         self.residual_scale = float(recipe_cfg.get("residual_scale", 0.5))
         role_residual_scale = recipe_cfg.get(
             "role_residual_scale",
@@ -226,6 +412,22 @@ class Model(nn.Module):
             self.role_fusion_gates = nn.ModuleList()
             self.role_residual_heads = nn.ModuleList()
 
+        self.fs_recovery_head = None
+        if bool(recipe_cfg.get("use_fs_recovery_head", False)):
+            self.fs_recovery_head = GCNMMemoryRecoveryHead(
+                output_dim=self.output_dim,
+                hidden_dim=int(model_cfg.get("fs_recovery_hidden_dim", gate_hidden_dim)),
+                scale=float(recipe_cfg.get("fs_recovery_scale", 0.1)),
+            )
+        self.spatial_transfer_head = None
+        if bool(recipe_cfg.get("use_spatial_transfer_head", False)):
+            self.spatial_transfer_head = INCREASESpatialTransferHead(
+                output_dim=self.output_dim,
+                hidden_dim=int(model_cfg.get("spatial_transfer_hidden_dim", gate_hidden_dim)),
+                pred_len=self.pred_len,
+                scale=float(recipe_cfg.get("spatial_transfer_scale", 0.1)),
+            )
+
         self._configure_expert_trainability()
 
     def _set_expert_trainability(self, expert, patterns):
@@ -329,7 +531,16 @@ class Model(nn.Module):
             "rolefusion_entropy": self.lambda_entropy * entropy,
         }
 
-    def _role_gate(self, x_enc, y_graph, y_patch, with_residual=False):
+    def _apply_role_heads(self, adj, x_enc, pred, last_role, aux_losses):
+        if self.fs_recovery_head is not None:
+            pred, residual = self.fs_recovery_head(pred, x_enc[..., :self.output_dim], last_role)
+            aux_losses["rolefusion_fs_recovery"] = self.lambda_fs_recovery * residual.pow(2).mean()
+        if self.spatial_transfer_head is not None:
+            pred, residual = self.spatial_transfer_head(pred, adj, last_role)
+            aux_losses["rolefusion_spatial_transfer"] = self.lambda_spatial_transfer * residual.pow(2).mean()
+        return pred
+
+    def _role_gate(self, adj, x_enc, y_graph, y_patch, with_residual=False):
         node_state, last_role = self._build_gate_features(x_enc)
         state_t = node_state.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
         gate_input = torch.cat([state_t, y_graph, y_patch, torch.abs(y_graph - y_patch)], dim=-1)
@@ -357,6 +568,7 @@ class Model(nn.Module):
             residual = residual_scale * torch.tanh(residual)
             fused = fused + residual
             aux_losses["rolefusion_role_residual"] = self.lambda_residual * residual.pow(2).mean()
+        fused = self._apply_role_heads(adj, x_enc, fused, last_role, aux_losses)
         routing_meta = {
             "alpha": alpha,
             "y_graph": y_graph.detach(),
@@ -426,10 +638,10 @@ class Model(nn.Module):
         if self.recipe == "soft_fuse_v2":
             pred, aux_losses = self._soft_fuse_v2(x_enc, y_graph, y_patch)
         elif self.recipe == "oracle_gate":
-            pred, aux_losses, oracle_routing = self._role_gate(x_enc, y_graph, y_patch, with_residual=False)
+            pred, aux_losses, oracle_routing = self._role_gate(adj, x_enc, y_graph, y_patch, with_residual=False)
             return {"pred": pred, "aux_losses": aux_losses, "oracle_routing": oracle_routing}
         elif self.recipe in {"role_mmoe", "testam_role_mmoe"}:
-            pred, aux_losses, routing_meta = self._role_gate(x_enc, y_graph, y_patch, with_residual=True)
+            pred, aux_losses, routing_meta = self._role_gate(adj, x_enc, y_graph, y_patch, with_residual=True)
             output = {"pred": pred, "aux_losses": aux_losses, "oracle_routing": routing_meta}
             if "testam" in routing_meta:
                 output["testam_routing"] = routing_meta["testam"]
