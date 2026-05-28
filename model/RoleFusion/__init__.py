@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from args import load_args_from_config
+from lib.utils import load_project_adjacency, resolve_known_unknown_nodes
 from model.STBP.stbp import STBP_Model
 from utils.model_output import unpack_model_output
 
@@ -276,6 +277,119 @@ class STBPPatternBankResidual(nn.Module):
         return pred + scale * residual, residual
 
 
+class EACNodeAdaptiveInput(nn.Module):
+    # Adapted from references/EAC/src/model/model.py::EAC_Model:
+    # keep the U/V low-rank adaptive-parameter idea, and apply it only to
+    # missing lifecycle input positions before frozen experts run.
+    def __init__(self, num_nodes, input_len, input_dim, rank, role_scale):
+        super(EACNodeAdaptiveInput, self).__init__()
+        self.rank = int(rank)
+        self.input_len = int(input_len)
+        self.input_dim = int(input_dim)
+        self.U = nn.Parameter(torch.empty(num_nodes, self.rank).uniform_(-0.1, 0.1))
+        self.V = nn.Parameter(torch.empty(self.rank, self.input_len * self.input_dim).uniform_(-0.1, 0.1))
+        self.num_nodes = int(num_nodes)
+        self.register_buffer(
+            "role_input_scale",
+            torch.tensor(
+                [
+                    float(role_scale.get("aas", 0.0)),
+                    float(role_scale.get("nas", 0.0)),
+                    float(role_scale.get("vs", 1.0)),
+                    float(role_scale.get("fs", 0.5)),
+                ],
+                dtype=torch.float32,
+            ),
+            persistent=False,
+        )
+
+    def expand_adaptive_params(self, new_num_nodes):
+        if new_num_nodes > self.num_nodes:
+            new_params = nn.Parameter(torch.empty(new_num_nodes - self.num_nodes, self.rank, dtype=self.U.dtype, device=self.U.device).uniform_(-0.1, 0.1))
+            self.U = nn.Parameter(torch.cat([self.U, new_params], dim=0))
+            self.num_nodes = new_num_nodes
+
+    def forward(self, raw_x_enc, role_seq, current_node_ids=None):
+        B, T, N, C = raw_x_enc.shape
+        if T != self.input_len or C != self.input_dim:
+            raise ValueError(
+                f"EACNodeAdaptiveInput expects input shape [B,{self.input_len},N,{self.input_dim}], got {tuple(raw_x_enc.shape)}"
+            )
+        if N > self.num_nodes:
+            self.expand_adaptive_params(N)
+        if current_node_ids is None:
+            current_node_ids = list(range(N))
+        adaptive_params = torch.mm(self.U[current_node_ids, :], self.V)  # [N, input_len * input_dim]
+        adaptive_params = adaptive_params.reshape(N, self.input_len, self.input_dim)
+        adaptive_params = adaptive_params.permute(1, 0, 2).unsqueeze(0).expand(B, -1, -1, -1)
+        role_factor = torch.sum(role_seq * self.role_input_scale.view(1, 1, 1, ROLE_COUNT).to(role_seq.device), dim=-1, keepdim=True)
+        prompt = role_factor * adaptive_params
+        return raw_x_enc + prompt, prompt
+
+
+class TPBPatternInputAdapter(nn.Module):
+    # Adapted from references/TPB/model/Meta_Models/meta_patch.py::PatternEncoder_patternkeyv2:
+    # keep the pattern-key attention order, and add only a small projection so
+    # matched patterns can be used as a lifecycle input prompt for frozen experts.
+    def __init__(self, input_len, input_dim, pattern_path, num_patterns, pattern_dim, role_scale):
+        super(TPBPatternInputAdapter, self).__init__()
+        self.input_len = int(input_len)
+        self.input_dim = int(input_dim)
+        self.input_patch_dim = self.input_len * self.input_dim
+
+        pattern = None
+        if pattern_path:
+            pattern_path = os.path.normpath(pattern_path)
+            if not os.path.exists(pattern_path):
+                raise FileNotFoundError(f"TPB pattern file not found: {pattern_path}")
+            pattern = torch.load(pattern_path, map_location="cpu", weights_only=False)
+            if not isinstance(pattern, torch.Tensor):
+                raise ValueError(f"TPB pattern file must contain a tensor, got {type(pattern)}")
+            pattern = pattern.float()
+            if pattern.dim() != 2:
+                raise ValueError(f"TPB pattern tensor must be 2-D [K,D], got {tuple(pattern.shape)}")
+        if pattern is None:
+            pattern = torch.empty(int(num_patterns), int(pattern_dim)).uniform_(-0.1, 0.1)
+
+        self.K, self.D = pattern.shape
+        self.temporature = self.D ** 0.5
+        self.Qnet = nn.Linear(self.input_patch_dim, self.D)
+        self.qry_mat = nn.Parameter(torch.randn(self.D, self.K))
+        self.out_proj = nn.Linear(self.D, self.input_patch_dim)
+        self.register_buffer("pattern", pattern, persistent=True)
+        self.register_buffer(
+            "role_input_scale",
+            torch.tensor(
+                [
+                    float(role_scale.get("aas", 0.0)),
+                    float(role_scale.get("nas", 0.0)),
+                    float(role_scale.get("vs", 1.0)),
+                    float(role_scale.get("fs", 0.5)),
+                ],
+                dtype=torch.float32,
+            ),
+            persistent=False,
+        )
+
+    def forward(self, raw_x_enc, role_seq):
+        B, T, N, C = raw_x_enc.shape
+        if T != self.input_len or C != self.input_dim:
+            raise ValueError(
+                f"TPBPatternInputAdapter expects input shape [B,{self.input_len},N,{self.input_dim}], got {tuple(raw_x_enc.shape)}"
+            )
+
+        X = raw_x_enc.permute(0, 2, 1, 3).reshape(B, N, 1, self.input_patch_dim)
+        qry = self.Qnet(X)
+        weight = torch.einsum("dk,bnld->bnlk", self.qry_mat, qry) / self.temporature
+        weight = F.softmax(weight, dim=3)
+        w_X = torch.einsum("bnlk,kd->bnld", weight, self.pattern.to(raw_x_enc.device))
+        prompt = self.out_proj(w_X).reshape(B, N, T, C).permute(0, 2, 1, 3).contiguous()
+
+        role_factor = torch.sum(role_seq * self.role_input_scale.view(1, 1, 1, ROLE_COUNT).to(role_seq.device), dim=-1, keepdim=True)
+        prompt = role_factor * prompt
+        return raw_x_enc + prompt, prompt
+
+
 def _resolve_model_module_name(model_name):
     if model_name == "GWNET":
         return "GWNet"
@@ -333,6 +447,17 @@ class Model(nn.Module):
         self.role_start = self.raw_enc_in
         self.role_end = self.role_start + ROLE_COUNT
         self.age_idx = self.role_end
+        full_adj = load_project_adjacency({"data_path": configs.data_path})
+        self.full_num_nodes = int(full_adj.shape[0])
+        self.known_nodes, _ = resolve_known_unknown_nodes(
+            {
+                "data_path": configs.data_path,
+                "unknown_nodes_path": configs.unknown_nodes_path,
+                "unknown_nodes_list": configs.unknown_nodes_list,
+                "unknown_nodes_num": configs.unknown_nodes_num,
+                "seed": configs.seed,
+            }
+        )
 
         recipe_cfg = self.cfg.get("recipe", {})
         model_cfg = self.cfg.get("model", {})
@@ -351,6 +476,8 @@ class Model(nn.Module):
         self.lambda_fs_recovery = float(recipe_cfg.get("lambda_fs_recovery", 0.0))
         self.lambda_spatial_transfer = float(recipe_cfg.get("lambda_spatial_transfer", 0.0))
         self.lambda_pattern_bank = float(recipe_cfg.get("lambda_pattern_bank", 0.0))
+        self.lambda_eac_input = float(recipe_cfg.get("lambda_eac_input", 0.0))
+        self.lambda_tpb_input = float(recipe_cfg.get("lambda_tpb_input", 0.0))
         self.residual_scale = float(recipe_cfg.get("residual_scale", 0.5))
         role_residual_scale = recipe_cfg.get(
             "role_residual_scale",
@@ -508,8 +635,27 @@ class Model(nn.Module):
         if bool(recipe_cfg.get("use_lifecycle_pattern_bank", False)):
             self.lifecycle_pattern_bank = STBPPatternBankResidual(
                 configs=configs,
-                num_nodes=int(recipe_cfg.get("pattern_bank_num_nodes", 207)),
+                num_nodes=int(recipe_cfg.get("pattern_bank_num_nodes", self.full_num_nodes)),
                 recipe_cfg=recipe_cfg,
+            )
+        self.eac_graph_input_adapter = None
+        if bool(recipe_cfg.get("use_eac_graph_input_adapter", False)):
+            self.eac_graph_input_adapter = EACNodeAdaptiveInput(
+                num_nodes=int(recipe_cfg.get("eac_num_nodes", self.full_num_nodes)),
+                input_len=configs.input_len,
+                input_dim=self.raw_enc_in,
+                rank=int(recipe_cfg.get("eac_rank", 8)),
+                role_scale=recipe_cfg.get("eac_role_scale", {}),
+            )
+        self.tpb_graph_input_adapter = None
+        if bool(recipe_cfg.get("use_tpb_graph_input_adapter", False)):
+            self.tpb_graph_input_adapter = TPBPatternInputAdapter(
+                input_len=configs.input_len,
+                input_dim=self.raw_enc_in,
+                pattern_path=recipe_cfg.get("tpb_pattern_path", None),
+                num_patterns=int(recipe_cfg.get("tpb_num_patterns", 10)),
+                pattern_dim=int(recipe_cfg.get("tpb_pattern_dim", max(64, configs.d_model * 2))),
+                role_scale=recipe_cfg.get("tpb_role_scale", {}),
             )
 
         self._configure_expert_trainability()
@@ -546,6 +692,13 @@ class Model(nn.Module):
         visibility_ratio = (role_seq[..., ROLE_AAS] + role_seq[..., ROLE_NAS]).mean(dim=1, keepdim=False).unsqueeze(-1)
         return role_seq, last_role, last_age, visibility_ratio
 
+    def _resolve_current_node_ids(self, current_num_nodes):
+        if current_num_nodes == len(getattr(self, "known_nodes", [])):
+            return self.known_nodes
+        if current_num_nodes == getattr(self, "full_num_nodes", current_num_nodes):
+            return list(range(self.full_num_nodes))
+        return list(range(current_num_nodes))
+
     def _build_gate_features(self, x_enc):
         _, last_role, last_age, visibility_ratio = self._extract_role_and_age(x_enc)
         state_input = torch.cat([last_role, last_age, visibility_ratio], dim=-1)
@@ -580,12 +733,30 @@ class Model(nn.Module):
     def _run_experts(self, adj, x_enc, x_t_mark, pos_mark, x_dec, dec_t_mark, epoch):
         raw_x_enc = x_enc[..., :self.raw_enc_in]
         expert_x_dec = None if x_dec is None else x_dec[..., : self.output_dim]
+        aux_losses = {}
+        graph_x_enc = raw_x_enc
+        has_graph_input_adapter = self.eac_graph_input_adapter is not None or self.tpb_graph_input_adapter is not None
+        role_seq = None
+        if self.eac_graph_input_adapter is not None:
+            role_seq, _, _, _ = self._extract_role_and_age(x_enc)
+            current_node_ids = self._resolve_current_node_ids(raw_x_enc.size(2))
+            graph_x_enc, prompt = self.eac_graph_input_adapter(raw_x_enc, role_seq, current_node_ids=current_node_ids)
+            aux_losses["rolefusion_eac_input"] = self.lambda_eac_input * prompt.pow(2).mean()
+        if self.tpb_graph_input_adapter is not None:
+            if role_seq is None:
+                role_seq, _, _, _ = self._extract_role_and_age(x_enc)
+            graph_x_enc, prompt = self.tpb_graph_input_adapter(graph_x_enc, role_seq)
+            aux_losses["rolefusion_tpb_input"] = self.lambda_tpb_input * prompt.pow(2).mean()
+        if has_graph_input_adapter:
+            graph_output = self.graph_expert(adj, graph_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
+        else:
+            with torch.no_grad():
+                graph_output = self.graph_expert(adj, graph_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
         with torch.no_grad():
-            graph_output = self.graph_expert(adj, raw_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
             patch_output = self.patch_expert(adj, raw_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
         y_graph, _ = unpack_model_output(graph_output)
         y_patch, _ = unpack_model_output(patch_output)
-        return y_graph, y_patch
+        return y_graph, y_patch, aux_losses
 
     def _hard_route(self, y_graph, y_patch, last_role):
         role_ids = torch.argmax(last_role, dim=-1)
@@ -623,7 +794,8 @@ class Model(nn.Module):
             pred, residual = self.spatial_transfer_head(pred, adj, last_role)
             aux_losses["rolefusion_spatial_transfer"] = self.lambda_spatial_transfer * residual.pow(2).mean()
         if self.lifecycle_pattern_bank is not None:
-            pred, residual = self.lifecycle_pattern_bank(pred, adj, last_role=last_role)
+            current_node_ids = self._resolve_current_node_ids(pred.size(2))
+            pred, residual = self.lifecycle_pattern_bank(pred, adj, current_node_ids=current_node_ids, last_role=last_role)
             aux_losses["rolefusion_pattern_bank"] = self.lambda_pattern_bank * residual.pow(2).mean()
         return pred
 
@@ -717,22 +889,25 @@ class Model(nn.Module):
         }
 
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, x_dec=None, dec_t_mark=None, epoch=0):
-        y_graph, y_patch = self._run_experts(adj, x_enc, x_t_mark, pos_mark, x_dec, dec_t_mark, epoch)
+        y_graph, y_patch, expert_aux_losses = self._run_experts(adj, x_enc, x_t_mark, pos_mark, x_dec, dec_t_mark, epoch)
         if self.recipe == "hard_route":
             _, last_role, _, _ = self._extract_role_and_age(x_enc)
             pred = self._hard_route(y_graph, y_patch, last_role)
-            return {"pred": pred}
+            return {"pred": pred, "aux_losses": expert_aux_losses}
         if self.recipe == "soft_fuse_v2":
             pred, aux_losses = self._soft_fuse_v2(x_enc, y_graph, y_patch)
         elif self.recipe == "oracle_gate":
             pred, aux_losses, oracle_routing = self._role_gate(adj, x_enc, y_graph, y_patch, with_residual=False)
+            aux_losses.update(expert_aux_losses)
             return {"pred": pred, "aux_losses": aux_losses, "oracle_routing": oracle_routing}
         elif self.recipe in {"role_mmoe", "testam_role_mmoe"}:
             pred, aux_losses, routing_meta = self._role_gate(adj, x_enc, y_graph, y_patch, with_residual=True)
+            aux_losses.update(expert_aux_losses)
             output = {"pred": pred, "aux_losses": aux_losses, "oracle_routing": routing_meta}
             if "testam" in routing_meta:
                 output["testam_routing"] = routing_meta["testam"]
             return output
         else:
             pred, aux_losses = self._soft_fuse(x_enc, y_graph, y_patch)
+        aux_losses.update(expert_aux_losses)
         return {"pred": pred, "aux_losses": aux_losses}
