@@ -186,8 +186,10 @@ def _mean_metric_dicts(metric_dicts):
 def _append_state_buffer(state_buffers, state_name, pred, target):
     if pred is None:
         return
-    state_buffers[state_name]["pred"].append(pred)
-    state_buffers[state_name]["true"].append(target)
+    # Availability-state groups aggregate windows/events with different node counts.
+    # Flatten the variable node dimension before concatenating in _summarize_state_buffers.
+    state_buffers[state_name]["pred"].append(pred.reshape(-1, pred.shape[-1]))
+    state_buffers[state_name]["true"].append(target.reshape(-1, target.shape[-1]))
 
 
 def _summarize_state_buffers(state_buffers):
