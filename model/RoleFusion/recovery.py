@@ -523,6 +523,7 @@ class GraphInputRecoveryAdapter(nn.Module):
         self.recovery_name = str(recipe_cfg.get("graph_recovery_type", "grin")).lower()
         self.lambda_observed = float(recipe_cfg.get("lambda_graph_recovery_observed", 0.0))
         self.replace_observed = bool(recipe_cfg.get("graph_recovery_replace_observed", False))
+        self.gate_floor = float(recipe_cfg.get("graph_recovery_gate_floor", 0.0))
         role_scale = recipe_cfg.get("graph_recovery_role_scale", {}) or {}
         self.register_buffer(
             "role_recovery_scale",
@@ -537,6 +538,15 @@ class GraphInputRecoveryAdapter(nn.Module):
             ),
             persistent=False,
         )
+        self.state_gate = None
+        if bool(recipe_cfg.get("graph_recovery_state_gate", False)):
+            gate_hidden = int(recipe_cfg.get("graph_recovery_gate_hidden_dim", 16))
+            self.state_gate = nn.Sequential(
+                nn.Linear(ROLE_COUNT + 2, gate_hidden),
+                nn.ReLU(),
+                nn.Linear(gate_hidden, 1),
+                nn.Sigmoid(),
+            )
         if self.recovery_name == "grin":
             self.recovery = GRINet(
                 adj=full_adj,
@@ -569,7 +579,7 @@ class GraphInputRecoveryAdapter(nn.Module):
     def _visible_mask(self, role_seq):
         return ((role_seq[..., ROLE_AAS] + role_seq[..., ROLE_NAS]) > 0.5).unsqueeze(-1)
 
-    def forward(self, raw_x_enc, role_seq, last_role, adj, current_node_ids=None):
+    def forward(self, raw_x_enc, role_seq, last_role, adj, current_node_ids=None, state_features=None):
         observed_mask = self._visible_mask(role_seq)
         if self.recovery_name == "grin":
             recovery_output = self.recovery(raw_x_enc, mask=observed_mask, adj=adj, current_node_ids=current_node_ids)
@@ -578,6 +588,19 @@ class GraphInputRecoveryAdapter(nn.Module):
             imputed = self.recovery(raw_x_enc, observed_mask, adj, current_node_ids=current_node_ids)
 
         role_factor = torch.sum(last_role * self.role_recovery_scale.view(1, 1, ROLE_COUNT).to(last_role.device), dim=-1, keepdim=True)
+        if self.state_gate is not None:
+            if state_features is None:
+                state_features = torch.cat(
+                    [
+                        last_role,
+                        torch.zeros_like(last_role[..., :1]),
+                        torch.zeros_like(last_role[..., :1]),
+                    ],
+                    dim=-1,
+                )
+            gate = self.state_gate(state_features.to(dtype=raw_x_enc.dtype))
+            gate = self.gate_floor + (1.0 - self.gate_floor) * gate
+            role_factor = role_factor * gate
         role_factor = role_factor.unsqueeze(1).to(dtype=raw_x_enc.dtype)
         missing_mask = (~observed_mask).to(dtype=raw_x_enc.dtype)
         if self.replace_observed:

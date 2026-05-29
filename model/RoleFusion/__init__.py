@@ -799,7 +799,8 @@ class Model(nn.Module):
         role_seq = None
         history_age_seq = None
         if self.graph_input_recovery is not None:
-            role_seq, last_role, _, _ = self._extract_role_and_age(x_enc)
+            role_seq, last_role, last_age, visibility_ratio = self._extract_role_and_age(x_enc)
+            recovery_state = torch.cat([last_role, last_age, visibility_ratio], dim=-1)
             current_node_ids = self._resolve_current_node_ids(raw_x_enc.size(2))
             graph_x_enc, _, recovery_aux_losses = self.graph_input_recovery(
                 graph_x_enc,
@@ -807,6 +808,7 @@ class Model(nn.Module):
                 last_role,
                 adj,
                 current_node_ids=current_node_ids,
+                state_features=recovery_state,
             )
             aux_losses.update(recovery_aux_losses)
         if self.eac_graph_input_adapter is not None:
