@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 from args import load_args_from_config
 from lib.utils import load_project_adjacency, resolve_known_unknown_nodes
+from model.RoleFusion.recovery import GraphInputRecoveryAdapter
 from model.STBP.stbp import STBP_Model
 from utils.model_output import unpack_model_output
 
@@ -704,6 +705,14 @@ class Model(nn.Module):
                 age_gate_cutoff=float(recipe_cfg.get("tpb_age_gate_cutoff", 0.5)),
                 age_gate_min=float(recipe_cfg.get("tpb_age_gate_min", 0.0)),
             )
+        self.graph_input_recovery = None
+        if bool(recipe_cfg.get("use_graph_input_recovery", False)):
+            self.graph_input_recovery = GraphInputRecoveryAdapter(
+                recipe_cfg=recipe_cfg,
+                full_adj=full_adj,
+                input_dim=self.raw_enc_in,
+                full_num_nodes=self.full_num_nodes,
+            )
 
         self._configure_expert_trainability()
 
@@ -782,13 +791,29 @@ class Model(nn.Module):
         expert_x_dec = None if x_dec is None else x_dec[..., : self.output_dim]
         aux_losses = {}
         graph_x_enc = raw_x_enc
-        has_graph_input_adapter = self.eac_graph_input_adapter is not None or self.tpb_graph_input_adapter is not None
+        has_graph_input_adapter = (
+            self.graph_input_recovery is not None
+            or self.eac_graph_input_adapter is not None
+            or self.tpb_graph_input_adapter is not None
+        )
         role_seq = None
         history_age_seq = None
-        if self.eac_graph_input_adapter is not None:
-            role_seq, _, _, _ = self._extract_role_and_age(x_enc)
+        if self.graph_input_recovery is not None:
+            role_seq, last_role, _, _ = self._extract_role_and_age(x_enc)
             current_node_ids = self._resolve_current_node_ids(raw_x_enc.size(2))
-            graph_x_enc, prompt = self.eac_graph_input_adapter(raw_x_enc, role_seq, current_node_ids=current_node_ids)
+            graph_x_enc, _, recovery_aux_losses = self.graph_input_recovery(
+                graph_x_enc,
+                role_seq,
+                last_role,
+                adj,
+                current_node_ids=current_node_ids,
+            )
+            aux_losses.update(recovery_aux_losses)
+        if self.eac_graph_input_adapter is not None:
+            if role_seq is None:
+                role_seq, _, _, _ = self._extract_role_and_age(x_enc)
+            current_node_ids = self._resolve_current_node_ids(raw_x_enc.size(2))
+            graph_x_enc, prompt = self.eac_graph_input_adapter(graph_x_enc, role_seq, current_node_ids=current_node_ids)
             aux_losses["rolefusion_eac_input"] = self.lambda_eac_input * prompt.pow(2).mean()
         if self.tpb_graph_input_adapter is not None:
             if role_seq is None:
