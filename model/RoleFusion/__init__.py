@@ -331,7 +331,19 @@ class TPBPatternInputAdapter(nn.Module):
     # Adapted from references/TPB/model/Meta_Models/meta_patch.py::PatternEncoder_patternkeyv2:
     # keep the pattern-key attention order, and add only a small projection so
     # matched patterns can be used as a lifecycle input prompt for frozen experts.
-    def __init__(self, input_len, input_dim, pattern_path, num_patterns, pattern_dim, role_scale, allow_random_pattern=False):
+    def __init__(
+        self,
+        input_len,
+        input_dim,
+        pattern_path,
+        num_patterns,
+        pattern_dim,
+        role_scale,
+        allow_random_pattern=False,
+        use_age_gate=False,
+        age_gate_cutoff=0.5,
+        age_gate_min=0.0,
+    ):
         super(TPBPatternInputAdapter, self).__init__()
         self.input_len = int(input_len)
         self.input_dim = int(input_dim)
@@ -371,6 +383,9 @@ class TPBPatternInputAdapter(nn.Module):
 
         self.K, self.D = pattern.shape
         self.temporature = self.D ** 0.5
+        self.use_age_gate = bool(use_age_gate)
+        self.age_gate_cutoff = float(age_gate_cutoff)
+        self.age_gate_min = float(age_gate_min)
         self.Qnet = nn.Linear(self.input_patch_dim, self.D)
         self.qry_mat = nn.Parameter(torch.randn(self.D, self.K))
         self.out_proj = nn.Linear(self.D, self.input_patch_dim)
@@ -393,7 +408,7 @@ class TPBPatternInputAdapter(nn.Module):
             persistent=False,
         )
 
-    def forward(self, raw_x_enc, role_seq):
+    def forward(self, raw_x_enc, role_seq, history_age_seq=None):
         B, T, N, C = raw_x_enc.shape
         if T != self.input_len or C != self.input_dim:
             raise ValueError(
@@ -408,6 +423,12 @@ class TPBPatternInputAdapter(nn.Module):
         prompt = self.out_proj(w_X).reshape(B, N, T, C).permute(0, 2, 1, 3).contiguous()
 
         role_factor = torch.sum(role_seq * self.role_input_scale.view(1, 1, 1, ROLE_COUNT).to(role_seq.device), dim=-1, keepdim=True)
+        if self.use_age_gate:
+            if history_age_seq is None:
+                raise ValueError("TPBPatternInputAdapter use_age_gate=True requires history_age_seq")
+            cutoff = max(self.age_gate_cutoff, 1e-6)
+            age_gate = ((cutoff - history_age_seq) / cutoff).clamp(min=self.age_gate_min, max=1.0)
+            role_factor = role_factor * age_gate
         prompt = role_factor * prompt
         return raw_x_enc + prompt, prompt
 
@@ -679,6 +700,9 @@ class Model(nn.Module):
                 pattern_dim=int(recipe_cfg.get("tpb_pattern_dim", max(64, configs.d_model * 2))),
                 role_scale=recipe_cfg.get("tpb_role_scale", {}),
                 allow_random_pattern=bool(recipe_cfg.get("allow_random_tpb_pattern", False)),
+                use_age_gate=bool(recipe_cfg.get("tpb_use_age_gate", False)),
+                age_gate_cutoff=float(recipe_cfg.get("tpb_age_gate_cutoff", 0.5)),
+                age_gate_min=float(recipe_cfg.get("tpb_age_gate_min", 0.0)),
             )
 
         self._configure_expert_trainability()
@@ -760,6 +784,7 @@ class Model(nn.Module):
         graph_x_enc = raw_x_enc
         has_graph_input_adapter = self.eac_graph_input_adapter is not None or self.tpb_graph_input_adapter is not None
         role_seq = None
+        history_age_seq = None
         if self.eac_graph_input_adapter is not None:
             role_seq, _, _, _ = self._extract_role_and_age(x_enc)
             current_node_ids = self._resolve_current_node_ids(raw_x_enc.size(2))
@@ -768,7 +793,8 @@ class Model(nn.Module):
         if self.tpb_graph_input_adapter is not None:
             if role_seq is None:
                 role_seq, _, _, _ = self._extract_role_and_age(x_enc)
-            graph_x_enc, prompt = self.tpb_graph_input_adapter(graph_x_enc, role_seq)
+            history_age_seq = x_enc[..., self.age_idx:self.age_idx + 1]
+            graph_x_enc, prompt = self.tpb_graph_input_adapter(graph_x_enc, role_seq, history_age_seq=history_age_seq)
             aux_losses["rolefusion_tpb_input"] = self.lambda_tpb_input * prompt.pow(2).mean()
         if has_graph_input_adapter:
             graph_output = self.graph_expert(adj, graph_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
