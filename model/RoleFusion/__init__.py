@@ -523,6 +523,20 @@ class Model(nn.Module):
         self.lambda_eac_input = float(recipe_cfg.get("lambda_eac_input", 0.0))
         self.lambda_tpb_input = float(recipe_cfg.get("lambda_tpb_input", 0.0))
         self.residual_scale = float(recipe_cfg.get("residual_scale", 0.5))
+        self.graph_recovery_apply_to = str(recipe_cfg.get("graph_recovery_apply_to", "graph_input")).lower()
+        recovery_expert_role_scale = recipe_cfg.get("graph_recovery_expert_role_scale", {}) or {}
+        self.register_buffer(
+            "graph_recovery_expert_role_scale",
+            torch.tensor(
+                [
+                    float(recovery_expert_role_scale.get("aas", 0.0)),
+                    float(recovery_expert_role_scale.get("nas", 0.0)),
+                    float(recovery_expert_role_scale.get("vs", 0.0)),
+                    float(recovery_expert_role_scale.get("fs", 1.0)),
+                ],
+                dtype=torch.float32,
+            ),
+        )
         role_residual_scale = recipe_cfg.get(
             "role_residual_scale",
             {"aas": self.residual_scale, "nas": self.residual_scale, "vs": self.residual_scale, "fs": self.residual_scale},
@@ -791,8 +805,10 @@ class Model(nn.Module):
         expert_x_dec = None if x_dec is None else x_dec[..., : self.output_dim]
         aux_losses = {}
         graph_x_enc = raw_x_enc
+        recovered_graph_x_enc = None
+        use_recovery_as_expert = self.graph_input_recovery is not None and self.graph_recovery_apply_to == "role_expert"
         has_graph_input_adapter = (
-            self.graph_input_recovery is not None
+            (self.graph_input_recovery is not None and not use_recovery_as_expert)
             or self.eac_graph_input_adapter is not None
             or self.tpb_graph_input_adapter is not None
         )
@@ -802,7 +818,7 @@ class Model(nn.Module):
             role_seq, last_role, last_age, visibility_ratio = self._extract_role_and_age(x_enc)
             recovery_state = torch.cat([last_role, last_age, visibility_ratio], dim=-1)
             current_node_ids = self._resolve_current_node_ids(raw_x_enc.size(2))
-            graph_x_enc, _, recovery_aux_losses = self.graph_input_recovery(
+            recovered_graph_x_enc, _, recovery_aux_losses = self.graph_input_recovery(
                 graph_x_enc,
                 role_seq,
                 last_role,
@@ -810,6 +826,8 @@ class Model(nn.Module):
                 current_node_ids=current_node_ids,
                 state_features=recovery_state,
             )
+            if not use_recovery_as_expert:
+                graph_x_enc = recovered_graph_x_enc
             aux_losses.update(recovery_aux_losses)
         if self.eac_graph_input_adapter is not None:
             if role_seq is None:
@@ -828,11 +846,17 @@ class Model(nn.Module):
         else:
             with torch.no_grad():
                 graph_output = self.graph_expert(adj, graph_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
+        recovery_graph_output = None
+        if use_recovery_as_expert:
+            recovery_graph_output = self.graph_expert(adj, recovered_graph_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
         with torch.no_grad():
             patch_output = self.patch_expert(adj, raw_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
         y_graph, _ = unpack_model_output(graph_output)
         y_patch, _ = unpack_model_output(patch_output)
-        return y_graph, y_patch, aux_losses
+        y_recovered_graph = None
+        if recovery_graph_output is not None:
+            y_recovered_graph, _ = unpack_model_output(recovery_graph_output)
+        return y_graph, y_patch, aux_losses, y_recovered_graph
 
     def _hard_route(self, y_graph, y_patch, last_role):
         role_ids = torch.argmax(last_role, dim=-1)
@@ -875,7 +899,7 @@ class Model(nn.Module):
             aux_losses["rolefusion_pattern_bank"] = self.lambda_pattern_bank * residual.pow(2).mean()
         return pred
 
-    def _role_gate(self, adj, x_enc, y_graph, y_patch, with_residual=False):
+    def _role_gate(self, adj, x_enc, y_graph, y_patch, with_residual=False, y_recovered_graph=None):
         node_state, last_role = self._build_gate_features(x_enc)
         state_t = node_state.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
         gate_input = torch.cat([state_t, y_graph, y_patch, torch.abs(y_graph - y_patch)], dim=-1)
@@ -903,6 +927,14 @@ class Model(nn.Module):
             residual = residual_scale * torch.tanh(residual)
             fused = fused + residual
             aux_losses["rolefusion_role_residual"] = self.lambda_residual * residual.pow(2).mean()
+        if y_recovered_graph is not None:
+            recovery_scale = torch.sum(
+                last_role * self.graph_recovery_expert_role_scale.view(1, 1, ROLE_COUNT),
+                dim=-1,
+                keepdim=True,
+            )
+            recovery_scale = recovery_scale.unsqueeze(1).expand_as(fused)
+            fused = fused + recovery_scale * (y_recovered_graph - fused)
         fused = self._apply_role_heads(adj, x_enc, fused, last_role, aux_losses)
         routing_meta = {
             "alpha": alpha,
@@ -965,7 +997,7 @@ class Model(nn.Module):
         }
 
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, x_dec=None, dec_t_mark=None, epoch=0):
-        y_graph, y_patch, expert_aux_losses = self._run_experts(adj, x_enc, x_t_mark, pos_mark, x_dec, dec_t_mark, epoch)
+        y_graph, y_patch, expert_aux_losses, y_recovered_graph = self._run_experts(adj, x_enc, x_t_mark, pos_mark, x_dec, dec_t_mark, epoch)
         if self.recipe == "hard_route":
             _, last_role, _, _ = self._extract_role_and_age(x_enc)
             pred = self._hard_route(y_graph, y_patch, last_role)
@@ -973,11 +1005,11 @@ class Model(nn.Module):
         if self.recipe == "soft_fuse_v2":
             pred, aux_losses = self._soft_fuse_v2(x_enc, y_graph, y_patch)
         elif self.recipe == "oracle_gate":
-            pred, aux_losses, oracle_routing = self._role_gate(adj, x_enc, y_graph, y_patch, with_residual=False)
+            pred, aux_losses, oracle_routing = self._role_gate(adj, x_enc, y_graph, y_patch, with_residual=False, y_recovered_graph=y_recovered_graph)
             aux_losses.update(expert_aux_losses)
             return {"pred": pred, "aux_losses": aux_losses, "oracle_routing": oracle_routing}
         elif self.recipe in {"role_mmoe", "testam_role_mmoe"}:
-            pred, aux_losses, routing_meta = self._role_gate(adj, x_enc, y_graph, y_patch, with_residual=True)
+            pred, aux_losses, routing_meta = self._role_gate(adj, x_enc, y_graph, y_patch, with_residual=True, y_recovered_graph=y_recovered_graph)
             aux_losses.update(expert_aux_losses)
             output = {"pred": pred, "aux_losses": aux_losses, "oracle_routing": routing_meta}
             if "testam" in routing_meta:
