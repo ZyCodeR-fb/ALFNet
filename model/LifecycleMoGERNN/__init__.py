@@ -468,13 +468,86 @@ class STBPResidualAdapter(nn.Module):
         return pred + scale * residual
 
 
+class PSTMMaskedAutoencoderAdapter(nn.Module):
+    # Adapted from references/PSTM/pstm_arch/tsformer:
+    # PatchEmbedding + PositionalEncoding + TransformerLayers style masked
+    # reconstruction, with the shape converted to this project's [B,T,N,C].
+    def __init__(self, input_dim, patch_size, embed_dim, num_heads, depth, mlp_ratio, dropout, mask_ratio):
+        super().__init__()
+        self.input_dim = int(input_dim)
+        self.patch_size = int(patch_size)
+        self.embed_dim = int(embed_dim)
+        self.mask_ratio = float(mask_ratio)
+        self.input_embedding = nn.Conv2d(
+            self.input_dim,
+            self.embed_dim,
+            kernel_size=(self.patch_size, 1),
+            stride=(self.patch_size, 1),
+        )
+        self.position_embedding = nn.Parameter(torch.empty(512, self.embed_dim))
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.embed_dim,
+            nhead=int(num_heads),
+            dim_feedforward=int(self.embed_dim * mlp_ratio),
+            dropout=float(dropout),
+            batch_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, int(depth))
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, 1, self.embed_dim))
+        self.output_layer = nn.Linear(self.embed_dim, self.patch_size * self.input_dim)
+        nn.init.uniform_(self.position_embedding, -0.02, 0.02)
+        nn.init.trunc_normal_(self.mask_token, std=0.02)
+
+    def _patchify(self, x):
+        # x: [B,T,N,C] -> patches: [B,N,P,D], labels: [B,N,P,patch*C]
+        b, t, n, c = x.shape
+        if t % self.patch_size != 0:
+            raise ValueError(f"PSTMMaskedAutoencoderAdapter requires input_len divisible by patch_size, got {t} and {self.patch_size}")
+        history = x.permute(0, 2, 3, 1).contiguous().reshape(b * n, c, t, 1)
+        patches = self.input_embedding(history).squeeze(-1)
+        patches = patches.view(b, n, self.embed_dim, -1).transpose(-1, -2).contiguous()
+        labels = x.permute(0, 2, 1, 3).contiguous().view(b, n, -1, self.patch_size * c)
+        return patches, labels
+
+    def _token_mask(self, patches, observed_mask):
+        b, n, p, _ = patches.shape
+        if self.training and self.mask_ratio > 0:
+            random_mask = torch.rand(b, n, p, device=patches.device) < self.mask_ratio
+        else:
+            random_mask = torch.zeros(b, n, p, device=patches.device, dtype=torch.bool)
+        obs_patch = observed_mask.reshape(b, -1, n, self.patch_size, self.input_dim).any(dim=(3, 4)).transpose(1, 2)
+        return random_mask & obs_patch, obs_patch
+
+    def forward(self, raw_x, observed_mask):
+        b, t, n, c = raw_x.shape
+        patches, labels = self._patchify(raw_x)
+        token_mask, obs_patch = self._token_mask(patches, observed_mask)
+        pos = self.position_embedding[: patches.size(2)].view(1, 1, patches.size(2), self.embed_dim)
+        mask_token = self.mask_token.expand(b, n, patches.size(2), self.embed_dim)
+        encoder_input = torch.where(token_mask.unsqueeze(-1), mask_token, patches) + pos
+        hidden = self.encoder(encoder_input.view(b * n, patches.size(2), self.embed_dim))
+        hidden = hidden.view(b, n, patches.size(2), self.embed_dim)
+        reconstructed_patches = self.output_layer(hidden)
+        recon = reconstructed_patches.view(b, n, patches.size(2), self.patch_size, c)
+        recon = recon.reshape(b, n, t, c).permute(0, 2, 1, 3).contiguous()
+
+        aux_losses = {}
+        if token_mask.any():
+            patch_loss = F.mse_loss(reconstructed_patches[token_mask], labels[token_mask])
+            aux_losses["pstm_mae_reconstruction"] = patch_loss
+        elif obs_patch.any():
+            patch_loss = F.mse_loss(reconstructed_patches[obs_patch], labels[obs_patch])
+            aux_losses["pstm_mae_reconstruction"] = patch_loss
+        return recon, aux_losses
+
+
 class Model(nn.Module):
 
     def __init__(self, configs):
         super().__init__()
         self.cfg = getattr(configs, "model_family_cfg", {}) or {}
         self.recipe = configs.model_recipe
-        if self.recipe not in {"kits_comp", "stbp_residual", "kits_stbp"}:
+        if self.recipe not in {"kits_comp", "stbp_residual", "kits_stbp", "pstm_mae_comp"}:
             raise ValueError(f"Unsupported LifecycleMoGERNN recipe: {self.recipe}")
         backbone_cfg = self.cfg.get("backbone", {})
         if not backbone_cfg:
@@ -513,6 +586,33 @@ class Model(nn.Module):
         self.stbp_residual = None
         if self.recipe in {"stbp_residual", "kits_stbp"}:
             self.stbp_residual = STBPResidualAdapter(configs, full_adj.shape[0], recipe_cfg)
+        self.pstm_mae = None
+        self.pstm_mae_input_scale = float(recipe_cfg.get("pstm_mae_input_scale", 0.1))
+        self.pstm_mae_lambda = float(recipe_cfg.get("pstm_mae_lambda", 0.0))
+        pstm_role_scale = recipe_cfg.get("pstm_mae_role_scale", {}) or {}
+        self.register_buffer(
+            "pstm_mae_role_scale",
+            torch.tensor(
+                [
+                    float(pstm_role_scale.get("aas", 0.0)),
+                    float(pstm_role_scale.get("nas", 1.0)),
+                    float(pstm_role_scale.get("vs", 1.0)),
+                    float(pstm_role_scale.get("fs", 1.0)),
+                ],
+                dtype=torch.float32,
+            ),
+        )
+        if self.recipe == "pstm_mae_comp":
+            self.pstm_mae = PSTMMaskedAutoencoderAdapter(
+                input_dim=configs.raw_enc_in,
+                patch_size=int(recipe_cfg.get("pstm_mae_patch_size", 3)),
+                embed_dim=int(recipe_cfg.get("pstm_mae_embed_dim", 64)),
+                num_heads=int(recipe_cfg.get("pstm_mae_num_heads", 4)),
+                depth=int(recipe_cfg.get("pstm_mae_depth", 2)),
+                mlp_ratio=float(recipe_cfg.get("pstm_mae_mlp_ratio", 2.0)),
+                dropout=float(recipe_cfg.get("pstm_mae_dropout", 0.0)),
+                mask_ratio=float(recipe_cfg.get("pstm_mae_mask_ratio", 0.5)),
+            )
 
         self._configure_backbone_trainability()
 
@@ -541,14 +641,17 @@ class Model(nn.Module):
         return torch.abs(x_enc[..., : self.raw_enc_in]) > 0
 
     def _compensate_input(self, adj, x_enc):
+        aux_losses = {}
+        if self.pstm_mae is not None:
+            x_enc, mae_aux_losses = self._mae_compensate_input(x_enc)
+            aux_losses.update(mae_aux_losses)
         if self.kits is None:
-            return x_enc, {}
+            return x_enc, aux_losses
         raw_x = x_enc[..., : self.raw_enc_in]
         extra_x = x_enc[..., self.raw_enc_in:] if x_enc.size(-1) > self.raw_enc_in else None
         mask = self._visible_mask(x_enc).expand_as(raw_x)
         self.kits.adj = adj.detach().clone()
         kits_output = self.kits(raw_x, mask=mask)
-        aux_losses = {}
         if isinstance(kits_output, tuple):
             imputation, imputation_cyc, y = kits_output
             comp_x = y
@@ -556,6 +659,27 @@ class Model(nn.Module):
                 aux_losses["kits_cycle"] = self.kits_lambda_cycle * F.mse_loss(imputation_cyc[mask], raw_x[mask])
         else:
             comp_x = kits_output
+        if extra_x is None:
+            return comp_x, aux_losses
+        return torch.cat([comp_x, extra_x], dim=-1), aux_losses
+
+    def _mae_compensate_input(self, x_enc):
+        raw_x = x_enc[..., : self.raw_enc_in]
+        extra_x = x_enc[..., self.raw_enc_in:] if x_enc.size(-1) > self.raw_enc_in else None
+        observed_mask = self._visible_mask(x_enc).expand_as(raw_x)
+        reconstructed, aux_losses = self.pstm_mae(raw_x, observed_mask)
+        if self.pstm_mae_lambda > 0 and "pstm_mae_reconstruction" in aux_losses:
+            aux_losses["pstm_mae_reconstruction"] = self.pstm_mae_lambda * aux_losses["pstm_mae_reconstruction"]
+        elif "pstm_mae_reconstruction" in aux_losses:
+            aux_losses.pop("pstm_mae_reconstruction")
+        last_role = self._last_role(x_enc)
+        if last_role is None:
+            role_scale = torch.ones_like(raw_x)
+        else:
+            role_scale = torch.sum(last_role * self.pstm_mae_role_scale.view(1, 1, 4).to(last_role.device), dim=-1, keepdim=True)
+            role_scale = role_scale.unsqueeze(1).expand_as(raw_x)
+        missing_mask = (~observed_mask.bool()).to(dtype=raw_x.dtype)
+        comp_x = raw_x + self.pstm_mae_input_scale * role_scale * missing_mask * (reconstructed - raw_x)
         if extra_x is None:
             return comp_x, aux_losses
         return torch.cat([comp_x, extra_x], dim=-1), aux_losses
