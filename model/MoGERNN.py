@@ -17,10 +17,11 @@ class Expert(nn.Module):
 
 class GatingNetwork(nn.Module):
 
-    def __init__(self, configs):
+    def __init__(self, configs, input_dim=None):
         super(GatingNetwork, self).__init__()
         raw_enc_in = getattr(configs, "raw_enc_in", configs.enc_in)
-        self.fc1 = nn.Linear(configs.input_len * raw_enc_in, configs.d_model)
+        gate_input_dim = configs.input_len * (raw_enc_in if input_dim is None else input_dim)
+        self.fc1 = nn.Linear(gate_input_dim, configs.d_model)
         self.fc2 = nn.Linear(configs.d_model, configs.num_experts)
         self.softmax = nn.Softmax(dim=-1)
 
@@ -34,10 +35,11 @@ class GatingNetwork(nn.Module):
 
 class SparseGatingNetwork(nn.Module):
 
-    def __init__(self, configs):
+    def __init__(self, configs, input_dim=None):
         super(SparseGatingNetwork, self).__init__()
         raw_enc_in = getattr(configs, "raw_enc_in", configs.enc_in)
-        self.fc1 = nn.Linear(configs.input_len * raw_enc_in, configs.d_model)
+        gate_input_dim = configs.input_len * (raw_enc_in if input_dim is None else input_dim)
+        self.fc1 = nn.Linear(gate_input_dim, configs.d_model)
         self.fc2 = nn.Linear(configs.d_model, configs.num_experts)
         self.k = configs.num_used_experts
 
@@ -63,6 +65,22 @@ class DataPreparation(nn.Module):
         super(DataPreparation, self).__init__()
         self.raw_enc_in = getattr(configs, "raw_enc_in", configs.enc_in)
         self.total_enc_in = configs.enc_in
+        self.role_start = self.raw_enc_in
+        self.role_end = self.role_start + 4
+        self.age_idx = self.role_end
+        recipe_cfg = (getattr(configs, "model_family_cfg", {}) or {}).get("recipe", {})
+        self.use_mask_aware_gate = bool(recipe_cfg.get("use_mask_aware_gate", False))
+        self.use_observed_mask_gate = bool(recipe_cfg.get("use_observed_mask_gate", True))
+        self.use_role_gate_features = bool(recipe_cfg.get("use_role_gate_features", True))
+        self.use_age_gate_feature = bool(recipe_cfg.get("use_age_gate_feature", True))
+        gate_feature_dim = self.raw_enc_in
+        if self.use_mask_aware_gate:
+            if self.use_observed_mask_gate:
+                gate_feature_dim += 1
+            if self.use_role_gate_features and self.total_enc_in >= self.role_end:
+                gate_feature_dim += 4
+            if self.use_age_gate_feature and self.total_enc_in > self.age_idx:
+                gate_feature_dim += 1
         flattened_input_dim = configs.input_len * self.raw_enc_in
         experts = []
         if configs.mean_expert:
@@ -81,7 +99,25 @@ class DataPreparation(nn.Module):
             experts.append(
                 DiffusionAggregator(flattened_input_dim, flattened_input_dim))
         self.experts = nn.ModuleList([Expert(expert) for expert in experts])
-        self.gating = SparseGatingNetwork(configs)
+        self.gating = SparseGatingNetwork(configs, input_dim=gate_feature_dim)
+
+    def _observed_mask(self, raw_x, extra_x):
+        if extra_x is not None and self.total_enc_in >= self.role_end:
+            role_seq = extra_x[..., :4]
+            return ((role_seq[..., 0:1] + role_seq[..., 1:2]) > 0.5).to(dtype=raw_x.dtype)
+        return (torch.abs(raw_x).sum(dim=-1, keepdim=True) > 0).to(dtype=raw_x.dtype)
+
+    def _build_gate_input(self, raw_x, extra_x):
+        if not self.use_mask_aware_gate:
+            return raw_x
+        features = [raw_x]
+        if self.use_observed_mask_gate:
+            features.append(self._observed_mask(raw_x, extra_x))
+        if extra_x is not None and self.use_role_gate_features and self.total_enc_in >= self.role_end:
+            features.append(extra_x[..., :4])
+        if extra_x is not None and self.use_age_gate_feature and self.total_enc_in > self.age_idx:
+            features.append(extra_x[..., 4:5])
+        return torch.cat(features, dim=-1)
 
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None):
         if x_enc.size(-1) != self.total_enc_in:
@@ -93,10 +129,12 @@ class DataPreparation(nn.Module):
             )
         raw_x = x_enc[..., :self.raw_enc_in]
         extra_x = x_enc[..., self.raw_enc_in:] if self.total_enc_in > self.raw_enc_in else None
+        gate_x = self._build_gate_input(raw_x, extra_x)
         batch_unknown_nodes = torch.where(
             torch.sum(torch.abs(raw_x), dim=(0, 1, 3)) == 0)[0].cpu().tolist()
         raw_x = rearrange(raw_x, 'b t n c -> b n (t c)')
-        gate_weights = self.gating(raw_x)
+        gate_x = rearrange(gate_x, 'b t n c -> b n (t c)')
+        gate_weights = self.gating(gate_x)
         adj_noselfloop = adj.clone()
         adj_noselfloop[torch.eye(adj.shape[0]).bool()] = 0
         expert_outputs = [

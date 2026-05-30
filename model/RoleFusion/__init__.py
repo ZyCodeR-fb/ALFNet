@@ -800,6 +800,18 @@ class Model(nn.Module):
         state_input = torch.cat([last_role, last_age, visibility_ratio, last_visible, recent_trend, visible_std], dim=-1)
         return self.state_encoder(state_input), last_role, last_visible
 
+    def _format_graph_expert_input(self, raw_graph_x, x_enc):
+        graph_enc_in = int(getattr(self.graph_args, "enc_in", self.raw_enc_in))
+        if graph_enc_in <= self.raw_enc_in:
+            return raw_graph_x
+        if x_enc.size(-1) < graph_enc_in:
+            raise ValueError(
+                f"RoleFusion graph expert expects {graph_enc_in} input channels, "
+                f"but RoleFusion input has {x_enc.size(-1)} channels. "
+                "Use matching lifecycle_role_features/lifecycle_history_age_feature settings."
+            )
+        return torch.cat([raw_graph_x, x_enc[..., self.raw_enc_in:graph_enc_in]], dim=-1)
+
     def _run_experts(self, adj, x_enc, x_t_mark, pos_mark, x_dec, dec_t_mark, epoch):
         raw_x_enc = x_enc[..., :self.raw_enc_in]
         expert_x_dec = None if x_dec is None else x_dec[..., : self.output_dim]
@@ -841,14 +853,16 @@ class Model(nn.Module):
             history_age_seq = x_enc[..., self.age_idx:self.age_idx + 1]
             graph_x_enc, prompt = self.tpb_graph_input_adapter(graph_x_enc, role_seq, history_age_seq=history_age_seq)
             aux_losses["rolefusion_tpb_input"] = self.lambda_tpb_input * prompt.pow(2).mean()
+        graph_expert_x_enc = self._format_graph_expert_input(graph_x_enc, x_enc)
         if has_graph_input_adapter:
-            graph_output = self.graph_expert(adj, graph_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
+            graph_output = self.graph_expert(adj, graph_expert_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
         else:
             with torch.no_grad():
-                graph_output = self.graph_expert(adj, graph_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
+                graph_output = self.graph_expert(adj, graph_expert_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
         recovery_graph_output = None
         if use_recovery_as_expert:
-            recovery_graph_output = self.graph_expert(adj, recovered_graph_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
+            recovered_expert_x_enc = self._format_graph_expert_input(recovered_graph_x_enc, x_enc)
+            recovery_graph_output = self.graph_expert(adj, recovered_expert_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
         with torch.no_grad():
             patch_output = self.patch_expert(adj, raw_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
         y_graph, _ = unpack_model_output(graph_output)
