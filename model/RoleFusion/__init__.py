@@ -806,7 +806,7 @@ class Model(nn.Module):
         aux_losses = {}
         graph_x_enc = raw_x_enc
         recovered_graph_x_enc = None
-        use_recovery_as_expert = self.graph_input_recovery is not None and self.graph_recovery_apply_to == "role_expert"
+        use_recovery_as_expert = self.graph_input_recovery is not None and self.graph_recovery_apply_to in {"role_expert", "role_delta"}
         has_graph_input_adapter = (
             (self.graph_input_recovery is not None and not use_recovery_as_expert)
             or self.eac_graph_input_adapter is not None
@@ -934,7 +934,10 @@ class Model(nn.Module):
                 keepdim=True,
             )
             recovery_scale = recovery_scale.unsqueeze(1).expand_as(fused)
-            fused = fused + recovery_scale * (y_recovered_graph - fused)
+            if self.graph_recovery_apply_to == "role_delta":
+                fused = fused + recovery_scale * torch.tanh(y_recovered_graph - fused)
+            else:
+                fused = fused + recovery_scale * (y_recovered_graph - fused)
         fused = self._apply_role_heads(adj, x_enc, fused, last_role, aux_losses)
         routing_meta = {
             "alpha": alpha,
