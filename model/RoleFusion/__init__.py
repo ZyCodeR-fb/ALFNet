@@ -515,6 +515,9 @@ class Model(nn.Module):
         self.lambda_decisive = float(recipe_cfg.get("lambda_decisive", 0.02))
         self.lambda_oracle = float(recipe_cfg.get("lambda_oracle", 0.1))
         self.lambda_testam = float(recipe_cfg.get("lambda_testam", 0.0))
+        self.lambda_role_balanced = float(recipe_cfg.get("lambda_role_balanced", 0.0))
+        self.lambda_regret = float(recipe_cfg.get("lambda_regret", 0.0))
+        self.testam_role_balanced = bool(recipe_cfg.get("testam_role_balanced", False))
         self.testam_warmup_epoch = int(recipe_cfg.get("testam_warmup_epoch", 0))
         self.testam_threshold = float(recipe_cfg.get("testam_threshold", 0.0))
         self.lambda_fs_recovery = float(recipe_cfg.get("lambda_fs_recovery", 0.0))
@@ -958,12 +961,15 @@ class Model(nn.Module):
             "y_graph": y_graph.detach(),
             "y_patch": y_patch.detach(),
             "lambda_oracle": self.lambda_oracle,
+            "lambda_role_balanced": self.lambda_role_balanced,
+            "lambda_regret": self.lambda_regret,
         }
         if self.lambda_testam > 0 or self.recipe == "testam_role_mmoe":
             routing_meta["testam"] = {
                 "gate": torch.cat([alpha, 1.0 - alpha], dim=-1),
                 "expert_preds": torch.stack([y_graph.detach(), y_patch.detach()], dim=-1),
                 "lambda_testam": self.lambda_testam,
+                "role_balanced": self.testam_role_balanced,
                 "warmup_epoch": self.testam_warmup_epoch,
                 "threshold": self.testam_threshold,
             }

@@ -4,6 +4,78 @@ import random
 import torch.nn.functional as F
 from utils.model_output import sum_aux_losses, unpack_model_output
 
+ROLE_CHANNEL_COUNT = 4
+
+
+def _extract_last_role_from_input(x_enc, args):
+    if not getattr(args, "lifecycle_role_features", False):
+        return None
+    role_start = int(getattr(args, "raw_enc_in", 1))
+    role_end = role_start + ROLE_CHANNEL_COUNT
+    if x_enc.size(-1) < role_end:
+        return None
+    return x_enc[:, -1, :, role_start:role_end]
+
+
+def _masked_loss(y_hat, y, mask, loss_name):
+    if mask.sum() <= 0:
+        return None
+    safe_y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+    safe_diff = torch.where(mask, y_hat - safe_y, torch.zeros_like(y_hat))
+    if loss_name == "mse":
+        return safe_diff.pow(2)[mask].mean()
+    if loss_name == "rmse":
+        return torch.sqrt(safe_diff.pow(2)[mask].mean())
+    if loss_name == "mae":
+        return safe_diff.abs()[mask].mean()
+    if loss_name == "huber":
+        per_element = F.huber_loss(y_hat, safe_y, reduction="none")
+        return per_element[mask].mean()
+    return None
+
+
+def _role_balanced_average(element_loss, valid_mask, last_role):
+    if last_role is None:
+        if valid_mask.sum() <= 0:
+            return None
+        return element_loss[valid_mask].mean()
+    role_losses = []
+    for role_idx in range(ROLE_CHANNEL_COUNT):
+        role_mask = last_role[..., role_idx].unsqueeze(1).unsqueeze(-1) > 0.5
+        role_mask = role_mask.expand_as(valid_mask)
+        mask = valid_mask & role_mask
+        if mask.any():
+            role_losses.append(element_loss[mask].mean())
+    if not role_losses:
+        return None
+    return torch.stack(role_losses).mean()
+
+
+def _compute_role_balanced_forecast_loss(y_hat, y, y_omi, last_role, loss_name):
+    if last_role is None:
+        return None
+    valid_mask = (~y_omi) & torch.isfinite(y_hat) & torch.isfinite(y)
+    role_losses = []
+    for role_idx in range(ROLE_CHANNEL_COUNT):
+        role_mask = last_role[..., role_idx].unsqueeze(1).unsqueeze(-1) > 0.5
+        role_mask = role_mask.expand_as(valid_mask)
+        loss = _masked_loss(y_hat, y, valid_mask & role_mask, loss_name)
+        if loss is not None:
+            role_losses.append(loss)
+    if not role_losses:
+        return None
+    return torch.stack(role_losses).mean()
+
+
+def _compute_regret_loss(y_hat, y, y_omi, y_graph, y_patch, last_role):
+    valid_mask = (~y_omi) & torch.isfinite(y_hat) & torch.isfinite(y_graph) & torch.isfinite(y_patch) & torch.isfinite(y)
+    if not valid_mask.any():
+        return None
+    fusion_error = torch.abs(y_hat - y)
+    best_expert_error = torch.minimum(torch.abs(y_graph - y), torch.abs(y_patch - y)).detach()
+    regret = torch.relu(fusion_error - best_expert_error)
+    return _role_balanced_average(regret, valid_mask, last_role)
+
 
 def _compute_weighted_train_loss(y_hat, y, y_omi, sample_role_weights, args):
     if sample_role_weights is None:
@@ -32,7 +104,7 @@ def _compute_weighted_train_loss(y_hat, y, y_omi, sample_role_weights, args):
     return None
 
 
-def _compute_testam_routing_loss(testam_routing, y_for_loss, y_omi, epoch):
+def _compute_testam_routing_loss(testam_routing, y_for_loss, y_omi, epoch, last_role=None):
     # Adapted from references/TESTAM/engine.py::get_label with the same
     # worst-avoidance + best-choice pseudo-label routing idea.
     lambda_testam = float(testam_routing.get("lambda_testam", 0.0))
@@ -71,6 +143,10 @@ def _compute_testam_routing_loss(testam_routing, y_for_loss, y_omi, epoch):
     l_best_choice = torch.where(empty_val, torch.zeros_like(gate), l_best_choice).detach()
 
     routing_loss = -0.5 * l_worst_avoidance * torch.log(gate) - 0.5 * l_best_choice * torch.log(gate)
+    if bool(testam_routing.get("role_balanced", False)):
+        element_loss = routing_loss.sum(dim=-1)
+        balanced_loss = _role_balanced_average(element_loss, valid_mask, last_role)
+        return None if balanced_loss is None else lambda_testam * balanced_loss
     return lambda_testam * routing_loss[~empty_val].mean()
 
 
@@ -156,6 +232,7 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
             model_output = model(adj, x_enc, enc_t_mark, pos_mark, x_dec, dec_t_mark, epoch)
             y_hat, output_meta = unpack_model_output(model_output)
             y_for_loss = output_meta.get("target", y)
+            last_role = _extract_last_role_from_input(x_enc, args)
             if sample_role_weights is not None and sample_role_weights.shape != y_hat.shape:
                 sample_role_weights = None
             y_omi = torch.isnan(y_for_loss)
@@ -183,9 +260,19 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                         oracle_bce = F.binary_cross_entropy(alpha, oracle_target, reduction="none")
                         oracle_loss = (oracle_bce * valid_mask.to(dtype=oracle_bce.dtype)).sum() / valid_mask.to(dtype=oracle_bce.dtype).sum()
                         optimize_loss = optimize_loss + float(oracle_routing.get("lambda_oracle", 0.1)) * oracle_loss
+                    lambda_role_balanced = float(oracle_routing.get("lambda_role_balanced", 0.0))
+                    if lambda_role_balanced > 0:
+                        role_balanced_loss = _compute_role_balanced_forecast_loss(y_hat, y_for_loss, y_omi, last_role, args.loss)
+                        if role_balanced_loss is not None:
+                            optimize_loss = optimize_loss + lambda_role_balanced * role_balanced_loss
+                    lambda_regret = float(oracle_routing.get("lambda_regret", 0.0))
+                    if lambda_regret > 0:
+                        regret_loss = _compute_regret_loss(y_hat, y_for_loss, y_omi, y_graph, y_patch, last_role)
+                        if regret_loss is not None:
+                            optimize_loss = optimize_loss + lambda_regret * regret_loss
                 testam_routing = output_meta.get("testam_routing")
                 if testam_routing:
-                    testam_loss = _compute_testam_routing_loss(testam_routing, y_for_loss, y_omi, epoch)
+                    testam_loss = _compute_testam_routing_loss(testam_routing, y_for_loss, y_omi, epoch, last_role)
                     if testam_loss is not None:
                         optimize_loss = optimize_loss + testam_loss
             if not torch.isfinite(optimize_loss):

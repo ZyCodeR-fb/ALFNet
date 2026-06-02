@@ -175,9 +175,26 @@ def _validate_checkpoint_shape_compatibility(checkpoint, args):
 def _load_model_state(model, loaded, args, validator):
     if isinstance(loaded, dict) and "state_dict" in loaded:
         validator(loaded, args)
-        model.load_state_dict(loaded["state_dict"])
+        state_dict = _patch_compatible_state_dict(model, loaded["state_dict"])
+        model.load_state_dict(state_dict)
         return model
     return loaded
+
+
+def _patch_compatible_state_dict(model, state_dict):
+    model_state = model.state_dict()
+    compatible_state = dict(state_dict)
+    optional_runtime_buffers = {
+        "graph_recovery_expert_role_scale",
+        "role_residual_scale",
+        "role_graph_prior",
+        "role_graph_alpha_floor",
+        "pstm_mae_role_scale",
+    }
+    for key in optional_runtime_buffers:
+        if key not in compatible_state and key in model_state:
+            compatible_state[key] = model_state[key]
+    return compatible_state
 
 
 def load_pretrained_model(model, args):
