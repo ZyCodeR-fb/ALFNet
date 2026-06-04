@@ -152,7 +152,7 @@ def _add_arguments(parser):
         "--dloader_name",
         type=str,
         default="METRLA",
-        choices=["METRLA", "PEMSBAY", "METRLA-dynamic", "PEMSBAY-dynamic"],
+        choices=["METRLA", "PEMSBAY", "PEMS04", "PEMS08", "METRLA-dynamic", "PEMSBAY-dynamic", "PEMS04-dynamic", "PEMS08-dynamic"],
         help="dynamic denotes the scenario where the scensor is changing",
     )
     parser.add_argument("--data_path", type=str, default=None)
@@ -249,8 +249,8 @@ def finalize_args(args):
     if lifecycle_feature_enabled and not (args.train_for_async_lifecycle or args.test_for_async_lifecycle):
         raise ValueError("lifecycle input augmentation flags require train_for_async_lifecycle or test_for_async_lifecycle")
     if args.train_for_async_lifecycle or lifecycle_feature_enabled:
-        if args.input_features != "v" or args.target_features != "v":
-            raise ValueError("lifecycle-aware training/input augmentation currently supports input_features=target_features=v only")
+        if args.input_features != args.target_features or args.input_features not in {"q", "o", "v"}:
+            raise ValueError("lifecycle-aware training/input augmentation currently supports one same input/target feature among q/o/v")
     if args.train_for_async_lifecycle and args.lifecycle_training_strategy in {"round1", "round2", "round3", "round3_event_only", "round3_weight_only"}:
         args.lifecycle_keep_random_mask = True
     strategy_weight_defaults = {

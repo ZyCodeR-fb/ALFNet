@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 from torch.utils.data import Dataset
 import warnings
@@ -120,7 +122,8 @@ LIFECYCLE_TRAINING_PROFILES = {
 def _resolve_async_event_node_counts(num_nodes):
     if num_nodes in ASYNC_EVENT_NODE_COUNTS:
         return ASYNC_EVENT_NODE_COUNTS[num_nodes]
-    raise ValueError("num_nodes should be 207 or 325")
+    event_count = max(1, int(round(num_nodes * 0.10)))
+    return event_count, event_count
 
 
 def _resolve_lifecycle_training_profile(strategy):
@@ -432,12 +435,7 @@ class DynamicPEMS(Dataset):
         raw_data = raw_data['data']
         self.full_num_nodes = raw_data.shape[1]
         num_nodes = raw_data.shape[1]
-        if num_nodes == 207:  #metr-la
-            num_failed_nodes = num_add_nodes = 20  #~5%
-        elif num_nodes == 325:  #pemsbay
-            num_failed_nodes = num_add_nodes = 32  #~5%
-        else:
-            raise ValueError('num_nodes should be 207 or 325')
+        num_add_nodes, num_failed_nodes = _resolve_async_event_node_counts(num_nodes)
         raw_data[raw_data <= 0] = np.nan
         if len(self.unknown_nodes_path):
             self.train_unknown_nodes = np.load(self.unknown_nodes_path)
@@ -465,16 +463,12 @@ class DynamicPEMS(Dataset):
             )  #从原有的unknown里面挑一部分处理让他先是known然后在test中failed
 
         # use the following code to reproduce the results
-        if 'METR' in self.dloader_name:
-            self.new_add_nodes = np.load(
-                'data/METR-LA/new_add_nodes.npy').tolist()
-            self.failed_nodes = np.load(
-                'data/METR-LA/failed_nodes.npy').tolist()
-        else:
-            self.new_add_nodes = np.load(
-                'data/PEMS-BAY/new_add_nodes.npy').tolist()
-            self.failed_nodes = np.load(
-                'data/PEMS-BAY/failed_nodes.npy').tolist()
+        dataset_dir = Path(self.data_path).resolve().parent
+        new_add_nodes_path = dataset_dir / "new_add_nodes.npy"
+        failed_nodes_path = dataset_dir / "failed_nodes.npy"
+        if new_add_nodes_path.exists() and failed_nodes_path.exists():
+            self.new_add_nodes = np.load(new_add_nodes_path).tolist()
+            self.failed_nodes = np.load(failed_nodes_path).tolist()
 
         self.test_known_nodes = list((set(self.train_known_nodes) -
                                       set(self.failed_nodes))
