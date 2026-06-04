@@ -8,6 +8,8 @@ import torch
 
 def _load_raw_payload(data_path):
     raw = np.load(data_path, allow_pickle=True)
+    if isinstance(raw, np.ndarray) and raw.shape == ():
+        raw = raw.item()
     if isinstance(raw, dict):
         return raw
     if hasattr(raw, "files"):

@@ -126,6 +126,12 @@ def _resolve_async_event_node_counts(num_nodes):
     return event_count, event_count
 
 
+def _unwrap_raw_data(raw_data):
+    if isinstance(raw_data, np.ndarray) and raw_data.shape == ():
+        return raw_data.item()
+    return raw_data
+
+
 def _resolve_lifecycle_training_profile(strategy):
     if strategy not in LIFECYCLE_TRAINING_PROFILES:
         raise ValueError(f"Unsupported lifecycle_training_strategy: {strategy}")
@@ -254,7 +260,7 @@ class StaticPEMS(Dataset):
         self.__read_data__()
 
     def __read_data__(self):
-        raw_data = np.load(self.data_path, allow_pickle=True)
+        raw_data = _unwrap_raw_data(np.load(self.data_path, allow_pickle=True))
 
         # 时间戳 shape (time_horizon,)
         # features: timestamp
@@ -410,7 +416,7 @@ class DynamicPEMS(Dataset):
         self.__read_data__()
 
     def __read_data__(self):
-        raw_data = np.load(self.data_path, allow_pickle=True)
+        raw_data = _unwrap_raw_data(np.load(self.data_path, allow_pickle=True))
 
         # 时间戳 shape (time_horizon,)
         # features: timestamp
@@ -712,12 +718,6 @@ class LifecycleTrainPEMS(StaticPEMS):
             x_t_mark = self.time_mark[input_begin:input_end]
             y_t_mark = self.time_mark[output_begin:output_end]
         return seq_x, seq_y, x_t_mark, y_t_mark, target_role_weights
-
-
-def _unwrap_raw_data(raw_data):
-    if isinstance(raw_data, np.ndarray) and raw_data.shape == ():
-        return raw_data.item()
-    return raw_data
 
 
 class AsyncLifecyclePEMS(Dataset):
