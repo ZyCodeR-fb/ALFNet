@@ -282,7 +282,8 @@ if __name__ == "__main__":
     test_loader = data_provider(args, "test")
     data_loaders = dict(zip(["train", "val", "test"], [train_loader, val_loader, test_loader]))
     optimizers = {"adamw": torch.optim.AdamW, "adam": torch.optim.Adam, "sgd": torch.optim.SGD}
-    optimizer = optimizers[args.optimizer](model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer_params = model.get_optimizer_param_groups(args.lr) if hasattr(model, "get_optimizer_param_groups") else model.parameters()
+    optimizer = optimizers[args.optimizer](optimizer_params, lr=args.lr, weight_decay=args.weight_decay)
     schdulers = {
         "cosine": torch.optim.lr_scheduler.CosineAnnealingLR,
         "step": torch.optim.lr_scheduler.StepLR,

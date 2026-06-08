@@ -517,6 +517,20 @@ class Model(nn.Module):
         self.lambda_testam = float(recipe_cfg.get("lambda_testam", 0.0))
         self.lambda_role_balanced = float(recipe_cfg.get("lambda_role_balanced", 0.0))
         self.lambda_regret = float(recipe_cfg.get("lambda_regret", 0.0))
+        self.lambda_route = float(recipe_cfg.get("lambda_route", 0.0))
+        self.route_target = str(recipe_cfg.get("route_target", "hard_bce")).lower()
+        self.route_temperature = float(recipe_cfg.get("route_temperature", 1.0))
+        self.forecast_loss_mode = str(recipe_cfg.get("forecast_loss_mode", "standard")).lower()
+        self.end_to_end = bool(recipe_cfg.get("end_to_end", False))
+        self.expert_train_mode = bool(recipe_cfg.get("expert_train_mode", self.end_to_end))
+        self.use_role_residual = bool(recipe_cfg.get("use_role_residual", True))
+        expert_lr = recipe_cfg.get("expert_lr", None)
+        self.graph_expert_lr = recipe_cfg.get("graph_expert_lr", expert_lr)
+        self.patch_expert_lr = recipe_cfg.get("patch_expert_lr", expert_lr)
+        self.gate_lr = recipe_cfg.get("gate_lr", None)
+        self.graph_expert_lr = None if self.graph_expert_lr is None else float(self.graph_expert_lr)
+        self.patch_expert_lr = None if self.patch_expert_lr is None else float(self.patch_expert_lr)
+        self.gate_lr = None if self.gate_lr is None else float(self.gate_lr)
         self.testam_role_balanced = bool(recipe_cfg.get("testam_role_balanced", False))
         self.testam_warmup_epoch = int(recipe_cfg.get("testam_warmup_epoch", 0))
         self.testam_threshold = float(recipe_cfg.get("testam_threshold", 0.0))
@@ -620,7 +634,7 @@ class Model(nn.Module):
                 )
             else:
                 self.role_fusion_gates = nn.ModuleList()
-            if self.recipe in {"role_mmoe", "testam_role_mmoe"}:
+            if self.recipe in {"role_mmoe", "testam_role_mmoe"} and self.use_role_residual:
                 residual_input_dim = state_dim + 4 * self.output_dim
                 self.role_residual_heads = nn.ModuleList(
                     [
@@ -734,6 +748,11 @@ class Model(nn.Module):
         self._configure_expert_trainability()
 
     def _set_expert_trainability(self, expert, patterns):
+        if self.end_to_end:
+            for param in expert.parameters():
+                param.requires_grad = True
+            expert.train(self.training and self.expert_train_mode)
+            return
         for name, param in expert.named_parameters():
             param.requires_grad = False
             if patterns and any(pattern in name for pattern in patterns):
@@ -745,13 +764,37 @@ class Model(nn.Module):
             (self.graph_expert, self.graph_trainable_patterns),
             (self.patch_expert, self.patch_trainable_patterns),
         ):
-            expert.eval()
             self._set_expert_trainability(expert, patterns)
 
     def train(self, mode=True):
         super().train(mode)
         self._configure_expert_trainability()
         return self
+
+    def get_optimizer_param_groups(self, base_lr):
+        base_lr = float(base_lr)
+        graph_lr = self.graph_expert_lr if self.graph_expert_lr is not None else base_lr
+        patch_lr = self.patch_expert_lr if self.patch_expert_lr is not None else base_lr
+        gate_lr = self.gate_lr if self.gate_lr is not None else base_lr
+
+        graph_params = [param for param in self.graph_expert.parameters() if param.requires_grad]
+        patch_params = [param for param in self.patch_expert.parameters() if param.requires_grad]
+        expert_param_ids = {id(param) for param in graph_params}
+        expert_param_ids.update(id(param) for param in patch_params)
+        routing_params = [
+            param
+            for param in self.parameters()
+            if param.requires_grad and id(param) not in expert_param_ids
+        ]
+
+        param_groups = []
+        if graph_params:
+            param_groups.append({"params": graph_params, "lr": graph_lr})
+        if patch_params:
+            param_groups.append({"params": patch_params, "lr": patch_lr})
+        if routing_params:
+            param_groups.append({"params": routing_params, "lr": gate_lr})
+        return param_groups
 
     def _extract_role_and_age(self, x_enc):
         if x_enc.size(-1) <= self.age_idx:
@@ -857,7 +900,7 @@ class Model(nn.Module):
             graph_x_enc, prompt = self.tpb_graph_input_adapter(graph_x_enc, role_seq, history_age_seq=history_age_seq)
             aux_losses["rolefusion_tpb_input"] = self.lambda_tpb_input * prompt.pow(2).mean()
         graph_expert_x_enc = self._format_graph_expert_input(graph_x_enc, x_enc)
-        if has_graph_input_adapter:
+        if self.end_to_end or has_graph_input_adapter:
             graph_output = self.graph_expert(adj, graph_expert_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
         else:
             with torch.no_grad():
@@ -866,8 +909,11 @@ class Model(nn.Module):
         if use_recovery_as_expert:
             recovered_expert_x_enc = self._format_graph_expert_input(recovered_graph_x_enc, x_enc)
             recovery_graph_output = self.graph_expert(adj, recovered_expert_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
-        with torch.no_grad():
+        if self.end_to_end:
             patch_output = self.patch_expert(adj, raw_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
+        else:
+            with torch.no_grad():
+                patch_output = self.patch_expert(adj, raw_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
         y_graph, _ = unpack_model_output(graph_output)
         y_patch, _ = unpack_model_output(patch_output)
         y_recovered_graph = None
@@ -935,7 +981,7 @@ class Model(nn.Module):
             "rolefusion_prior": self.lambda_prior * prior_loss,
             "rolefusion_entropy": self.lambda_entropy * entropy,
         }
-        if with_residual:
+        if with_residual and self.use_role_residual:
             residual_input = torch.cat([state_t, fused, y_graph, y_patch, torch.abs(y_graph - y_patch)], dim=-1)
             role_residuals = torch.stack([head(residual_input) for head in self.role_residual_heads], dim=-2)
             residual = torch.sum(role_residuals * role_weights.unsqueeze(-1), dim=-2)
@@ -972,6 +1018,15 @@ class Model(nn.Module):
                 "role_balanced": self.testam_role_balanced,
                 "warmup_epoch": self.testam_warmup_epoch,
                 "threshold": self.testam_threshold,
+            }
+        if self.lambda_route > 0:
+            routing_meta["route"] = {
+                "alpha": alpha,
+                "y_graph": y_graph.detach(),
+                "y_patch": y_patch.detach(),
+                "lambda_route": self.lambda_route,
+                "target": self.route_target,
+                "temperature": self.route_temperature,
             }
         return fused, aux_losses, routing_meta
 
@@ -1035,8 +1090,12 @@ class Model(nn.Module):
             pred, aux_losses, routing_meta = self._role_gate(adj, x_enc, y_graph, y_patch, with_residual=True, y_recovered_graph=y_recovered_graph)
             aux_losses.update(expert_aux_losses)
             output = {"pred": pred, "aux_losses": aux_losses, "oracle_routing": routing_meta}
+            if self.forecast_loss_mode != "standard":
+                output["forecast_loss_mode"] = self.forecast_loss_mode
             if "testam" in routing_meta:
                 output["testam_routing"] = routing_meta["testam"]
+            if "route" in routing_meta:
+                output["route_routing"] = routing_meta["route"]
             return output
         else:
             pred, aux_losses = self._soft_fuse(x_enc, y_graph, y_patch)

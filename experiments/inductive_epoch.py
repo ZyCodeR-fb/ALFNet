@@ -150,6 +150,43 @@ def _compute_testam_routing_loss(testam_routing, y_for_loss, y_omi, epoch, last_
     return lambda_testam * routing_loss[~empty_val].mean()
 
 
+def _compute_lifecycle_route_loss(route_routing, y_for_loss, y_omi, last_role=None):
+    lambda_route = float(route_routing.get("lambda_route", 0.0))
+    if lambda_route <= 0:
+        return None
+
+    alpha = route_routing["alpha"].clamp(1e-6, 1.0 - 1e-6)
+    y_graph = route_routing["y_graph"]
+    y_patch = route_routing["y_patch"]
+    valid_mask = (~y_omi) & torch.isfinite(y_for_loss) & torch.isfinite(y_graph) & torch.isfinite(y_patch)
+    if not valid_mask.any():
+        return None
+
+    graph_err = torch.abs(y_graph - y_for_loss)
+    patch_err = torch.abs(y_patch - y_for_loss)
+    if graph_err.size(-1) != 1:
+        graph_err = graph_err.mean(dim=-1, keepdim=True)
+        patch_err = patch_err.mean(dim=-1, keepdim=True)
+        valid_mask = valid_mask.all(dim=-1, keepdim=True)
+    if alpha.shape != graph_err.shape:
+        alpha = alpha.expand_as(graph_err)
+
+    target_type = str(route_routing.get("target", "hard_bce")).lower()
+    if target_type in {"soft_kl", "soft"}:
+        temperature = max(float(route_routing.get("temperature", 1.0)), 1e-6)
+        target = torch.softmax(torch.cat([-graph_err, -patch_err], dim=-1) / temperature, dim=-1).detach()
+        gate = torch.cat([alpha, 1.0 - alpha], dim=-1)
+        route_loss = -(target * torch.log(gate)).sum(dim=-1, keepdim=True)
+    else:
+        target = (graph_err <= patch_err).to(dtype=alpha.dtype).detach()
+        route_loss = F.binary_cross_entropy(alpha, target, reduction="none")
+
+    if bool(route_routing.get("role_balanced", False)):
+        balanced_loss = _role_balanced_average(route_loss, valid_mask, last_role)
+        return None if balanced_loss is None else lambda_route * balanced_loss
+    return lambda_route * route_loss[valid_mask].mean()
+
+
 def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epoch):
     # Save step-wise metrics
     inverse_transform = dataloader.dataset.inverse_transform
@@ -241,8 +278,13 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
             loss = criterions[args.loss](y_hat[~y_omi], y_for_loss[~y_omi])
             optimize_loss = loss
             if grad_enabled:
+                forecast_loss_mode = str(output_meta.get("forecast_loss_mode", "standard")).lower()
+                if forecast_loss_mode in {"role_balanced", "role_balanced_forecast"}:
+                    role_balanced_loss = _compute_role_balanced_forecast_loss(y_hat, y_for_loss, y_omi, last_role, args.loss)
+                    if role_balanced_loss is not None:
+                        optimize_loss = role_balanced_loss
                 weighted_loss = _compute_weighted_train_loss(y_hat, y_for_loss, y_omi, sample_role_weights, args)
-                if weighted_loss is not None:
+                if weighted_loss is not None and forecast_loss_mode not in {"role_balanced", "role_balanced_forecast"}:
                     optimize_loss = weighted_loss
                 aux_loss = sum_aux_losses(output_meta.get("aux_losses"), device=y_hat.device)
                 if aux_loss is not None:
@@ -275,6 +317,11 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                     testam_loss = _compute_testam_routing_loss(testam_routing, y_for_loss, y_omi, epoch, last_role)
                     if testam_loss is not None:
                         optimize_loss = optimize_loss + testam_loss
+                route_routing = output_meta.get("route_routing")
+                if route_routing:
+                    route_loss = _compute_lifecycle_route_loss(route_routing, y_for_loss, y_omi, last_role)
+                    if route_loss is not None:
+                        optimize_loss = optimize_loss + route_loss
             if not torch.isfinite(optimize_loss):
                 if grad_enabled:
                     optimizer.zero_grad()
