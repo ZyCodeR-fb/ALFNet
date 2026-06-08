@@ -230,7 +230,11 @@ def _compute_lifecycle_route_loss(route_routing, y_for_loss, y_omi, epoch, last_
     target_type = str(route_routing.get("target", "hard_bce")).lower()
     if target_type in {"soft_kl", "soft"}:
         temperature = max(float(route_routing.get("temperature", 1.0)), 1e-6)
-        target = torch.softmax(torch.cat([-graph_err, -patch_err], dim=-1) / temperature, dim=-1).detach()
+        pair_err = torch.cat([graph_err, patch_err], dim=-1)
+        pair_valid = valid_mask.expand_as(pair_err)
+        err_scale = pair_err[pair_valid].detach().mean().clamp_min(1e-6)
+        route_logits = -torch.nan_to_num(pair_err / err_scale, nan=0.0, posinf=0.0, neginf=0.0) / temperature
+        target = torch.softmax(route_logits, dim=-1).detach()
         gate = torch.cat([alpha, 1.0 - alpha], dim=-1)
         route_loss = -(target * torch.log(gate)).sum(dim=-1, keepdim=True)
     else:
@@ -473,6 +477,13 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                             grad_enabled,
                             batch_ix,
                         )
+    if not total_y_true:
+        raise RuntimeError(
+            f"No valid batches were collected in {mode} at epoch {epoch}. "
+            "All losses/predictions were non-finite or all targets were missing; "
+            "check the current loss configuration and learning rates."
+        )
+
     total_y = {
         "true": torch.cat(total_y_true, dim=0),
         "pred": torch.cat(total_y_pred, dim=0),
