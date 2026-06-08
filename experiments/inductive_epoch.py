@@ -34,6 +34,17 @@ def _masked_loss(y_hat, y, mask, loss_name):
     return None
 
 
+def _element_loss(y_hat, y, loss_name):
+    safe_y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+    if loss_name == "mse" or loss_name == "rmse":
+        return (y_hat - safe_y).pow(2)
+    if loss_name == "mae":
+        return torch.abs(y_hat - safe_y)
+    if loss_name == "huber":
+        return F.huber_loss(y_hat, safe_y, reduction="none")
+    return None
+
+
 def _role_balanced_average(element_loss, valid_mask, last_role):
     if last_role is None:
         if valid_mask.sum() <= 0:
@@ -51,6 +62,23 @@ def _role_balanced_average(element_loss, valid_mask, last_role):
     return torch.stack(role_losses).mean()
 
 
+def _compute_focal_forecast_loss(y_hat, y, y_omi, last_role, loss_name, gamma=1.0, max_weight=5.0, role_balanced=False):
+    element_loss = _element_loss(y_hat, y, loss_name)
+    if element_loss is None:
+        return None
+    valid_mask = (~y_omi) & torch.isfinite(y_hat) & torch.isfinite(y)
+    if not valid_mask.any():
+        return None
+    valid_loss = element_loss[valid_mask].detach()
+    scale = valid_loss.mean().clamp_min(1e-6)
+    weights = (element_loss.detach() / scale).clamp_min(0.0).pow(float(gamma))
+    weights = weights.clamp(max=float(max_weight))
+    weighted_loss = element_loss * weights
+    if role_balanced:
+        return _role_balanced_average(weighted_loss, valid_mask, last_role)
+    return weighted_loss[valid_mask].sum() / weights[valid_mask].sum().clamp_min(1e-6)
+
+
 def _compute_role_balanced_forecast_loss(y_hat, y, y_omi, last_role, loss_name):
     if last_role is None:
         return None
@@ -65,6 +93,33 @@ def _compute_role_balanced_forecast_loss(y_hat, y, y_omi, last_role, loss_name):
     if not role_losses:
         return None
     return torch.stack(role_losses).mean()
+
+
+def _compute_expert_role_loss(expert_training, y_for_loss, y_omi, last_role, loss_name):
+    lambda_expert_role = float(expert_training.get("lambda_expert_role", 0.0))
+    if lambda_expert_role <= 0 or last_role is None:
+        return None
+    y_graph = expert_training["y_graph"]
+    y_patch = expert_training["y_patch"]
+    valid_mask = (~y_omi) & torch.isfinite(y_for_loss) & torch.isfinite(y_graph) & torch.isfinite(y_patch)
+    if not valid_mask.any():
+        return None
+
+    graph_role_mask = (last_role[..., 1:2] + last_role[..., 2:3]).unsqueeze(1) > 0.5
+    patch_role_mask = (last_role[..., 0:1] + last_role[..., 3:4]).unsqueeze(1) > 0.5
+    graph_role_mask = graph_role_mask.expand_as(valid_mask)
+    patch_role_mask = patch_role_mask.expand_as(valid_mask)
+
+    losses = []
+    graph_loss = _masked_loss(y_graph, y_for_loss, valid_mask & graph_role_mask, loss_name)
+    patch_loss = _masked_loss(y_patch, y_for_loss, valid_mask & patch_role_mask, loss_name)
+    if graph_loss is not None:
+        losses.append(graph_loss)
+    if patch_loss is not None:
+        losses.append(patch_loss)
+    if not losses:
+        return None
+    return lambda_expert_role * torch.stack(losses).mean()
 
 
 def _compute_regret_loss(y_hat, y, y_omi, y_graph, y_patch, last_role):
@@ -150,9 +205,10 @@ def _compute_testam_routing_loss(testam_routing, y_for_loss, y_omi, epoch, last_
     return lambda_testam * routing_loss[~empty_val].mean()
 
 
-def _compute_lifecycle_route_loss(route_routing, y_for_loss, y_omi, last_role=None):
+def _compute_lifecycle_route_loss(route_routing, y_for_loss, y_omi, epoch, last_role=None):
     lambda_route = float(route_routing.get("lambda_route", 0.0))
-    if lambda_route <= 0:
+    warmup_epoch = int(route_routing.get("warmup_epoch", 0))
+    if lambda_route <= 0 or epoch <= warmup_epoch:
         return None
 
     alpha = route_routing["alpha"].clamp(1e-6, 1.0 - 1e-6)
@@ -279,12 +335,40 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
             optimize_loss = loss
             if grad_enabled:
                 forecast_loss_mode = str(output_meta.get("forecast_loss_mode", "standard")).lower()
-                if forecast_loss_mode in {"role_balanced", "role_balanced_forecast"}:
+                role_balanced_modes = {"role_balanced", "role_balanced_forecast"}
+                role_balanced_mix_modes = {"role_balanced_mix", "mixed_role_balanced", "mix_role_balanced"}
+                focal_modes = {"focal", "focal_forecast", "role_focal", "role_balanced_focal"}
+                focal_mix_modes = {"focal_mix", "mixed_focal"}
+                if forecast_loss_mode in role_balanced_modes | role_balanced_mix_modes:
                     role_balanced_loss = _compute_role_balanced_forecast_loss(y_hat, y_for_loss, y_omi, last_role, args.loss)
                     if role_balanced_loss is not None:
-                        optimize_loss = role_balanced_loss
+                        if forecast_loss_mode in role_balanced_mix_modes:
+                            beta = float(output_meta.get("forecast_role_balanced_beta", 0.5))
+                            beta = max(0.0, min(1.0, beta))
+                            optimize_loss = (1.0 - beta) * optimize_loss + beta * role_balanced_loss
+                        else:
+                            optimize_loss = role_balanced_loss
+                if forecast_loss_mode in focal_modes | focal_mix_modes:
+                    focal_loss = _compute_focal_forecast_loss(
+                        y_hat,
+                        y_for_loss,
+                        y_omi,
+                        last_role,
+                        args.loss,
+                        gamma=float(output_meta.get("forecast_focal_gamma", 1.0)),
+                        max_weight=float(output_meta.get("forecast_focal_max_weight", 5.0)),
+                        role_balanced=forecast_loss_mode in {"role_focal", "role_balanced_focal"},
+                    )
+                    if focal_loss is not None:
+                        if forecast_loss_mode in focal_mix_modes:
+                            beta = float(output_meta.get("forecast_focal_beta", 0.5))
+                            beta = max(0.0, min(1.0, beta))
+                            optimize_loss = (1.0 - beta) * optimize_loss + beta * focal_loss
+                        else:
+                            optimize_loss = focal_loss
                 weighted_loss = _compute_weighted_train_loss(y_hat, y_for_loss, y_omi, sample_role_weights, args)
-                if weighted_loss is not None and forecast_loss_mode not in {"role_balanced", "role_balanced_forecast"}:
+                non_standard_forecast = role_balanced_modes | role_balanced_mix_modes | focal_modes | focal_mix_modes
+                if weighted_loss is not None and forecast_loss_mode not in non_standard_forecast:
                     optimize_loss = weighted_loss
                 aux_loss = sum_aux_losses(output_meta.get("aux_losses"), device=y_hat.device)
                 if aux_loss is not None:
@@ -319,9 +403,14 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                         optimize_loss = optimize_loss + testam_loss
                 route_routing = output_meta.get("route_routing")
                 if route_routing:
-                    route_loss = _compute_lifecycle_route_loss(route_routing, y_for_loss, y_omi, last_role)
+                    route_loss = _compute_lifecycle_route_loss(route_routing, y_for_loss, y_omi, epoch, last_role)
                     if route_loss is not None:
                         optimize_loss = optimize_loss + route_loss
+                expert_training = output_meta.get("expert_training")
+                if expert_training:
+                    expert_role_loss = _compute_expert_role_loss(expert_training, y_for_loss, y_omi, last_role, args.loss)
+                    if expert_role_loss is not None:
+                        optimize_loss = optimize_loss + expert_role_loss
             if not torch.isfinite(optimize_loss):
                 if grad_enabled:
                     optimizer.zero_grad()

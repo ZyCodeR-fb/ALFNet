@@ -520,7 +520,14 @@ class Model(nn.Module):
         self.lambda_route = float(recipe_cfg.get("lambda_route", 0.0))
         self.route_target = str(recipe_cfg.get("route_target", "hard_bce")).lower()
         self.route_temperature = float(recipe_cfg.get("route_temperature", 1.0))
+        self.route_warmup_epoch = int(recipe_cfg.get("route_warmup_epoch", 0))
+        self.route_role_balanced = bool(recipe_cfg.get("route_role_balanced", False))
         self.forecast_loss_mode = str(recipe_cfg.get("forecast_loss_mode", "standard")).lower()
+        self.forecast_role_balanced_beta = float(recipe_cfg.get("forecast_role_balanced_beta", 0.5))
+        self.forecast_focal_gamma = float(recipe_cfg.get("forecast_focal_gamma", 1.0))
+        self.forecast_focal_max_weight = float(recipe_cfg.get("forecast_focal_max_weight", 5.0))
+        self.forecast_focal_beta = float(recipe_cfg.get("forecast_focal_beta", 0.5))
+        self.lambda_expert_role = float(recipe_cfg.get("lambda_expert_role", 0.0))
         self.end_to_end = bool(recipe_cfg.get("end_to_end", False))
         self.expert_train_mode = bool(recipe_cfg.get("expert_train_mode", self.end_to_end))
         self.use_role_residual = bool(recipe_cfg.get("use_role_residual", True))
@@ -1027,6 +1034,8 @@ class Model(nn.Module):
                 "lambda_route": self.lambda_route,
                 "target": self.route_target,
                 "temperature": self.route_temperature,
+                "warmup_epoch": self.route_warmup_epoch,
+                "role_balanced": self.route_role_balanced,
             }
         return fused, aux_losses, routing_meta
 
@@ -1092,6 +1101,16 @@ class Model(nn.Module):
             output = {"pred": pred, "aux_losses": aux_losses, "oracle_routing": routing_meta}
             if self.forecast_loss_mode != "standard":
                 output["forecast_loss_mode"] = self.forecast_loss_mode
+                output["forecast_role_balanced_beta"] = self.forecast_role_balanced_beta
+                output["forecast_focal_gamma"] = self.forecast_focal_gamma
+                output["forecast_focal_max_weight"] = self.forecast_focal_max_weight
+                output["forecast_focal_beta"] = self.forecast_focal_beta
+            if self.lambda_expert_role > 0:
+                output["expert_training"] = {
+                    "y_graph": y_graph,
+                    "y_patch": y_patch,
+                    "lambda_expert_role": self.lambda_expert_role,
+                }
             if "testam" in routing_meta:
                 output["testam_routing"] = routing_meta["testam"]
             if "route" in routing_meta:
