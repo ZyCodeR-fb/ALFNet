@@ -541,22 +541,25 @@ def _resolve_model_module_name(model_name):
 def _load_expert_from_spec(spec, device, expert_name):
     model_name = spec["model"]
     config_path = spec["config_path"]
-    checkpoint_path = spec["checkpoint_path"]
-    if any(token in checkpoint_path for token in ["*", "?", "["]):
-        matches = glob.glob(checkpoint_path)
-        if not matches:
-            raise FileNotFoundError(f"RoleFusion {expert_name} expert checkpoint glob has no matches: {checkpoint_path}")
-        checkpoint_path = max(matches, key=os.path.getmtime)
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"RoleFusion {expert_name} expert config not found: {config_path}")
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"RoleFusion {expert_name} expert checkpoint not found: {checkpoint_path}")
     expert_args = load_args_from_config(config_path, overrides={"device": device})
     if expert_args.model != model_name:
         expert_args.model = model_name
     module_name = _resolve_model_module_name(model_name)
     module = importlib.import_module(f"model.{module_name}")
     expert = module.Model(expert_args).float()
+    checkpoint_path = spec.get("checkpoint_path", None)
+    load_checkpoint = bool(spec.get("load_checkpoint", True))
+    if (not load_checkpoint) or checkpoint_path in {None, ""}:
+        return expert, expert_args, None
+    if any(token in checkpoint_path for token in ["*", "?", "["]):
+        matches = glob.glob(checkpoint_path)
+        if not matches:
+            raise FileNotFoundError(f"RoleFusion {expert_name} expert checkpoint glob has no matches: {checkpoint_path}")
+        checkpoint_path = max(matches, key=os.path.getmtime)
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"RoleFusion {expert_name} expert checkpoint not found: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if not isinstance(checkpoint, dict) or "state_dict" not in checkpoint:
         raise ValueError(f"Expert checkpoint at {checkpoint_path} must contain a 'state_dict'")

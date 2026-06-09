@@ -57,8 +57,60 @@ def _kd_tree(locations, times, axis):
     return parts
 
 
-def _build_spatial_layout(positions, adj, recur_times, spa_patchsize):
-    parts_idx = _kd_tree(positions.T, recur_times, 0)
+def _split_order_to_parts(order, part_count):
+    return [np.sort(part.astype(int)) for part in np.array_split(np.asarray(order, dtype=int), part_count) if part.size > 0]
+
+
+def _spectral_graph_parts(adj, part_count):
+    adj_sym = (adj + adj.T) / 2.0
+    degree = adj_sym.sum(axis=1)
+    if np.count_nonzero(degree) <= 1:
+        return _split_order_to_parts(np.arange(adj.shape[0]), part_count)
+    degree_safe = np.where(degree > 0, degree, 1.0)
+    d_inv_sqrt = np.diag(np.power(degree_safe, -0.5))
+    laplacian = np.eye(adj.shape[0]) - d_inv_sqrt @ adj_sym @ d_inv_sqrt
+    _, eigvecs = np.linalg.eigh(laplacian)
+    fiedler_idx = 1 if eigvecs.shape[1] > 1 else 0
+    order = np.lexsort((np.arange(adj.shape[0]), eigvecs[:, fiedler_idx]))
+    return _split_order_to_parts(order, part_count)
+
+
+def _adjacency_walk_parts(adj, part_count):
+    adj_sym = (adj + adj.T) / 2.0
+    degree = adj_sym.sum(axis=1)
+    visited = np.zeros(adj.shape[0], dtype=bool)
+    order = []
+    while len(order) < adj.shape[0]:
+        remaining = np.where(~visited)[0]
+        if remaining.size == 0:
+            break
+        seed = int(remaining[np.argmax(degree[remaining])])
+        queue = [seed]
+        visited[seed] = True
+        while queue:
+            node = queue.pop(0)
+            order.append(node)
+            neighbors = np.where((adj_sym[node] > 0) & (~visited))[0]
+            if neighbors.size == 0:
+                continue
+            neighbors = neighbors[np.argsort(adj_sym[node, neighbors] * -1)]
+            for neighbor in neighbors:
+                visited[neighbor] = True
+                queue.append(int(neighbor))
+    return _split_order_to_parts(order, part_count)
+
+
+def _build_spatial_layout(positions, adj, recur_times, spa_patchsize, layout_type="kd_tree"):
+    layout_type = str(layout_type).lower()
+    part_count = 2 ** int(recur_times)
+    if layout_type in {"kd_tree", "kdtree", "position"}:
+        parts_idx = _kd_tree(positions.T, recur_times, 0)
+    elif layout_type in {"spectral", "graph_spectral"}:
+        parts_idx = _spectral_graph_parts(adj, part_count)
+    elif layout_type in {"adjacency", "adjacency_walk", "graph_walk"}:
+        parts_idx = _adjacency_walk_parts(adj, part_count)
+    else:
+        raise ValueError(f"Unsupported PatchSTG spatial_layout: {layout_type}")
     ori_parts_idx, reo_parts_idx, reo_all_idx = _reorder_data(parts_idx, adj, spa_patchsize)
     return ori_parts_idx.tolist(), reo_parts_idx.tolist(), reo_all_idx.tolist(), len(parts_idx)
 
@@ -80,6 +132,7 @@ class Model(nn.Module):
             full_adj,
             int(model_cfg["recur_times"]),
             int(model_cfg["spa_patchsize"]),
+            model_cfg.get("spatial_layout", "kd_tree"),
         )
         self.ori_parts_idx = ori_parts_idx
         self.reo_parts_idx = reo_parts_idx
@@ -107,6 +160,8 @@ class Model(nn.Module):
             ori_parts_idx=self.ori_parts_idx,
             reo_parts_idx=self.reo_parts_idx,
             reo_all_idx=self.reo_all_idx,
+            attention_order=model_cfg.get("attention_order", "depth_breadth"),
+            shift_size=int(model_cfg.get("attention_shift_size", 0)),
         )
 
     def _resolve_current_node_ids(self, current_num_nodes):

@@ -3,10 +3,12 @@ import torch.nn as nn
 from timm.models.vision_transformer import Attention, Mlp
 
 class WindowAttBlock(nn.Module):
-    def __init__(self, hidden_size, num_heads, num, size, mlp_ratio=4.0):
+    def __init__(self, hidden_size, num_heads, num, size, mlp_ratio=4.0, attention_order="depth_breadth", shift_size=0):
         super().__init__()
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.num, self.size = num, size
+        self.attention_order = str(attention_order).lower()
+        self.shift_size = int(shift_size)
 
         self.nnorm1 = nn.LayerNorm(hidden_size)
         self.nattn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, attn_drop=0.1, proj_drop=0.1)
@@ -18,24 +20,41 @@ class WindowAttBlock(nn.Module):
         self.snorm2 = nn.LayerNorm(hidden_size)
         self.smlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=nn.GELU, drop=0.1)
 
+    def _depth_attention(self, x, B, T, P, N, D):
+        qkv = self.snorm1(x.reshape(B*T*P,N,D))
+        x = x + self.sattn(qkv).reshape(B,T,P,N,D)
+        x = x + self.smlp(self.snorm2(x))
+        return x
+
+    def _breadth_attention(self, x, B, T, P, N, D):
+        qkv = self.nnorm1(x.transpose(2,3).reshape(B*T*N,P,D))
+        x = x + self.nattn(qkv).reshape(B,T,N,P,D).transpose(2,3)
+        x = x + self.nmlp(self.nnorm2(x))
+        return x
+
     def forward(self, x):
         B,T,_,D = x.shape
         # P: ptach num and N: patch size
         P, N = self.num, self.size
         assert self.num * self.size == _
+        shift_size = self.shift_size % _ if self.shift_size > 0 else 0
+        if shift_size:
+            x = torch.roll(x, shifts=-shift_size, dims=2)
         x = x.reshape(B, T, P, N, D)
 
-        # depth attention
-        qkv = self.snorm1(x.reshape(B*T*P,N,D))
-        x = x + self.sattn(qkv).reshape(B,T,P,N,D)
-        x = x + self.smlp(self.snorm2(x))
-        
-        # breadth attention
-        qkv = self.nnorm1(x.transpose(2,3).reshape(B*T*N,P,D))
-        x = x + self.nattn(qkv).reshape(B,T,N,P,D).transpose(2,3)
-        x = x + self.nmlp(self.nnorm2(x))
-         
-        return x.reshape(B,T,-1,D)
+        if self.attention_order in {"depth_breadth", "spatial_patch", "default"}:
+            x = self._depth_attention(x, B, T, P, N, D)
+            x = self._breadth_attention(x, B, T, P, N, D)
+        elif self.attention_order in {"breadth_depth", "cross_local"}:
+            x = self._breadth_attention(x, B, T, P, N, D)
+            x = self._depth_attention(x, B, T, P, N, D)
+        else:
+            raise ValueError(f"Unsupported PatchSTG attention_order: {self.attention_order}")
+
+        x = x.reshape(B,T,-1,D)
+        if shift_size:
+            x = torch.roll(x, shifts=shift_size, dims=2)
+        return x
 
 class PatchSTG(nn.Module):
     def __init__(self, tem_patchsize, tem_patchnum,
@@ -43,7 +62,9 @@ class PatchSTG(nn.Module):
                         tod, dow,
                         layers, factors,
                         input_dims, node_dims, tod_dims, dow_dims,
-                        ori_parts_idx, reo_parts_idx, reo_all_idx
+                        ori_parts_idx, reo_parts_idx, reo_all_idx,
+                        attention_order="depth_breadth",
+                        shift_size=0
                 ):
         super(PatchSTG, self).__init__()
         self.node_num = node_num
@@ -71,7 +92,16 @@ class PatchSTG(nn.Module):
 
         # dual attention encoder -> section 4.3 in paper, factors for merging the leaf nodes of KDTree
         self.spa_encoder = nn.ModuleList([
-            WindowAttBlock(dims, 1, spa_patchnum//factors, spa_patchsize*factors, mlp_ratio=1) for _ in range(layers)
+            WindowAttBlock(
+                dims,
+                1,
+                spa_patchnum//factors,
+                spa_patchsize*factors,
+                mlp_ratio=1,
+                attention_order=attention_order,
+                shift_size=(int(shift_size) if i % 2 == 1 else 0),
+            )
+            for i in range(layers)
         ])
 
         # projection decoder -> section 4.4 in paper

@@ -96,6 +96,42 @@ class DCRNNCell(GraphGRUCellBase):
                                         candidate_gate=candidate_gate)
 
 
+class LayerNormDCRNNCell(DCRNNCell):
+
+    def __init__(self, input_size: int, hidden_size: int, k: int = 2):
+        super(LayerNormDCRNNCell, self).__init__(input_size, hidden_size, k)
+        self.norm = nn.LayerNorm(hidden_size)
+
+    def forward(self, x, h, A_q, A_h):
+        return self.norm(super().forward(x, h, A_q, A_h))
+
+
+class MGDCRNNCell(nn.Module):
+
+    def __init__(self, input_size: int, hidden_size: int, k: int = 2):
+        super(MGDCRNNCell, self).__init__()
+        self.hidden_size = hidden_size
+        self.mix_gate = DiffConv(input_size + hidden_size, hidden_size, k)
+        self.candidate_gate = DiffConv(input_size + hidden_size, hidden_size, k)
+        self.norm = nn.LayerNorm(hidden_size)
+
+    def initialize_state(self, x):
+        return torch.zeros(
+            x.size(0),
+            x.size(-2),
+            self.hidden_size,
+            dtype=x.dtype,
+            device=x.device,
+        )
+
+    def forward(self, x, h, A_q, A_h):
+        x_gates = torch.cat([x, h], dim=-1)
+        z = torch.sigmoid(self.mix_gate(x_gates, A_q, A_h))
+        x_c = torch.cat([x, z * h], dim=-1)
+        c = torch.tanh(self.candidate_gate(x_c, A_q, A_h))
+        return self.norm(z * h + (1.0 - z) * c)
+
+
 class MoGERNNCell(MoGEGRUCellBase):
 
     def __init__(self, experts_list, input_dim, hidden_dim, num_used_experts):

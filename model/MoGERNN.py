@@ -2,7 +2,7 @@ from layers.gnn import nn, torch, calculate_random_walk_matrix
 import torch.nn.functional as F
 from einops import rearrange
 from layers.agg import MeanAggregator, WMeanAggregator, MaxPoolingAggregator, MinPoolingAggregator, DiffusionAggregator
-from layers.DCRNNCell import DCRNNCell
+from layers.DCRNNCell import DCRNNCell, LayerNormDCRNNCell, MGDCRNNCell
 
 
 class Expert(nn.Module):
@@ -153,15 +153,26 @@ class DataPreparation(nn.Module):
         return torch.cat([raw_x, extra_x], dim=-1)
 
 
+def _build_recurrent_cell(cell_type, input_size, hidden_size, k):
+    cell_type = str(cell_type).lower()
+    if cell_type in {"dcrnn", "dcgru", "graph_gru"}:
+        return DCRNNCell(input_size, hidden_size, k)
+    if cell_type in {"ln_dcrnn", "layernorm_dcrnn", "norm_dcrnn"}:
+        return LayerNormDCRNNCell(input_size, hidden_size, k)
+    if cell_type in {"mgu_dcrnn", "mg_dcrnn", "minimal_dcrnn"}:
+        return MGDCRNNCell(input_size, hidden_size, k)
+    raise ValueError(f"Unsupported MoGERNN recurrent cell_type: {cell_type}")
+
+
 class Encoder(nn.Module):
 
-    def __init__(self, input_size, hidden_size, num_layers, k=2):
+    def __init__(self, input_size, hidden_size, num_layers, k=2, cell_type="dcrnn"):
         super(Encoder, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
 
         self.rnn_cells = nn.ModuleList([
-            DCRNNCell(input_size if i == 0 else hidden_size, hidden_size, k)
+            _build_recurrent_cell(cell_type, input_size if i == 0 else hidden_size, hidden_size, k)
             for i in range(num_layers)
         ])
 
@@ -197,7 +208,8 @@ class Decoder(nn.Module):
                  out_seq_len,
                  output_size=None,
                  num_layers=1,
-                 k=2):
+                 k=2,
+                 cell_type="dcrnn"):
         super(Decoder, self).__init__()
         self.input_size = input_size
         self.output_size = input_size if output_size is None else output_size
@@ -206,7 +218,7 @@ class Decoder(nn.Module):
         self.out_seq_len = out_seq_len
 
         self.rnn_cells = nn.ModuleList([
-            DCRNNCell(input_size if i == 0 else hidden_size, hidden_size, k)
+            _build_recurrent_cell(cell_type, input_size if i == 0 else hidden_size, hidden_size, k)
             for i in range(num_layers)
         ])
         self.fc = nn.Linear(hidden_size, self.output_size)
@@ -245,11 +257,11 @@ class Decoder(nn.Module):
 
 class Seq2Seq(nn.Module):
 
-    def __init__(self, enc_input_size, dec_input_size, hidden_size, num_layers, out_seq_len, k=2):
+    def __init__(self, enc_input_size, dec_input_size, hidden_size, num_layers, out_seq_len, k=2, cell_type="dcrnn"):
         super(Seq2Seq, self).__init__()
-        self.encoder = Encoder(enc_input_size, hidden_size, num_layers, k)
+        self.encoder = Encoder(enc_input_size, hidden_size, num_layers, k, cell_type=cell_type)
         self.decoder = Decoder(dec_input_size, hidden_size, out_seq_len,
-                               output_size=dec_input_size, num_layers=num_layers, k=k)
+                               output_size=dec_input_size, num_layers=num_layers, k=k, cell_type=cell_type)
 
     def forward(self, x_enc, x_dec, A_q, A_h, initial_input, teacher_forcing_ratio=0.5):
         h = self.encoder(x_enc, A_q, A_h)
@@ -265,8 +277,10 @@ class Model(nn.Module):
         self.out_len = configs.pred_len if configs.pred_len > 0 else configs.look_back
         self.output_dim = configs.c_out
         self.data_pre = DataPreparation(configs)
+        recipe_cfg = (getattr(configs, "model_family_cfg", {}) or {}).get("recipe", {})
+        cell_type = recipe_cfg.get("cell_type", recipe_cfg.get("mogernn_cell_type", "dcrnn"))
         self.seq2seq = Seq2Seq(configs.enc_in, configs.c_out, configs.d_model,
-                               configs.e_layers, self.out_len, configs.k_hop)
+                               configs.e_layers, self.out_len, configs.k_hop, cell_type=cell_type)
 
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, *args):
         x_dec = args[0]
