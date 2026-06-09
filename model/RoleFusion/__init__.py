@@ -434,6 +434,104 @@ class TPBPatternInputAdapter(nn.Module):
         return raw_x_enc + prompt, prompt
 
 
+def _build_role_scale(role_scale, default_role_scale):
+    role_scale = role_scale or {}
+    return torch.tensor(
+        [
+            float(role_scale.get("aas", default_role_scale.get("aas", 1.0))),
+            float(role_scale.get("nas", default_role_scale.get("nas", 1.0))),
+            float(role_scale.get("vs", default_role_scale.get("vs", 1.0))),
+            float(role_scale.get("fs", default_role_scale.get("fs", 1.0))),
+        ],
+        dtype=torch.float32,
+    )
+
+
+class TemporalConvOutputRefiner(nn.Module):
+    def __init__(self, output_dim, hidden_dim, kernel_size, dilation, scale, role_scale):
+        super().__init__()
+        kernel_size = int(kernel_size)
+        dilation = int(dilation)
+        if kernel_size % 2 == 0:
+            raise ValueError("TemporalConvOutputRefiner requires an odd kernel_size to preserve prediction length")
+        padding = dilation * (kernel_size - 1) // 2
+        self.input_proj = nn.Conv1d(output_dim, hidden_dim, kernel_size=kernel_size, padding=padding, dilation=dilation)
+        self.output_proj = nn.Conv1d(hidden_dim, output_dim, kernel_size=1)
+        self.activation = nn.GELU()
+        self.scale = float(scale)
+        self.register_buffer(
+            "role_output_scale",
+            _build_role_scale(role_scale, {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0}),
+            persistent=False,
+        )
+        nn.init.zeros_(self.output_proj.weight)
+        nn.init.zeros_(self.output_proj.bias)
+
+    def forward(self, pred, last_role):
+        B, T, N, C = pred.shape
+        x = pred.permute(0, 2, 3, 1).reshape(B * N, C, T)
+        residual = self.output_proj(self.activation(self.input_proj(x)))
+        residual = residual.reshape(B, N, C, T).permute(0, 3, 1, 2).contiguous()
+        role_scale = torch.sum(
+            last_role * self.role_output_scale.to(last_role.device).view(1, 1, ROLE_COUNT),
+            dim=-1,
+            keepdim=True,
+        )
+        residual = role_scale.unsqueeze(1).to(dtype=residual.dtype) * torch.tanh(residual)
+        return pred + self.scale * residual, residual
+
+
+class GraphDiffusionOutputRefiner(nn.Module):
+    def __init__(self, output_dim, hidden_dim, diffusion_steps, scale, role_scale, use_backward=True, add_self_loop=True):
+        super().__init__()
+        self.diffusion_steps = int(diffusion_steps)
+        self.use_backward = bool(use_backward)
+        self.add_self_loop = bool(add_self_loop)
+        self.scale = float(scale)
+        support_count = 1 + self.diffusion_steps * (2 if self.use_backward else 1)
+        self.input_proj = nn.Linear(support_count * output_dim, hidden_dim)
+        self.output_proj = nn.Linear(hidden_dim, output_dim)
+        self.activation = nn.GELU()
+        self.register_buffer(
+            "role_output_scale",
+            _build_role_scale(role_scale, {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0}),
+            persistent=False,
+        )
+        nn.init.zeros_(self.output_proj.weight)
+        nn.init.zeros_(self.output_proj.bias)
+
+    def _support(self, adj, dtype):
+        support = adj.to(dtype=dtype)
+        if self.add_self_loop:
+            support = support + torch.eye(support.size(0), device=support.device, dtype=dtype)
+        fw = support / support.sum(1, keepdim=True).clamp_min(1e-6)
+        bw = support.T / support.T.sum(1, keepdim=True).clamp_min(1e-6)
+        return fw, bw
+
+    def _aggregate(self, support, x):
+        return torch.einsum("nm,btmd->btnd", support, x).contiguous()
+
+    def forward(self, pred, adj, last_role):
+        fw, bw = self._support(adj.to(pred.device), pred.dtype)
+        features = [pred]
+        current_fw = pred
+        current_bw = pred
+        for _ in range(self.diffusion_steps):
+            current_fw = self._aggregate(fw, current_fw)
+            features.append(current_fw)
+            if self.use_backward:
+                current_bw = self._aggregate(bw, current_bw)
+                features.append(current_bw)
+        residual = self.output_proj(self.activation(self.input_proj(torch.cat(features, dim=-1))))
+        role_scale = torch.sum(
+            last_role * self.role_output_scale.to(last_role.device).view(1, 1, ROLE_COUNT),
+            dim=-1,
+            keepdim=True,
+        )
+        residual = role_scale.unsqueeze(1).to(dtype=residual.dtype) * torch.tanh(residual)
+        return pred + self.scale * residual, residual
+
+
 def _resolve_model_module_name(model_name):
     if model_name == "GWNET":
         return "GWNet"
@@ -751,6 +849,50 @@ class Model(nn.Module):
                 input_dim=self.raw_enc_in,
                 full_num_nodes=self.full_num_nodes,
             )
+        temporal_hidden_dim = int(model_cfg.get("temporal_refiner_hidden_dim", gate_hidden_dim))
+        graph_refiner_hidden_dim = int(model_cfg.get("graph_refiner_hidden_dim", gate_hidden_dim))
+        self.graph_expert_diffusion_refiner = None
+        if bool(recipe_cfg.get("use_graph_expert_diffusion_refiner", False)):
+            self.graph_expert_diffusion_refiner = GraphDiffusionOutputRefiner(
+                output_dim=self.output_dim,
+                hidden_dim=graph_refiner_hidden_dim,
+                diffusion_steps=int(recipe_cfg.get("graph_diffusion_steps", 1)),
+                scale=float(recipe_cfg.get("graph_diffusion_scale", 0.05)),
+                role_scale=recipe_cfg.get("graph_diffusion_role_scale", {}),
+                use_backward=bool(recipe_cfg.get("graph_diffusion_use_backward", True)),
+                add_self_loop=bool(recipe_cfg.get("graph_diffusion_add_self_loop", True)),
+            )
+        self.patch_expert_temporal_refiner = None
+        if bool(recipe_cfg.get("use_patch_expert_temporal_refiner", False)):
+            self.patch_expert_temporal_refiner = TemporalConvOutputRefiner(
+                output_dim=self.output_dim,
+                hidden_dim=temporal_hidden_dim,
+                kernel_size=int(recipe_cfg.get("temporal_refiner_kernel_size", 3)),
+                dilation=int(recipe_cfg.get("temporal_refiner_dilation", 1)),
+                scale=float(recipe_cfg.get("temporal_refiner_scale", 0.05)),
+                role_scale=recipe_cfg.get("temporal_refiner_role_scale", {}),
+            )
+        self.fused_graph_diffusion_refiner = None
+        if bool(recipe_cfg.get("use_fused_graph_diffusion_refiner", False)):
+            self.fused_graph_diffusion_refiner = GraphDiffusionOutputRefiner(
+                output_dim=self.output_dim,
+                hidden_dim=graph_refiner_hidden_dim,
+                diffusion_steps=int(recipe_cfg.get("fused_graph_diffusion_steps", recipe_cfg.get("graph_diffusion_steps", 1))),
+                scale=float(recipe_cfg.get("fused_graph_diffusion_scale", recipe_cfg.get("graph_diffusion_scale", 0.05))),
+                role_scale=recipe_cfg.get("fused_graph_diffusion_role_scale", recipe_cfg.get("graph_diffusion_role_scale", {})),
+                use_backward=bool(recipe_cfg.get("fused_graph_diffusion_use_backward", recipe_cfg.get("graph_diffusion_use_backward", True))),
+                add_self_loop=bool(recipe_cfg.get("fused_graph_diffusion_add_self_loop", recipe_cfg.get("graph_diffusion_add_self_loop", True))),
+            )
+        self.fused_temporal_refiner = None
+        if bool(recipe_cfg.get("use_fused_temporal_refiner", False)):
+            self.fused_temporal_refiner = TemporalConvOutputRefiner(
+                output_dim=self.output_dim,
+                hidden_dim=temporal_hidden_dim,
+                kernel_size=int(recipe_cfg.get("fused_temporal_refiner_kernel_size", recipe_cfg.get("temporal_refiner_kernel_size", 3))),
+                dilation=int(recipe_cfg.get("fused_temporal_refiner_dilation", recipe_cfg.get("temporal_refiner_dilation", 1))),
+                scale=float(recipe_cfg.get("fused_temporal_refiner_scale", recipe_cfg.get("temporal_refiner_scale", 0.05))),
+                role_scale=recipe_cfg.get("fused_temporal_refiner_role_scale", recipe_cfg.get("temporal_refiner_role_scale", {})),
+            )
 
         self._configure_expert_trainability()
 
@@ -971,6 +1113,10 @@ class Model(nn.Module):
 
     def _role_gate(self, adj, x_enc, y_graph, y_patch, with_residual=False, y_recovered_graph=None):
         node_state, last_role = self._build_gate_features(x_enc)
+        if self.graph_expert_diffusion_refiner is not None:
+            y_graph, _ = self.graph_expert_diffusion_refiner(y_graph, adj, last_role)
+        if self.patch_expert_temporal_refiner is not None:
+            y_patch, _ = self.patch_expert_temporal_refiner(y_patch, last_role)
         state_t = node_state.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
         gate_input = torch.cat([state_t, y_graph, y_patch, torch.abs(y_graph - y_patch)], dim=-1)
         role_logits = torch.cat([gate(gate_input) for gate in self.role_fusion_gates], dim=-1)
@@ -1008,6 +1154,10 @@ class Model(nn.Module):
                 fused = fused + recovery_scale * torch.tanh(y_recovered_graph - fused)
             else:
                 fused = fused + recovery_scale * (y_recovered_graph - fused)
+        if self.fused_graph_diffusion_refiner is not None:
+            fused, _ = self.fused_graph_diffusion_refiner(fused, adj, last_role)
+        if self.fused_temporal_refiner is not None:
+            fused, _ = self.fused_temporal_refiner(fused, last_role)
         fused = self._apply_role_heads(adj, x_enc, fused, last_role, aux_losses)
         routing_meta = {
             "alpha": alpha,
