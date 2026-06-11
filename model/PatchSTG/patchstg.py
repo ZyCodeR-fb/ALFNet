@@ -136,9 +136,11 @@ class WindowAttBlock(nn.Module):
         self.attention_order = str(attention_order).lower()
         self.shift_size = int(shift_size)
         self.attention_type = str(attention_type).lower()
+        self.use_depth_lepe = self.attention_type in {"biformer_lepe", "biformer_lepe_depth", "lepe_depth"}
+        self.use_breadth_lepe = self.attention_type in {"biformer_lepe", "biformer_lepe_breadth", "lepe_breadth"}
 
         self.nnorm1 = nn.LayerNorm(hidden_size)
-        if self.attention_type == "biformer_lepe":
+        if self.use_breadth_lepe:
             self.nattn = BiFormerAttentionLePE(hidden_size, num_heads=num_heads, qkv_bias=True, attn_drop=0.1, proj_drop=0.1, side_dwconv=lepe_kernel_size)
         else:
             self.nattn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, attn_drop=0.1, proj_drop=0.1)
@@ -146,7 +148,7 @@ class WindowAttBlock(nn.Module):
         self.nmlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=nn.GELU, drop=0.1)
 
         self.snorm1 = nn.LayerNorm(hidden_size)
-        if self.attention_type == "biformer_lepe":
+        if self.use_depth_lepe:
             self.sattn = BiFormerAttentionLePE(hidden_size, num_heads=num_heads, qkv_bias=True, attn_drop=0.1, proj_drop=0.1, side_dwconv=lepe_kernel_size)
         else:
             self.sattn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, attn_drop=0.1, proj_drop=0.1)
@@ -155,7 +157,7 @@ class WindowAttBlock(nn.Module):
 
     def _depth_attention(self, x, B, T, P, N, D):
         qkv = self.snorm1(x.reshape(B*T*P,N,D))
-        if self.attention_type == "biformer_lepe":
+        if self.use_depth_lepe:
             attn_out = self.sattn(qkv.reshape(B*T*P, N, 1, D)).reshape(B,T,P,N,D)
         else:
             attn_out = self.sattn(qkv).reshape(B,T,P,N,D)
@@ -165,7 +167,7 @@ class WindowAttBlock(nn.Module):
 
     def _breadth_attention(self, x, B, T, P, N, D):
         qkv = self.nnorm1(x.transpose(2,3).reshape(B*T*N,P,D))
-        if self.attention_type == "biformer_lepe":
+        if self.use_breadth_lepe:
             attn_out = self.nattn(qkv.reshape(B*T*N, P, 1, D)).reshape(B,T,N,P,D).transpose(2,3)
         else:
             attn_out = self.nattn(qkv).reshape(B,T,N,P,D).transpose(2,3)
