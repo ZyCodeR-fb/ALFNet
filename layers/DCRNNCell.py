@@ -106,6 +106,17 @@ class LayerNormDCRNNCell(DCRNNCell):
         return self.norm(super().forward(x, h, A_q, A_h))
 
 
+class ResidualDCRNNCell(DCRNNCell):
+
+    def __init__(self, input_size: int, hidden_size: int, k: int = 2):
+        super(ResidualDCRNNCell, self).__init__(input_size, hidden_size, k)
+        self.input_proj = nn.Linear(input_size, hidden_size) if input_size != hidden_size else nn.Identity()
+        self.norm = nn.LayerNorm(hidden_size)
+
+    def forward(self, x, h, A_q, A_h):
+        return self.norm(super().forward(x, h, A_q, A_h) + self.input_proj(x))
+
+
 class MGDCRNNCell(nn.Module):
 
     def __init__(self, input_size: int, hidden_size: int, k: int = 2):

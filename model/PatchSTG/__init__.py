@@ -162,6 +162,14 @@ class Model(nn.Module):
             reo_all_idx=self.reo_all_idx,
             attention_order=model_cfg.get("attention_order", "depth_breadth"),
             shift_size=int(model_cfg.get("attention_shift_size", 0)),
+            attention_type=model_cfg.get("attention_type", "timm"),
+            lepe_kernel_size=int(model_cfg.get("lepe_kernel_size", 5)),
+            use_staeformer_adapter=bool(model_cfg.get("use_staeformer_adapter", False)),
+            staeformer_adapter_mode=model_cfg.get("staeformer_adapter_mode", "temporal"),
+            staeformer_adapter_layers=int(model_cfg.get("staeformer_adapter_layers", 1)),
+            staeformer_num_heads=int(model_cfg.get("staeformer_num_heads", 4)),
+            staeformer_feed_forward_dim=int(model_cfg.get("staeformer_feed_forward_dim", 256)),
+            staeformer_dropout=float(model_cfg.get("staeformer_dropout", 0.1)),
         )
 
     def _resolve_current_node_ids(self, current_num_nodes):

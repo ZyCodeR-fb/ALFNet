@@ -563,7 +563,8 @@ def _load_expert_from_spec(spec, device, expert_name):
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if not isinstance(checkpoint, dict) or "state_dict" not in checkpoint:
         raise ValueError(f"Expert checkpoint at {checkpoint_path} must contain a 'state_dict'")
-    expert.load_state_dict(checkpoint["state_dict"])
+    strict_load = bool(spec.get("strict_load", True))
+    expert.load_state_dict(checkpoint["state_dict"], strict=strict_load)
     return expert, expert_args, os.path.normpath(checkpoint_path)
 
 

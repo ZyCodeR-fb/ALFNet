@@ -2,7 +2,7 @@ from layers.gnn import nn, torch, calculate_random_walk_matrix
 import torch.nn.functional as F
 from einops import rearrange
 from layers.agg import MeanAggregator, WMeanAggregator, MaxPoolingAggregator, MinPoolingAggregator, DiffusionAggregator
-from layers.DCRNNCell import DCRNNCell, LayerNormDCRNNCell, MGDCRNNCell
+from layers.DCRNNCell import DCRNNCell, LayerNormDCRNNCell, MGDCRNNCell, ResidualDCRNNCell
 
 
 class Expert(nn.Module):
@@ -153,12 +153,36 @@ class DataPreparation(nn.Module):
         return torch.cat([raw_x, extra_x], dim=-1)
 
 
+class TemporalInputMixer(nn.Module):
+
+    def __init__(self, input_dim, hidden_dim, kernel_size=3, dilation=1, scale=0.05):
+        super(TemporalInputMixer, self).__init__()
+        padding = dilation * (kernel_size - 1) // 2
+        self.scale = scale
+        self.net = nn.Sequential(
+            nn.Conv1d(input_dim, hidden_dim, kernel_size, padding=padding, dilation=dilation),
+            nn.GELU(),
+            nn.Conv1d(hidden_dim, input_dim, 1),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, x):
+        batch_size, seq_len, num_nodes, input_dim = x.shape
+        residual = x.permute(0, 2, 3, 1).reshape(batch_size * num_nodes, input_dim, seq_len)
+        residual = self.net(residual)
+        residual = residual.reshape(batch_size, num_nodes, input_dim, seq_len).permute(0, 3, 1, 2)
+        return x + self.scale * residual
+
+
 def _build_recurrent_cell(cell_type, input_size, hidden_size, k):
     cell_type = str(cell_type).lower()
     if cell_type in {"dcrnn", "dcgru", "graph_gru"}:
         return DCRNNCell(input_size, hidden_size, k)
     if cell_type in {"ln_dcrnn", "layernorm_dcrnn", "norm_dcrnn"}:
         return LayerNormDCRNNCell(input_size, hidden_size, k)
+    if cell_type in {"res_dcrnn", "residual_dcrnn", "skip_dcrnn"}:
+        return ResidualDCRNNCell(input_size, hidden_size, k)
     if cell_type in {"mgu_dcrnn", "mg_dcrnn", "minimal_dcrnn"}:
         return MGDCRNNCell(input_size, hidden_size, k)
     raise ValueError(f"Unsupported MoGERNN recurrent cell_type: {cell_type}")
@@ -278,9 +302,30 @@ class Model(nn.Module):
         self.output_dim = configs.c_out
         self.data_pre = DataPreparation(configs)
         recipe_cfg = (getattr(configs, "model_family_cfg", {}) or {}).get("recipe", {})
+        self.raw_enc_in = getattr(configs, "raw_enc_in", configs.enc_in)
+        self.use_temporal_input_mixer = bool(recipe_cfg.get("use_temporal_input_mixer", False))
+        if self.use_temporal_input_mixer:
+            self.temporal_input_mixer = TemporalInputMixer(
+                self.raw_enc_in,
+                int(recipe_cfg.get("temporal_mixer_hidden_dim", configs.d_model)),
+                int(recipe_cfg.get("temporal_mixer_kernel_size", 3)),
+                int(recipe_cfg.get("temporal_mixer_dilation", 1)),
+                float(recipe_cfg.get("temporal_mixer_scale", 0.05)),
+            )
+        else:
+            self.temporal_input_mixer = None
         cell_type = recipe_cfg.get("cell_type", recipe_cfg.get("mogernn_cell_type", "dcrnn"))
         self.seq2seq = Seq2Seq(configs.enc_in, configs.c_out, configs.d_model,
                                configs.e_layers, self.out_len, configs.k_hop, cell_type=cell_type)
+
+    def _mix_temporal_input(self, x_enc):
+        if self.temporal_input_mixer is None:
+            return x_enc
+        raw_x = x_enc[..., :self.raw_enc_in]
+        mixed_raw = self.temporal_input_mixer(raw_x)
+        if x_enc.size(-1) == self.raw_enc_in:
+            return mixed_raw
+        return torch.cat([mixed_raw, x_enc[..., self.raw_enc_in:]], dim=-1)
 
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, *args):
         x_dec = args[0]
@@ -288,6 +333,7 @@ class Model(nn.Module):
         A_q = calculate_random_walk_matrix(adj)
         A_h = calculate_random_walk_matrix(adj.T)
         x_enc = self.data_pre(adj, x_enc, x_t_mark, pos_mark)
+        x_enc = self._mix_temporal_input(x_enc)
         epoch = args[-1]
         teacher_forcing_ratio = 1 - (epoch / 40)
         initial_input = x_enc[:, -1, :, : self.output_dim]
