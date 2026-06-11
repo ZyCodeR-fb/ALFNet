@@ -712,6 +712,22 @@ class Model(nn.Module):
                 dtype=torch.float32,
             ),
         )
+        role_graph_alpha_ceiling = recipe_cfg.get(
+            "role_graph_alpha_ceiling",
+            {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
+        )
+        self.register_buffer(
+            "role_graph_alpha_ceiling",
+            torch.tensor(
+                [
+                    float(role_graph_alpha_ceiling.get("aas", 1.0)),
+                    float(role_graph_alpha_ceiling.get("nas", 1.0)),
+                    float(role_graph_alpha_ceiling.get("vs", 1.0)),
+                    float(role_graph_alpha_ceiling.get("fs", 1.0)),
+                ],
+                dtype=torch.float32,
+            ),
+        )
 
         if self.recipe in {"soft_fuse", "oracle_gate", "role_mmoe", "testam_role_mmoe"}:
             self.state_encoder = nn.Sequential(
@@ -1082,7 +1098,11 @@ class Model(nn.Module):
     def _apply_alpha_floor(self, alpha, last_role):
         floor = torch.sum(last_role * self.role_graph_alpha_floor.view(1, 1, ROLE_COUNT), dim=-1, keepdim=True)
         floor = floor.unsqueeze(1).expand_as(alpha)
-        return floor + (1.0 - floor) * alpha
+        alpha = floor + (1.0 - floor) * alpha
+        ceiling = torch.sum(last_role * self.role_graph_alpha_ceiling.view(1, 1, ROLE_COUNT), dim=-1, keepdim=True)
+        ceiling = ceiling.unsqueeze(1).expand_as(alpha)
+        ceiling = torch.maximum(ceiling, floor)
+        return torch.minimum(alpha, ceiling)
 
     def _soft_fuse(self, x_enc, y_graph, y_patch):
         node_state, last_role = self._build_gate_features(x_enc)
