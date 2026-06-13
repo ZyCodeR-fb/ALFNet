@@ -2,7 +2,7 @@ from layers.gnn import nn, torch, calculate_random_walk_matrix
 import torch.nn.functional as F
 from einops import rearrange
 from layers.agg import MeanAggregator, WMeanAggregator, MaxPoolingAggregator, MinPoolingAggregator, DiffusionAggregator
-from layers.DCRNNCell import DCRNNCell, LayerNormDCRNNCell, MGDCRNNCell, ResidualDCRNNCell
+from layers.DCRNNCell import DCRNNCell, DiffConv, LayerNormDCRNNCell, MGDCRNNCell, ResidualDCRNNCell
 from lib.utils import infer_project_num_nodes
 
 
@@ -226,6 +226,114 @@ def _build_recurrent_cell(cell_type, input_size, hidden_size, k):
     raise ValueError(f"Unsupported MoGERNN recurrent cell_type: {cell_type}")
 
 
+class GraphImputerDirection(nn.Module):
+
+    def __init__(self, raw_dim, extra_dim, hidden_dim, k=1, cell_type="ln_dcrnn"):
+        super(GraphImputerDirection, self).__init__()
+        self.raw_dim = int(raw_dim)
+        self.extra_dim = int(extra_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.rnn_input_dim = self.raw_dim + 1 + self.extra_dim
+        self.first_stage = nn.Linear(self.hidden_dim, self.raw_dim)
+        self.spatial_decoder = DiffConv(self.raw_dim + 1 + self.extra_dim + self.hidden_dim, self.raw_dim, k)
+        self.cell = _build_recurrent_cell(cell_type, self.rnn_input_dim, self.hidden_dim, k)
+        self.norm = nn.LayerNorm(self.raw_dim)
+
+    def forward(self, raw_x, mask, extra_x, A_q, A_h, reverse=False):
+        batch_size, seq_len, num_nodes, _ = raw_x.shape
+        h = raw_x.new_zeros(batch_size, num_nodes, self.hidden_dim)
+        pred_steps = [None for _ in range(seq_len)]
+        state_steps = [None for _ in range(seq_len)]
+        time_indices = range(seq_len - 1, -1, -1) if reverse else range(seq_len)
+        for t in time_indices:
+            raw_t = raw_x[:, t]
+            mask_t = mask[:, t]
+            extra_t = None if extra_x is None else extra_x[:, t]
+            first_pred = self.first_stage(h)
+            x_t = torch.where(mask_t.expand_as(raw_t).bool(), raw_t, first_pred)
+            decoder_inputs = [x_t, mask_t]
+            if extra_t is not None:
+                decoder_inputs.append(extra_t)
+            decoder_inputs.append(h)
+            spatial_pred = self.spatial_decoder(torch.cat(decoder_inputs, dim=-1), A_q, A_h)
+            spatial_pred = self.norm(spatial_pred)
+            x_t = torch.where(mask_t.expand_as(raw_t).bool(), raw_t, spatial_pred)
+            cell_inputs = [x_t, mask_t]
+            if extra_t is not None:
+                cell_inputs.append(extra_t)
+            h = self.cell(torch.cat(cell_inputs, dim=-1), h, A_q, A_h)
+            pred_steps[t] = spatial_pred
+            state_steps[t] = h
+        return torch.stack(pred_steps, dim=1), torch.stack(state_steps, dim=1)
+
+
+class GraphBidirInputImputer(nn.Module):
+
+    def __init__(self, configs, recipe_cfg):
+        super(GraphBidirInputImputer, self).__init__()
+        self.raw_enc_in = getattr(configs, "raw_enc_in", configs.enc_in)
+        self.total_enc_in = configs.enc_in
+        self.role_start = self.raw_enc_in
+        self.role_end = self.role_start + 4
+        self.age_idx = self.role_end
+        self.use_role_mask = bool(recipe_cfg.get("graph_imputer_use_role_mask", True))
+        self.use_extra_features = bool(recipe_cfg.get("graph_imputer_use_extra_features", True))
+        extra_dim = self.total_enc_in - self.raw_enc_in if self.use_extra_features else 0
+        hidden_dim = int(recipe_cfg.get("graph_imputer_hidden_dim", configs.d_model))
+        k_hop = int(recipe_cfg.get("graph_imputer_k_hop", configs.k_hop))
+        cell_type = recipe_cfg.get("graph_imputer_cell_type", "ln_dcrnn")
+        self.merge = str(recipe_cfg.get("graph_imputer_merge", "gate")).lower()
+        self.fwd_imputer = GraphImputerDirection(self.raw_enc_in, extra_dim, hidden_dim, k_hop, cell_type)
+        self.bwd_imputer = GraphImputerDirection(self.raw_enc_in, extra_dim, hidden_dim, k_hop, cell_type)
+        merge_input_dim = 2 * hidden_dim + self.raw_enc_in + 1 + extra_dim
+        self.merge_gate = nn.Linear(merge_input_dim, self.raw_enc_in)
+        self.merge_mlp = nn.Sequential(
+            nn.Linear(merge_input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, self.raw_enc_in),
+        )
+
+    def _observed_mask(self, raw_x, extra_x):
+        if self.use_role_mask and extra_x is not None and self.total_enc_in >= self.role_end:
+            role_seq = extra_x[..., :4]
+            return ((role_seq[..., 0:1] + role_seq[..., 1:2]) > 0.5).to(dtype=raw_x.dtype)
+        return (torch.abs(raw_x).sum(dim=-1, keepdim=True) > 0).to(dtype=raw_x.dtype)
+
+    def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None):
+        if x_enc.size(-1) != self.total_enc_in:
+            raise ValueError(
+                f"Lifecycle input channel mismatch: model expects {self.total_enc_in} channels "
+                f"(raw={self.raw_enc_in}, extra={self.total_enc_in - self.raw_enc_in}), "
+                f"but dataloader produced {x_enc.size(-1)}."
+            )
+        raw_x = x_enc[..., :self.raw_enc_in]
+        extra_x = x_enc[..., self.raw_enc_in:] if self.total_enc_in > self.raw_enc_in else None
+        mask = self._observed_mask(raw_x, extra_x)
+        imputer_extra = extra_x if self.use_extra_features else None
+        A_q = calculate_random_walk_matrix(adj)
+        A_h = calculate_random_walk_matrix(adj.T)
+        fwd_pred, fwd_state = self.fwd_imputer(raw_x, mask, imputer_extra, A_q, A_h, reverse=False)
+        bwd_pred, bwd_state = self.bwd_imputer(raw_x, mask, imputer_extra, A_q, A_h, reverse=True)
+        if self.merge == "mean":
+            imputed_raw = 0.5 * (fwd_pred + bwd_pred)
+        else:
+            merge_inputs = [fwd_state, bwd_state, raw_x, mask]
+            if imputer_extra is not None:
+                merge_inputs.append(imputer_extra)
+            merge_input = torch.cat(merge_inputs, dim=-1)
+            if self.merge == "mlp":
+                imputed_raw = self.merge_mlp(merge_input)
+            elif self.merge == "gate":
+                gate = torch.sigmoid(self.merge_gate(merge_input))
+                imputed_raw = gate * fwd_pred + (1.0 - gate) * bwd_pred
+            else:
+                raise ValueError(f"Unsupported graph_imputer_merge: {self.merge}")
+        filled_raw = torch.where(mask.expand_as(raw_x).bool(), raw_x, imputed_raw)
+        if extra_x is None:
+            return filled_raw
+        return torch.cat([filled_raw, extra_x], dim=-1)
+
+
 class Encoder(nn.Module):
 
     def __init__(self, input_size, hidden_size, num_layers, k=2, cell_type="dcrnn"):
@@ -338,8 +446,11 @@ class Model(nn.Module):
         super(Model, self).__init__()
         self.out_len = configs.pred_len if configs.pred_len > 0 else configs.look_back
         self.output_dim = configs.c_out
-        self.data_pre = DataPreparation(configs)
         recipe_cfg = (getattr(configs, "model_family_cfg", {}) or {}).get("recipe", {})
+        if bool(recipe_cfg.get("use_graph_bidir_input_imputer", False)):
+            self.data_pre = GraphBidirInputImputer(configs, recipe_cfg)
+        else:
+            self.data_pre = DataPreparation(configs)
         self.raw_enc_in = getattr(configs, "raw_enc_in", configs.enc_in)
         self.use_temporal_input_mixer = bool(recipe_cfg.get("use_temporal_input_mixer", False))
         if self.use_temporal_input_mixer:
