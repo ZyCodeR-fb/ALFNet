@@ -188,8 +188,22 @@ class AdaptiveGraphSupport(nn.Module):
         nn.init.xavier_uniform_(self.node_emb_src)
         nn.init.xavier_uniform_(self.node_emb_dst)
 
-    def forward(self, A_q, A_h):
-        logits = torch.relu(torch.matmul(self.node_emb_src, self.node_emb_dst.transpose(0, 1)))
+    def _select_node_embeddings(self, num_nodes, node_ids, device):
+        if node_ids is not None:
+            node_ids = torch.as_tensor(node_ids, dtype=torch.long, device=device)
+            if node_ids.numel() == num_nodes and node_ids.max().item() < self.node_emb_src.size(0):
+                return self.node_emb_src[node_ids], self.node_emb_dst[node_ids]
+        if num_nodes <= self.node_emb_src.size(0):
+            return self.node_emb_src[:num_nodes], self.node_emb_dst[:num_nodes]
+        raise ValueError(
+            f"AdaptiveGraphSupport was initialized for {self.node_emb_src.size(0)} nodes, "
+            f"but received a {num_nodes}-node adjacency."
+        )
+
+    def forward(self, A_q, A_h, node_ids=None):
+        num_nodes = int(A_q.size(0))
+        node_emb_src, node_emb_dst = self._select_node_embeddings(num_nodes, node_ids, A_q.device)
+        logits = torch.relu(torch.matmul(node_emb_src, node_emb_dst.transpose(0, 1)))
         logits = logits / max(self.temperature, 1e-6)
         adaptive = torch.softmax(logits, dim=-1)
         if self.symmetric:
@@ -338,6 +352,7 @@ class Model(nn.Module):
             )
         else:
             self.temporal_input_mixer = None
+        self.current_node_ids = None
         self.adaptive_support = None
         if bool(recipe_cfg.get("use_adaptive_graph_support", False)):
             num_nodes = int(recipe_cfg.get("num_nodes", 0) or infer_project_num_nodes({"data_path": configs.data_path}))
@@ -351,6 +366,9 @@ class Model(nn.Module):
         cell_type = recipe_cfg.get("cell_type", recipe_cfg.get("mogernn_cell_type", "dcrnn"))
         self.seq2seq = Seq2Seq(configs.enc_in, configs.c_out, configs.d_model,
                                configs.e_layers, self.out_len, configs.k_hop, cell_type=cell_type)
+
+    def set_current_node_ids(self, node_ids):
+        self.current_node_ids = node_ids
 
     def _mix_temporal_input(self, x_enc):
         if self.temporal_input_mixer is None:
@@ -367,7 +385,8 @@ class Model(nn.Module):
         A_q = calculate_random_walk_matrix(adj)
         A_h = calculate_random_walk_matrix(adj.T)
         if self.adaptive_support is not None:
-            A_q, A_h = self.adaptive_support(A_q, A_h)
+            A_q, A_h = self.adaptive_support(A_q, A_h, node_ids=self.current_node_ids)
+            self.current_node_ids = None
         x_enc = self.data_pre(adj, x_enc, x_t_mark, pos_mark)
         x_enc = self._mix_temporal_input(x_enc)
         epoch = args[-1]

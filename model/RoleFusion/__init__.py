@@ -1031,6 +1031,7 @@ class Model(nn.Module):
         raw_x_enc = x_enc[..., :self.raw_enc_in]
         expert_x_dec = None if x_dec is None else x_dec[..., : self.output_dim]
         aux_losses = {}
+        current_node_ids = self._resolve_current_node_ids(raw_x_enc.size(2))
         graph_x_enc = raw_x_enc
         recovered_graph_x_enc = None
         use_recovery_as_expert = self.graph_input_recovery is not None and self.graph_recovery_apply_to in {"role_expert", "role_delta"}
@@ -1044,7 +1045,6 @@ class Model(nn.Module):
         if self.graph_input_recovery is not None:
             role_seq, last_role, last_age, visibility_ratio = self._extract_role_and_age(x_enc)
             recovery_state = torch.cat([last_role, last_age, visibility_ratio], dim=-1)
-            current_node_ids = self._resolve_current_node_ids(raw_x_enc.size(2))
             recovered_graph_x_enc, _, recovery_aux_losses = self.graph_input_recovery(
                 graph_x_enc,
                 role_seq,
@@ -1059,7 +1059,6 @@ class Model(nn.Module):
         if self.eac_graph_input_adapter is not None:
             if role_seq is None:
                 role_seq, _, _, _ = self._extract_role_and_age(x_enc)
-            current_node_ids = self._resolve_current_node_ids(raw_x_enc.size(2))
             graph_x_enc, prompt = self.eac_graph_input_adapter(graph_x_enc, role_seq, current_node_ids=current_node_ids)
             aux_losses["rolefusion_eac_input"] = self.lambda_eac_input * prompt.pow(2).mean()
         if self.tpb_graph_input_adapter is not None:
@@ -1069,6 +1068,8 @@ class Model(nn.Module):
             graph_x_enc, prompt = self.tpb_graph_input_adapter(graph_x_enc, role_seq, history_age_seq=history_age_seq)
             aux_losses["rolefusion_tpb_input"] = self.lambda_tpb_input * prompt.pow(2).mean()
         graph_expert_x_enc = self._format_graph_expert_input(graph_x_enc, x_enc)
+        if hasattr(self.graph_expert, "set_current_node_ids"):
+            self.graph_expert.set_current_node_ids(current_node_ids)
         if self.end_to_end or has_graph_input_adapter:
             graph_output = self.graph_expert(adj, graph_expert_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
         else:
@@ -1077,6 +1078,8 @@ class Model(nn.Module):
         recovery_graph_output = None
         if use_recovery_as_expert:
             recovered_expert_x_enc = self._format_graph_expert_input(recovered_graph_x_enc, x_enc)
+            if hasattr(self.graph_expert, "set_current_node_ids"):
+                self.graph_expert.set_current_node_ids(current_node_ids)
             recovery_graph_output = self.graph_expert(adj, recovered_expert_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
         if self.end_to_end:
             patch_output = self.patch_expert(adj, raw_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
