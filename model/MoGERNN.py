@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from layers.agg import MeanAggregator, WMeanAggregator, MaxPoolingAggregator, MinPoolingAggregator, DiffusionAggregator
 from layers.DCRNNCell import DCRNNCell, LayerNormDCRNNCell, MGDCRNNCell, ResidualDCRNNCell
+from lib.utils import infer_project_num_nodes
 
 
 class Expert(nn.Module):
@@ -175,6 +176,29 @@ class TemporalInputMixer(nn.Module):
         return x + self.scale * residual
 
 
+class AdaptiveGraphSupport(nn.Module):
+
+    def __init__(self, num_nodes, embed_dim=8, mix=0.05, temperature=1.0, symmetric=False):
+        super(AdaptiveGraphSupport, self).__init__()
+        self.mix = float(mix)
+        self.temperature = float(temperature)
+        self.symmetric = bool(symmetric)
+        self.node_emb_src = nn.Parameter(torch.empty(num_nodes, embed_dim))
+        self.node_emb_dst = nn.Parameter(torch.empty(num_nodes, embed_dim))
+        nn.init.xavier_uniform_(self.node_emb_src)
+        nn.init.xavier_uniform_(self.node_emb_dst)
+
+    def forward(self, A_q, A_h):
+        logits = torch.relu(torch.matmul(self.node_emb_src, self.node_emb_dst.transpose(0, 1)))
+        logits = logits / max(self.temperature, 1e-6)
+        adaptive = torch.softmax(logits, dim=-1)
+        if self.symmetric:
+            adaptive = 0.5 * (adaptive + adaptive.transpose(0, 1))
+            adaptive = adaptive / adaptive.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        mix = max(0.0, min(1.0, self.mix))
+        return (1.0 - mix) * A_q + mix * adaptive, (1.0 - mix) * A_h + mix * adaptive.transpose(0, 1)
+
+
 def _build_recurrent_cell(cell_type, input_size, hidden_size, k):
     cell_type = str(cell_type).lower()
     if cell_type in {"dcrnn", "dcgru", "graph_gru"}:
@@ -314,6 +338,16 @@ class Model(nn.Module):
             )
         else:
             self.temporal_input_mixer = None
+        self.adaptive_support = None
+        if bool(recipe_cfg.get("use_adaptive_graph_support", False)):
+            num_nodes = int(recipe_cfg.get("num_nodes", 0) or infer_project_num_nodes({"data_path": configs.data_path}))
+            self.adaptive_support = AdaptiveGraphSupport(
+                num_nodes,
+                int(recipe_cfg.get("adaptive_graph_embed_dim", 8)),
+                float(recipe_cfg.get("adaptive_graph_mix", 0.05)),
+                float(recipe_cfg.get("adaptive_graph_temperature", 1.0)),
+                bool(recipe_cfg.get("adaptive_graph_symmetric", False)),
+            )
         cell_type = recipe_cfg.get("cell_type", recipe_cfg.get("mogernn_cell_type", "dcrnn"))
         self.seq2seq = Seq2Seq(configs.enc_in, configs.c_out, configs.d_model,
                                configs.e_layers, self.out_len, configs.k_hop, cell_type=cell_type)
@@ -332,6 +366,8 @@ class Model(nn.Module):
         #输入的adj应该转一下
         A_q = calculate_random_walk_matrix(adj)
         A_h = calculate_random_walk_matrix(adj.T)
+        if self.adaptive_support is not None:
+            A_q, A_h = self.adaptive_support(A_q, A_h)
         x_enc = self.data_pre(adj, x_enc, x_t_mark, pos_mark)
         x_enc = self._mix_temporal_input(x_enc)
         epoch = args[-1]
