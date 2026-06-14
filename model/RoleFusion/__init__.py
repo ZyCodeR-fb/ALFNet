@@ -1292,7 +1292,9 @@ class Model(nn.Module):
         return fused, aux_losses, routing_meta
 
     def _graph_patch_residual(self, adj, x_enc, y_graph, y_patch, y_recovered_graph=None):
-        node_state, last_role = self._build_gate_features(x_enc)
+        _, last_role, last_age, visibility_ratio = self._extract_role_and_age(x_enc)
+        state_input = torch.cat([last_role, last_age, visibility_ratio], dim=-1)
+        node_state = self.state_encoder(state_input)
         if self.graph_expert_diffusion_refiner is not None:
             y_graph, _ = self.graph_expert_diffusion_refiner(y_graph, adj, last_role)
         if self.patch_expert_temporal_refiner is not None:
