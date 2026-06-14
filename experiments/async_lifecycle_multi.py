@@ -129,8 +129,12 @@ def _prepare_st_ttc_input(x_enc_filled, observed_mask, FRP, raw_enc_in):
     return _merge_raw_with_extra(raw_model_input, x_enc_filled, raw_enc_in)
 
 
+def _forward_model_bundle(model, adj, model_input, enc_t_mark, pos_mark, dec_t_mark):
+    return unpack_model_output(model(adj, model_input, enc_t_mark, pos_mark, None, dec_t_mark, 0))
+
+
 def _forward_model(model, adj, model_input, enc_t_mark, pos_mark, dec_t_mark):
-    y_hat, _ = unpack_model_output(model(adj, model_input, enc_t_mark, pos_mark, None, dec_t_mark, 0))
+    y_hat, _ = _forward_model_bundle(model, adj, model_input, enc_t_mark, pos_mark, dec_t_mark)
     return y_hat
 
 
@@ -256,6 +260,83 @@ def _summarize_event_age_curve(event_metrics):
         }
         for role_name, offset_metrics in curves.items()
     }
+
+
+def _empty_routing_diag_buffers():
+    return {
+        role: {
+            "alpha": [],
+            "graph_win": [],
+            "gate_match": [],
+            "graph_pred": [],
+            "patch_pred": [],
+            "fused_pred": [],
+            "true": [],
+        }
+        for role in ["NAS", "FS", "AAS", "VS"]
+    }
+
+
+def _append_routing_diagnostics(buffers, output_meta, roles, fused_pred, target, dataset):
+    routing = output_meta.get("oracle_routing") or output_meta.get("route_routing")
+    if not routing:
+        return
+    if not all(key in routing for key in ["alpha", "y_graph", "y_patch"]):
+        return
+    alpha = routing["alpha"].detach()
+    graph_pred = _inverse_transform_with_grad(dataset, routing["y_graph"].detach())
+    patch_pred = _inverse_transform_with_grad(dataset, routing["y_patch"].detach())
+    for role_name, nodes in roles.items():
+        if not nodes:
+            continue
+        alpha_part = alpha[..., nodes, :]
+        graph_part = graph_pred[..., nodes, :]
+        patch_part = patch_pred[..., nodes, :]
+        fused_part = fused_pred[..., nodes, :]
+        target_part = target[..., nodes, :]
+        valid_mask = (~torch.isnan(target_part)) & torch.isfinite(target_part) & torch.isfinite(graph_part) & torch.isfinite(patch_part)
+        if valid_mask.sum() == 0:
+            continue
+        graph_err = torch.abs(graph_part - target_part)
+        patch_err = torch.abs(patch_part - target_part)
+        graph_win = (graph_err <= patch_err).to(dtype=graph_part.dtype)
+        gate_graph = (alpha_part >= 0.5).to(dtype=graph_part.dtype)
+        gate_match = (gate_graph == graph_win).to(dtype=graph_part.dtype)
+        buffers[role_name]["alpha"].append(alpha_part[valid_mask].detach().cpu())
+        buffers[role_name]["graph_win"].append(graph_win[valid_mask].detach().cpu())
+        buffers[role_name]["gate_match"].append(gate_match[valid_mask].detach().cpu())
+        buffers[role_name]["graph_pred"].append(graph_part.detach().cpu())
+        buffers[role_name]["patch_pred"].append(patch_part.detach().cpu())
+        buffers[role_name]["fused_pred"].append(fused_part.detach().cpu())
+        buffers[role_name]["true"].append(target_part.detach().cpu())
+
+
+def _summarize_routing_diagnostics(buffers):
+    summary = {}
+    for role_name, role_buffers in buffers.items():
+        alpha = _concat_or_none(role_buffers["alpha"])
+        if alpha is None:
+            summary[role_name] = None
+            continue
+        graph_win = _concat_or_none(role_buffers["graph_win"])
+        gate_match = _concat_or_none(role_buffers["gate_match"])
+        true = _concat_or_none(role_buffers["true"])
+        graph_pred = _concat_or_none(role_buffers["graph_pred"])
+        patch_pred = _concat_or_none(role_buffers["patch_pred"])
+        fused_pred = _concat_or_none(role_buffers["fused_pred"])
+        graph_metrics = None if graph_pred is None or true is None else _compute_metrics(graph_pred, true)
+        patch_metrics = None if patch_pred is None or true is None else _compute_metrics(patch_pred, true)
+        fused_metrics = None if fused_pred is None or true is None else _compute_metrics(fused_pred, true)
+        summary[role_name] = {
+            "alpha_mean": float(alpha.mean().item()),
+            "graph_win_rate": None if graph_win is None else float(graph_win.mean().item()),
+            "patch_win_rate": None if graph_win is None else float(1.0 - graph_win.mean().item()),
+            "gate_match_rate": None if gate_match is None else float(gate_match.mean().item()),
+            "graph_metrics": graph_metrics,
+            "patch_metrics": patch_metrics,
+            "fused_metrics": fused_metrics,
+        }
+    return summary
 
 
 def _compute_role_gap(summary_metrics):
@@ -519,9 +600,9 @@ def _predict_window(adaptor_state, model, adj, x_enc_filled, observed_mask, enc_
 
     if adaptor_name == "base":
         with torch.no_grad():
-            y_hat = _forward_model(model, adj, x_enc_filled, enc_t_mark, pos_mark, dec_t_mark)
+            y_hat, output_meta = _forward_model_bundle(model, adj, x_enc_filled, enc_t_mark, pos_mark, dec_t_mark)
             final_pred = _inverse_transform_with_grad(dataset, y_hat)
-        return {"final_pred": final_pred}
+        return {"final_pred": final_pred, "output_meta": output_meta}
 
     if adaptor_name == "st_ttc":
         with torch.no_grad():
@@ -761,6 +842,7 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
         state_name: {"pred": [], "true": []}
         for state_name in AVAILABILITY_STATE_ORDER
     }
+    routing_diag_buffers = _empty_routing_diag_buffers()
 
     print("-> Start async lifecycle inference...")
     for batch_ix, batch in enumerate(data_loader):
@@ -808,6 +890,14 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
                 "AAS": event["aas_nodes"],
                 "VS": event["vs_nodes"],
             }
+            _append_routing_diagnostics(
+                routing_diag_buffers,
+                prediction_bundle.get("output_meta", {}),
+                roles,
+                final_pred,
+                inverse_y,
+                dataset,
+            )
             for role_name, nodes in roles.items():
                 pred_part, target_part = _slice_role_tensors(inverse_y_hat_cpu, inverse_y_cpu, nodes)
                 if pred_part is None:
@@ -861,6 +951,7 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
     state_metrics, state_macro_metrics, worst_state = _summarize_state_buffers(state_buffers)
     event_age_curve = _summarize_event_age_curve(event_metrics)
     role_gap = _compute_role_gap(summary_metrics)
+    routing_diagnostics = _summarize_routing_diagnostics(routing_diag_buffers)
     results = {
         "config": {
             "async_adaptor": args.async_adaptor,
@@ -884,6 +975,7 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
         "worst_availability_state": worst_state,
         "event_age_curve": event_age_curve,
         "role_gap": role_gap,
+        "routing_diagnostics": routing_diagnostics,
         "event_metrics": event_metrics,
         "initial_aas_nodes": bundle["initial_aas_nodes"],
         "initial_vs_nodes": bundle["initial_vs_nodes"],
@@ -947,4 +1039,25 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
             )
             handle.write(line + "\n")
             print(line)
+        if routing_diagnostics and any(value is not None for value in routing_diagnostics.values()):
+            handle.write("RoutingDiagnostics:\n")
+            print("RoutingDiagnostics:")
+            for role_name in ["VS", "AAS", "NAS", "FS"]:
+                diagnostics = routing_diagnostics.get(role_name)
+                if diagnostics is None:
+                    continue
+                graph_metrics = diagnostics.get("graph_metrics") or {}
+                patch_metrics = diagnostics.get("patch_metrics") or {}
+                fused_metrics = diagnostics.get("fused_metrics") or {}
+                line = (
+                    f"{role_name}: "
+                    f"alpha={diagnostics['alpha_mean']:.4f} | "
+                    f"graph_win={diagnostics['graph_win_rate']:.4f} | "
+                    f"gate_match={diagnostics['gate_match_rate']:.4f} | "
+                    f"G_MAPE={graph_metrics.get('MAPE', float('nan')):.4f} | "
+                    f"P_MAPE={patch_metrics.get('MAPE', float('nan')):.4f} | "
+                    f"F_MAPE={fused_metrics.get('MAPE', float('nan')):.4f}"
+                )
+                handle.write(line + "\n")
+                print(line)
     print(f"-> Async lifecycle results saved to {output_dir}")
