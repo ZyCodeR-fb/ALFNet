@@ -305,10 +305,10 @@ def _append_routing_diagnostics(buffers, output_meta, roles, fused_pred, target,
         buffers[role_name]["alpha"].append(alpha_part[valid_mask].detach().cpu())
         buffers[role_name]["graph_win"].append(graph_win[valid_mask].detach().cpu())
         buffers[role_name]["gate_match"].append(gate_match[valid_mask].detach().cpu())
-        buffers[role_name]["graph_pred"].append(graph_part.detach().cpu())
-        buffers[role_name]["patch_pred"].append(patch_part.detach().cpu())
-        buffers[role_name]["fused_pred"].append(fused_part.detach().cpu())
-        buffers[role_name]["true"].append(target_part.detach().cpu())
+        buffers[role_name]["graph_pred"].append(graph_part.reshape(-1, graph_part.shape[-1]).detach().cpu())
+        buffers[role_name]["patch_pred"].append(patch_part.reshape(-1, patch_part.shape[-1]).detach().cpu())
+        buffers[role_name]["fused_pred"].append(fused_part.reshape(-1, fused_part.shape[-1]).detach().cpu())
+        buffers[role_name]["true"].append(target_part.reshape(-1, target_part.shape[-1]).detach().cpu())
 
 
 def _summarize_routing_diagnostics(buffers):
