@@ -2,7 +2,7 @@ from layers.gnn import nn, torch, calculate_random_walk_matrix
 import torch.nn.functional as F
 from einops import rearrange
 from layers.agg import MeanAggregator, WMeanAggregator, MaxPoolingAggregator, MinPoolingAggregator, DiffusionAggregator
-from layers.DCRNNCell import DCRNNCell, DiffConv, LayerNormDCRNNCell, MGDCRNNCell, ResidualDCRNNCell
+from layers.DCRNNCell import DCRNNCell, DiffConv, GatedFFNDCRNNCell, LayerNormDCRNNCell, MGDCRNNCell, MixHopDCRNNCell, ResidualDCRNNCell
 from lib.utils import infer_project_num_nodes
 
 
@@ -223,6 +223,10 @@ def _build_recurrent_cell(cell_type, input_size, hidden_size, k):
         return ResidualDCRNNCell(input_size, hidden_size, k)
     if cell_type in {"mgu_dcrnn", "mg_dcrnn", "minimal_dcrnn"}:
         return MGDCRNNCell(input_size, hidden_size, k)
+    if cell_type in {"gffn_dcrnn", "swiglu_dcrnn", "grn_dcrnn"}:
+        return GatedFFNDCRNNCell(input_size, hidden_size, k)
+    if cell_type in {"mixhop_dcrnn", "mh_dcrnn", "multiorder_dcrnn"}:
+        return MixHopDCRNNCell(input_size, hidden_size, k)
     raise ValueError(f"Unsupported MoGERNN recurrent cell_type: {cell_type}")
 
 

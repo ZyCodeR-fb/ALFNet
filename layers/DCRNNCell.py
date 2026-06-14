@@ -72,6 +72,42 @@ class DiffConv(nn.Module):
         return x
 
 
+class MixHopDiffConv(nn.Module):
+    """Diffusion convolution with learnable higher-order support mixing."""
+
+    def __init__(self, in_channels, out_channels, k_hop):
+        super(MixHopDiffConv, self).__init__()
+        self.orders = max(1, int(k_hop))
+        self.num_matrices = 2 * self.orders + 1
+        self.Theta1 = nn.Parameter(
+            torch.FloatTensor(in_channels * self.num_matrices, out_channels))
+        self.bias = nn.Parameter(torch.FloatTensor(out_channels))
+        self.support_logits = nn.Parameter(torch.zeros(self.num_matrices))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        stdv = 1. / math.sqrt(self.Theta1.shape[1])
+        self.Theta1.data.uniform_(-stdv, stdv)
+        stdv1 = 1. / math.sqrt(self.bias.shape[0])
+        self.bias.data.uniform_(-stdv1, stdv1)
+        nn.init.zeros_(self.support_logits)
+
+    def _aggregate(self, support, x):
+        return torch.einsum("nm,bmc->bnc", support, x).contiguous()
+
+    def forward(self, X, A_q, A_h):
+        features = [X]
+        current_q = X
+        current_h = X
+        for _ in range(self.orders):
+            current_q = self._aggregate(A_q, current_q)
+            current_h = self._aggregate(A_h, current_h)
+            features.extend([current_q, current_h])
+        weights = torch.softmax(self.support_logits, dim=0).to(dtype=X.dtype)
+        mixed = torch.cat([feat * weights[idx] for idx, feat in enumerate(features)], dim=-1)
+        return torch.matmul(mixed, self.Theta1) + self.bias
+
+
 class DCRNNCell(GraphGRUCellBase):
     """The Diffusion Convolutional Recurrent cell from the paper
     `"Diffusion Convolutional Recurrent Neural Network: Data-Driven Traffic
@@ -141,6 +177,51 @@ class MGDCRNNCell(nn.Module):
         x_c = torch.cat([x, z * h], dim=-1)
         c = torch.tanh(self.candidate_gate(x_c, A_q, A_h))
         return self.norm(z * h + (1.0 - z) * c)
+
+
+class SwiGLUTransition(nn.Module):
+
+    def __init__(self, hidden_size, expansion=2):
+        super(SwiGLUTransition, self).__init__()
+        inner_size = hidden_size * int(expansion)
+        self.norm = nn.LayerNorm(hidden_size)
+        self.value = nn.Linear(hidden_size, inner_size)
+        self.gate = nn.Linear(hidden_size, inner_size)
+        self.out = nn.Linear(inner_size, hidden_size)
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+
+    def forward(self, x):
+        x = self.norm(x)
+        return self.out(self.value(x) * F.silu(self.gate(x)))
+
+
+class GatedFFNDCRNNCell(DCRNNCell):
+
+    def __init__(self, input_size: int, hidden_size: int, k: int = 2):
+        super(GatedFFNDCRNNCell, self).__init__(input_size, hidden_size, k)
+        self.transition = SwiGLUTransition(hidden_size, expansion=2)
+        self.transition_scale = 0.10
+
+    def forward(self, x, h, A_q, A_h):
+        h_new = super().forward(x, h, A_q, A_h)
+        return h_new + self.transition_scale * self.transition(h_new)
+
+
+class MixHopDCRNNCell(GraphGRUCellBase):
+
+    def __init__(self, input_size: int, hidden_size: int, k: int = 2):
+        forget_gate = MixHopDiffConv(input_size + hidden_size, hidden_size, k)
+        update_gate = MixHopDiffConv(input_size + hidden_size, hidden_size, k)
+        candidate_gate = MixHopDiffConv(input_size + hidden_size, hidden_size, k)
+        super(MixHopDCRNNCell, self).__init__(hidden_size=hidden_size,
+                                              forget_gate=forget_gate,
+                                              update_gate=update_gate,
+                                              candidate_gate=candidate_gate)
+        self.norm = nn.LayerNorm(hidden_size)
+
+    def forward(self, x, h, A_q, A_h):
+        return self.norm(super().forward(x, h, A_q, A_h))
 
 
 class MoGERNNCell(MoGEGRUCellBase):

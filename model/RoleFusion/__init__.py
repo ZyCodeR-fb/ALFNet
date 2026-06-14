@@ -532,6 +532,55 @@ class GraphDiffusionOutputRefiner(nn.Module):
         return pred + self.scale * residual, residual
 
 
+class GraphSpectralOutputRefiner(nn.Module):
+    def __init__(self, output_dim, hidden_dim, scale, role_scale, lowpass_steps=1, use_backward=True, add_self_loop=True):
+        super().__init__()
+        self.lowpass_steps = max(1, int(lowpass_steps))
+        self.use_backward = bool(use_backward)
+        self.add_self_loop = bool(add_self_loop)
+        self.scale = float(scale)
+        self.input_proj = nn.Linear(3 * output_dim, hidden_dim)
+        self.output_proj = nn.Linear(hidden_dim, output_dim)
+        self.activation = nn.GELU()
+        self.register_buffer(
+            "role_output_scale",
+            _build_role_scale(role_scale, {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0}),
+            persistent=False,
+        )
+        nn.init.zeros_(self.output_proj.weight)
+        nn.init.zeros_(self.output_proj.bias)
+
+    def _support(self, adj, dtype):
+        support = adj.to(dtype=dtype)
+        if self.add_self_loop:
+            support = support + torch.eye(support.size(0), device=support.device, dtype=dtype)
+        fw = support / support.sum(1, keepdim=True).clamp_min(1e-6)
+        bw = support.T / support.T.sum(1, keepdim=True).clamp_min(1e-6)
+        return fw, bw
+
+    def _aggregate(self, support, x):
+        return torch.einsum("nm,btmd->btnd", support, x).contiguous()
+
+    def forward(self, pred, adj, last_role):
+        fw, bw = self._support(adj.to(pred.device), pred.dtype)
+        low_fw = pred
+        low_bw = pred
+        for _ in range(self.lowpass_steps):
+            low_fw = self._aggregate(fw, low_fw)
+            if self.use_backward:
+                low_bw = self._aggregate(bw, low_bw)
+        low = 0.5 * (low_fw + low_bw) if self.use_backward else low_fw
+        high = pred - low
+        residual = self.output_proj(self.activation(self.input_proj(torch.cat([pred, low, high], dim=-1))))
+        role_scale = torch.sum(
+            last_role * self.role_output_scale.to(last_role.device).view(1, 1, ROLE_COUNT),
+            dim=-1,
+            keepdim=True,
+        )
+        residual = role_scale.unsqueeze(1).to(dtype=residual.dtype) * torch.tanh(residual)
+        return pred + self.scale * residual, residual
+
+
 def _resolve_model_module_name(model_name):
     if model_name == "GWNET":
         return "GWNet"
@@ -943,6 +992,17 @@ class Model(nn.Module):
                 use_backward=bool(recipe_cfg.get("graph_diffusion_use_backward", True)),
                 add_self_loop=bool(recipe_cfg.get("graph_diffusion_add_self_loop", True)),
             )
+        self.graph_expert_spectral_refiner = None
+        if bool(recipe_cfg.get("use_graph_expert_spectral_refiner", False)):
+            self.graph_expert_spectral_refiner = GraphSpectralOutputRefiner(
+                output_dim=self.output_dim,
+                hidden_dim=graph_refiner_hidden_dim,
+                scale=float(recipe_cfg.get("graph_spectral_scale", recipe_cfg.get("graph_diffusion_scale", 0.05))),
+                role_scale=recipe_cfg.get("graph_spectral_role_scale", recipe_cfg.get("graph_diffusion_role_scale", {})),
+                lowpass_steps=int(recipe_cfg.get("graph_spectral_lowpass_steps", 1)),
+                use_backward=bool(recipe_cfg.get("graph_spectral_use_backward", True)),
+                add_self_loop=bool(recipe_cfg.get("graph_spectral_add_self_loop", True)),
+            )
         self.patch_expert_temporal_refiner = None
         if bool(recipe_cfg.get("use_patch_expert_temporal_refiner", False)):
             self.patch_expert_temporal_refiner = TemporalConvOutputRefiner(
@@ -1217,6 +1277,8 @@ class Model(nn.Module):
         node_state = self.state_encoder(state_input)
         if self.graph_expert_diffusion_refiner is not None:
             y_graph, _ = self.graph_expert_diffusion_refiner(y_graph, adj, last_role)
+        if self.graph_expert_spectral_refiner is not None:
+            y_graph, _ = self.graph_expert_spectral_refiner(y_graph, adj, last_role)
         if self.patch_expert_temporal_refiner is not None:
             y_patch, _ = self.patch_expert_temporal_refiner(y_patch, last_role)
         state_t = node_state.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
