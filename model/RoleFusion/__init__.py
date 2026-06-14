@@ -636,6 +636,9 @@ class Model(nn.Module):
         self.patch_residual_mode = str(recipe_cfg.get("patch_residual_mode", "learned_delta")).lower()
         self.lambda_patch_residual = float(recipe_cfg.get("lambda_patch_residual", 0.0))
         self.lambda_patch_delta = float(recipe_cfg.get("lambda_patch_delta", 0.0))
+        self.learnable_patch_residual_budget = bool(recipe_cfg.get("learnable_patch_residual_budget", False))
+        self.patch_residual_init_scale = float(recipe_cfg.get("patch_residual_init_scale", 0.2))
+        self.patch_residual_max_scale = float(recipe_cfg.get("patch_residual_max_scale", 0.5))
         self.end_to_end = bool(recipe_cfg.get("end_to_end", False))
         self.expert_train_mode = bool(recipe_cfg.get("expert_train_mode", self.end_to_end))
         self.use_role_residual = bool(recipe_cfg.get("use_role_residual", True))
@@ -750,6 +753,13 @@ class Model(nn.Module):
                 dtype=torch.float32,
             ),
         )
+        if self.learnable_patch_residual_budget:
+            init_ratio = self.patch_residual_init_scale / max(self.patch_residual_max_scale, 1e-6)
+            init_ratio = min(max(init_ratio, 1e-4), 1.0 - 1e-4)
+            init_logits = torch.logit(torch.full((ROLE_COUNT,), init_ratio, dtype=torch.float32))
+            self.patch_residual_budget_logit = nn.Parameter(init_logits)
+        else:
+            self.register_parameter("patch_residual_budget_logit", None)
         patch_delta_role_weight = recipe_cfg.get("patch_delta_role_weight", patch_residual_role_scale)
         self.register_buffer(
             "patch_delta_role_weight",
@@ -1187,6 +1197,14 @@ class Model(nn.Module):
             aux_losses["rolefusion_pattern_bank"] = self.lambda_pattern_bank * residual.pow(2).mean()
         return pred
 
+    def _patch_residual_role_budget(self, last_role):
+        if self.patch_residual_budget_logit is not None:
+            role_scale = self.patch_residual_max_scale * torch.sigmoid(self.patch_residual_budget_logit)
+        else:
+            role_scale = self.patch_residual_role_scale
+        role_scale = role_scale.to(device=last_role.device, dtype=last_role.dtype)
+        return torch.sum(last_role * role_scale.view(1, 1, ROLE_COUNT), dim=-1, keepdim=True)
+
     def _role_gate(self, adj, x_enc, y_graph, y_patch, with_residual=False, y_recovered_graph=None):
         node_state, last_role = self._build_gate_features(x_enc)
         if self.graph_expert_diffusion_refiner is not None:
@@ -1278,7 +1296,7 @@ class Model(nn.Module):
         role_logits = torch.cat([gate(gate_input) for gate in self.role_fusion_gates], dim=-1)
         role_weights = last_role.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
         patch_gate = torch.sigmoid(torch.sum(role_logits * role_weights, dim=-1, keepdim=True))
-        role_scale = torch.sum(last_role * self.patch_residual_role_scale.view(1, 1, ROLE_COUNT), dim=-1, keepdim=True)
+        role_scale = self._patch_residual_role_budget(last_role)
         role_scale_t = role_scale.unsqueeze(1).expand_as(patch_gate)
         beta = patch_gate * role_scale_t
 
