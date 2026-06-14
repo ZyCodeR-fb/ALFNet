@@ -127,6 +127,34 @@ def _compute_expert_role_loss(expert_training, y_for_loss, y_omi, last_role, los
     return lambda_expert_role * torch.stack(losses).sum() / max(sum(weights), 1e-6)
 
 
+def _compute_patch_residual_delta_loss(patch_residual_training, y_for_loss, y_omi, last_role):
+    lambda_patch_delta = float(patch_residual_training.get("lambda_patch_delta", 0.0))
+    if lambda_patch_delta <= 0:
+        return None
+    residual = patch_residual_training["residual"]
+    y_graph = patch_residual_training["y_graph"]
+    valid_mask = (~y_omi) & torch.isfinite(y_for_loss) & torch.isfinite(y_graph) & torch.isfinite(residual)
+    if not valid_mask.any():
+        return None
+
+    target_delta = (y_for_loss - y_graph).detach()
+    delta_loss = F.huber_loss(residual, target_delta, reduction="none")
+    if last_role is None:
+        return lambda_patch_delta * delta_loss[valid_mask].mean()
+
+    role_weight = patch_residual_training.get("role_weight", None)
+    if role_weight is None:
+        weights = torch.ones_like(delta_loss)
+    else:
+        role_weight = role_weight.to(device=delta_loss.device, dtype=delta_loss.dtype)
+        weights = torch.sum(last_role.to(dtype=delta_loss.dtype) * role_weight.view(1, 1, ROLE_CHANNEL_COUNT), dim=-1, keepdim=True)
+        weights = weights.unsqueeze(1).expand_as(delta_loss)
+    weights = torch.where(valid_mask, weights, torch.zeros_like(weights))
+    if weights.sum() <= 0:
+        return None
+    return lambda_patch_delta * (delta_loss * weights).sum() / weights.sum()
+
+
 def _compute_regret_loss(y_hat, y, y_omi, y_graph, y_patch, last_role):
     valid_mask = (~y_omi) & torch.isfinite(y_hat) & torch.isfinite(y_graph) & torch.isfinite(y_patch) & torch.isfinite(y)
     if not valid_mask.any():
@@ -420,6 +448,11 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                     expert_role_loss = _compute_expert_role_loss(expert_training, y_for_loss, y_omi, last_role, args.loss)
                     if expert_role_loss is not None:
                         optimize_loss = optimize_loss + expert_role_loss
+                patch_residual_training = output_meta.get("patch_residual_training")
+                if patch_residual_training:
+                    patch_delta_loss = _compute_patch_residual_delta_loss(patch_residual_training, y_for_loss, y_omi, last_role)
+                    if patch_delta_loss is not None:
+                        optimize_loss = optimize_loss + patch_delta_loss
             if not torch.isfinite(optimize_loss):
                 if grad_enabled:
                     optimizer.zero_grad()

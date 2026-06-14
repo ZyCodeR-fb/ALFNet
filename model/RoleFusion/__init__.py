@@ -635,6 +635,7 @@ class Model(nn.Module):
         self.fusion_mode = str(recipe_cfg.get("fusion_mode", "mixture")).lower()
         self.patch_residual_mode = str(recipe_cfg.get("patch_residual_mode", "learned_delta")).lower()
         self.lambda_patch_residual = float(recipe_cfg.get("lambda_patch_residual", 0.0))
+        self.lambda_patch_delta = float(recipe_cfg.get("lambda_patch_delta", 0.0))
         self.end_to_end = bool(recipe_cfg.get("end_to_end", False))
         self.expert_train_mode = bool(recipe_cfg.get("expert_train_mode", self.end_to_end))
         self.use_role_residual = bool(recipe_cfg.get("use_role_residual", True))
@@ -745,6 +746,19 @@ class Model(nn.Module):
                     float(patch_residual_role_scale.get("nas", 0.1)),
                     float(patch_residual_role_scale.get("vs", 0.05)),
                     float(patch_residual_role_scale.get("fs", 0.35)),
+                ],
+                dtype=torch.float32,
+            ),
+        )
+        patch_delta_role_weight = recipe_cfg.get("patch_delta_role_weight", patch_residual_role_scale)
+        self.register_buffer(
+            "patch_delta_role_weight",
+            torch.tensor(
+                [
+                    float(patch_delta_role_weight.get("aas", patch_residual_role_scale.get("aas", 0.3))),
+                    float(patch_delta_role_weight.get("nas", patch_residual_role_scale.get("nas", 0.1))),
+                    float(patch_delta_role_weight.get("vs", patch_residual_role_scale.get("vs", 0.05))),
+                    float(patch_delta_role_weight.get("fs", patch_residual_role_scale.get("fs", 0.35))),
                 ],
                 dtype=torch.float32,
             ),
@@ -1274,6 +1288,7 @@ class Model(nn.Module):
             patch_delta = torch.tanh(self.patch_residual_head(residual_input))
         residual = beta * patch_delta
         fused = y_graph + residual
+        residual_candidate = y_graph + patch_delta
 
         aux_losses = {}
         if self.lambda_patch_residual > 0:
@@ -1299,15 +1314,22 @@ class Model(nn.Module):
         routing_meta = {
             "alpha": alpha,
             "y_graph": y_graph.detach(),
-            "y_patch": y_patch.detach(),
+            "y_patch": residual_candidate.detach(),
             "lambda_oracle": self.lambda_oracle,
             "lambda_role_balanced": self.lambda_role_balanced,
             "lambda_regret": self.lambda_regret,
         }
+        if self.lambda_patch_delta > 0:
+            routing_meta["patch_residual_training"] = {
+                "residual": residual,
+                "y_graph": y_graph.detach(),
+                "lambda_patch_delta": self.lambda_patch_delta,
+                "role_weight": self.patch_delta_role_weight,
+            }
         if self.lambda_testam > 0 or self.recipe == "testam_role_mmoe":
             routing_meta["testam"] = {
                 "gate": torch.cat([alpha, 1.0 - alpha], dim=-1),
-                "expert_preds": torch.stack([y_graph.detach(), y_patch.detach()], dim=-1),
+                "expert_preds": torch.stack([y_graph.detach(), residual_candidate.detach()], dim=-1),
                 "lambda_testam": self.lambda_testam,
                 "role_balanced": self.testam_role_balanced,
                 "warmup_epoch": self.testam_warmup_epoch,
@@ -1317,7 +1339,7 @@ class Model(nn.Module):
             routing_meta["route"] = {
                 "alpha": alpha,
                 "y_graph": y_graph.detach(),
-                "y_patch": y_patch.detach(),
+                "y_patch": residual_candidate.detach(),
                 "lambda_route": self.lambda_route,
                 "target": self.route_target,
                 "temperature": self.route_temperature,
@@ -1388,6 +1410,7 @@ class Model(nn.Module):
             else:
                 pred, aux_losses, routing_meta = self._role_gate(adj, x_enc, y_graph, y_patch, with_residual=True, y_recovered_graph=y_recovered_graph)
             aux_losses.update(expert_aux_losses)
+            patch_residual_training = routing_meta.pop("patch_residual_training", None)
             output = {"pred": pred, "aux_losses": aux_losses, "oracle_routing": routing_meta}
             if self.forecast_loss_mode != "standard":
                 output["forecast_loss_mode"] = self.forecast_loss_mode
@@ -1407,6 +1430,8 @@ class Model(nn.Module):
                 output["testam_routing"] = routing_meta["testam"]
             if "route" in routing_meta:
                 output["route_routing"] = routing_meta["route"]
+            if patch_residual_training is not None:
+                output["patch_residual_training"] = patch_residual_training
             return output
         else:
             pred, aux_losses = self._soft_fuse(x_enc, y_graph, y_patch)
