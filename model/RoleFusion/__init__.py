@@ -632,6 +632,9 @@ class Model(nn.Module):
         self.lambda_expert_role = float(recipe_cfg.get("lambda_expert_role", 0.0))
         self.expert_role_graph_weight = float(recipe_cfg.get("expert_role_graph_weight", 1.0))
         self.expert_role_patch_weight = float(recipe_cfg.get("expert_role_patch_weight", 1.0))
+        self.fusion_mode = str(recipe_cfg.get("fusion_mode", "mixture")).lower()
+        self.patch_residual_mode = str(recipe_cfg.get("patch_residual_mode", "learned_delta")).lower()
+        self.lambda_patch_residual = float(recipe_cfg.get("lambda_patch_residual", 0.0))
         self.end_to_end = bool(recipe_cfg.get("end_to_end", False))
         self.expert_train_mode = bool(recipe_cfg.get("expert_train_mode", self.end_to_end))
         self.use_role_residual = bool(recipe_cfg.get("use_role_residual", True))
@@ -730,6 +733,22 @@ class Model(nn.Module):
                 dtype=torch.float32,
             ),
         )
+        patch_residual_role_scale = recipe_cfg.get(
+            "patch_residual_role_scale",
+            {"aas": 0.3, "nas": 0.1, "vs": 0.05, "fs": 0.35},
+        )
+        self.register_buffer(
+            "patch_residual_role_scale",
+            torch.tensor(
+                [
+                    float(patch_residual_role_scale.get("aas", 0.3)),
+                    float(patch_residual_role_scale.get("nas", 0.1)),
+                    float(patch_residual_role_scale.get("vs", 0.05)),
+                    float(patch_residual_role_scale.get("fs", 0.35)),
+                ],
+                dtype=torch.float32,
+            ),
+        )
 
         if self.recipe in {"soft_fuse", "oracle_gate", "role_mmoe", "testam_role_mmoe"}:
             self.state_encoder = nn.Sequential(
@@ -775,6 +794,18 @@ class Model(nn.Module):
                 )
             else:
                 self.role_residual_heads = nn.ModuleList()
+            if (
+                self.fusion_mode in {"graph_patch_residual", "patch_residual", "residual"}
+                and self.patch_residual_mode not in {"gap", "patch_gap", "expert_gap"}
+            ):
+                patch_residual_input_dim = state_dim + 4 * self.output_dim
+                self.patch_residual_head = nn.Sequential(
+                    nn.Linear(patch_residual_input_dim, gate_hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(gate_hidden_dim, self.output_dim),
+                )
+            else:
+                self.patch_residual_head = nn.Identity()
         elif self.recipe == "soft_fuse_v2":
             state_input_dim = ROLE_COUNT + 5
             self.state_encoder = nn.Sequential(
@@ -808,6 +839,7 @@ class Model(nn.Module):
             self.fusion_gate = nn.Identity()
             self.role_fusion_gates = nn.ModuleList()
             self.role_residual_heads = nn.ModuleList()
+            self.patch_residual_head = nn.Identity()
         else:
             self.state_encoder = nn.Identity()
             self.fusion_gate = nn.Identity()
@@ -817,6 +849,7 @@ class Model(nn.Module):
             self.residual_head = nn.Identity()
             self.role_fusion_gates = nn.ModuleList()
             self.role_residual_heads = nn.ModuleList()
+            self.patch_residual_head = nn.Identity()
 
         self.fs_recovery_head = None
         if bool(recipe_cfg.get("use_fs_recovery_head", False)):
@@ -1218,6 +1251,81 @@ class Model(nn.Module):
             }
         return fused, aux_losses, routing_meta
 
+    def _graph_patch_residual(self, adj, x_enc, y_graph, y_patch, y_recovered_graph=None):
+        node_state, last_role = self._build_gate_features(x_enc)
+        if self.graph_expert_diffusion_refiner is not None:
+            y_graph, _ = self.graph_expert_diffusion_refiner(y_graph, adj, last_role)
+        if self.patch_expert_temporal_refiner is not None:
+            y_patch, _ = self.patch_expert_temporal_refiner(y_patch, last_role)
+
+        state_t = node_state.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
+        disagreement = torch.abs(y_graph - y_patch)
+        gate_input = torch.cat([state_t, y_graph, y_patch, disagreement], dim=-1)
+        role_logits = torch.cat([gate(gate_input) for gate in self.role_fusion_gates], dim=-1)
+        role_weights = last_role.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
+        patch_gate = torch.sigmoid(torch.sum(role_logits * role_weights, dim=-1, keepdim=True))
+        role_scale = torch.sum(last_role * self.patch_residual_role_scale.view(1, 1, ROLE_COUNT), dim=-1, keepdim=True)
+        beta = patch_gate * role_scale.unsqueeze(1).expand_as(patch_gate)
+
+        if self.patch_residual_mode in {"gap", "patch_gap", "expert_gap"}:
+            patch_delta = y_patch - y_graph
+        else:
+            residual_input = torch.cat([state_t, y_graph, y_patch, y_patch - y_graph, disagreement], dim=-1)
+            patch_delta = torch.tanh(self.patch_residual_head(residual_input))
+        residual = beta * patch_delta
+        fused = y_graph + residual
+
+        aux_losses = {}
+        if self.lambda_patch_residual > 0:
+            aux_losses["rolefusion_patch_residual"] = self.lambda_patch_residual * residual.pow(2).mean()
+        if y_recovered_graph is not None:
+            recovery_scale = torch.sum(
+                last_role * self.graph_recovery_expert_role_scale.view(1, 1, ROLE_COUNT),
+                dim=-1,
+                keepdim=True,
+            )
+            recovery_scale = recovery_scale.unsqueeze(1).expand_as(fused)
+            if self.graph_recovery_apply_to == "role_delta":
+                fused = fused + recovery_scale * torch.tanh(y_recovered_graph - fused)
+            else:
+                fused = fused + recovery_scale * (y_recovered_graph - fused)
+        if self.fused_graph_diffusion_refiner is not None:
+            fused, _ = self.fused_graph_diffusion_refiner(fused, adj, last_role)
+        if self.fused_temporal_refiner is not None:
+            fused, _ = self.fused_temporal_refiner(fused, last_role)
+        fused = self._apply_role_heads(adj, x_enc, fused, last_role, aux_losses)
+
+        alpha = 1.0 - beta
+        routing_meta = {
+            "alpha": alpha,
+            "y_graph": y_graph.detach(),
+            "y_patch": y_patch.detach(),
+            "lambda_oracle": self.lambda_oracle,
+            "lambda_role_balanced": self.lambda_role_balanced,
+            "lambda_regret": self.lambda_regret,
+        }
+        if self.lambda_testam > 0 or self.recipe == "testam_role_mmoe":
+            routing_meta["testam"] = {
+                "gate": torch.cat([alpha, 1.0 - alpha], dim=-1),
+                "expert_preds": torch.stack([y_graph.detach(), y_patch.detach()], dim=-1),
+                "lambda_testam": self.lambda_testam,
+                "role_balanced": self.testam_role_balanced,
+                "warmup_epoch": self.testam_warmup_epoch,
+                "threshold": self.testam_threshold,
+            }
+        if self.lambda_route > 0:
+            routing_meta["route"] = {
+                "alpha": alpha,
+                "y_graph": y_graph.detach(),
+                "y_patch": y_patch.detach(),
+                "lambda_route": self.lambda_route,
+                "target": self.route_target,
+                "temperature": self.route_temperature,
+                "warmup_epoch": self.route_warmup_epoch,
+                "role_balanced": self.route_role_balanced,
+            }
+        return fused, aux_losses, routing_meta
+
     def _soft_fuse_v2(self, x_enc, y_graph, y_patch):
         node_state, _, last_visible = self._build_confidence_state(x_enc)
         state_t = node_state.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
@@ -1275,7 +1383,10 @@ class Model(nn.Module):
             aux_losses.update(expert_aux_losses)
             return {"pred": pred, "aux_losses": aux_losses, "oracle_routing": oracle_routing}
         elif self.recipe in {"role_mmoe", "testam_role_mmoe"}:
-            pred, aux_losses, routing_meta = self._role_gate(adj, x_enc, y_graph, y_patch, with_residual=True, y_recovered_graph=y_recovered_graph)
+            if self.fusion_mode in {"graph_patch_residual", "patch_residual", "residual"}:
+                pred, aux_losses, routing_meta = self._graph_patch_residual(adj, x_enc, y_graph, y_patch, y_recovered_graph=y_recovered_graph)
+            else:
+                pred, aux_losses, routing_meta = self._role_gate(adj, x_enc, y_graph, y_patch, with_residual=True, y_recovered_graph=y_recovered_graph)
             aux_losses.update(expert_aux_losses)
             output = {"pred": pred, "aux_losses": aux_losses, "oracle_routing": routing_meta}
             if self.forecast_loss_mode != "standard":
