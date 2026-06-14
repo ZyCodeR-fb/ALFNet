@@ -137,8 +137,9 @@ def _compute_patch_residual_delta_loss(patch_residual_training, y_for_loss, y_om
     if not valid_mask.any():
         return None
 
-    target_delta = (y_for_loss - y_graph).detach()
-    delta_loss = F.huber_loss(residual, target_delta, reduction="none")
+    target_delta = torch.where(valid_mask, y_for_loss - y_graph, torch.zeros_like(residual)).detach()
+    safe_residual = torch.where(valid_mask, residual, torch.zeros_like(residual))
+    delta_loss = F.huber_loss(safe_residual, target_delta, reduction="none")
     if last_role is None:
         return lambda_patch_delta * delta_loss[valid_mask].mean()
 
