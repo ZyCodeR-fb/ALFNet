@@ -99,6 +99,8 @@ def _compute_expert_role_loss(expert_training, y_for_loss, y_omi, last_role, los
     lambda_expert_role = float(expert_training.get("lambda_expert_role", 0.0))
     if lambda_expert_role <= 0 or last_role is None:
         return None
+    graph_weight = float(expert_training.get("expert_role_graph_weight", 1.0))
+    patch_weight = float(expert_training.get("expert_role_patch_weight", 1.0))
     y_graph = expert_training["y_graph"]
     y_patch = expert_training["y_patch"]
     valid_mask = (~y_omi) & torch.isfinite(y_for_loss) & torch.isfinite(y_graph) & torch.isfinite(y_patch)
@@ -111,15 +113,18 @@ def _compute_expert_role_loss(expert_training, y_for_loss, y_omi, last_role, los
     patch_role_mask = patch_role_mask.expand_as(valid_mask)
 
     losses = []
+    weights = []
     graph_loss = _masked_loss(y_graph, y_for_loss, valid_mask & graph_role_mask, loss_name)
     patch_loss = _masked_loss(y_patch, y_for_loss, valid_mask & patch_role_mask, loss_name)
-    if graph_loss is not None:
-        losses.append(graph_loss)
-    if patch_loss is not None:
-        losses.append(patch_loss)
+    if graph_loss is not None and graph_weight > 0:
+        losses.append(graph_weight * graph_loss)
+        weights.append(graph_weight)
+    if patch_loss is not None and patch_weight > 0:
+        losses.append(patch_weight * patch_loss)
+        weights.append(patch_weight)
     if not losses:
         return None
-    return lambda_expert_role * torch.stack(losses).mean()
+    return lambda_expert_role * torch.stack(losses).sum() / max(sum(weights), 1e-6)
 
 
 def _compute_regret_loss(y_hat, y, y_omi, y_graph, y_patch, last_role):

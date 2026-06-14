@@ -630,6 +630,8 @@ class Model(nn.Module):
         self.forecast_focal_max_weight = float(recipe_cfg.get("forecast_focal_max_weight", 5.0))
         self.forecast_focal_beta = float(recipe_cfg.get("forecast_focal_beta", 0.5))
         self.lambda_expert_role = float(recipe_cfg.get("lambda_expert_role", 0.0))
+        self.expert_role_graph_weight = float(recipe_cfg.get("expert_role_graph_weight", 1.0))
+        self.expert_role_patch_weight = float(recipe_cfg.get("expert_role_patch_weight", 1.0))
         self.end_to_end = bool(recipe_cfg.get("end_to_end", False))
         self.expert_train_mode = bool(recipe_cfg.get("expert_train_mode", self.end_to_end))
         self.use_role_residual = bool(recipe_cfg.get("use_role_residual", True))
@@ -1287,6 +1289,8 @@ class Model(nn.Module):
                     "y_graph": y_graph,
                     "y_patch": y_patch,
                     "lambda_expert_role": self.lambda_expert_role,
+                    "expert_role_graph_weight": self.expert_role_graph_weight,
+                    "expert_role_patch_weight": self.expert_role_patch_weight,
                 }
             if "testam" in routing_meta:
                 output["testam_routing"] = routing_meta["testam"]
