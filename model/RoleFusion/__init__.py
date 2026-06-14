@@ -1279,7 +1279,8 @@ class Model(nn.Module):
         role_weights = last_role.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
         patch_gate = torch.sigmoid(torch.sum(role_logits * role_weights, dim=-1, keepdim=True))
         role_scale = torch.sum(last_role * self.patch_residual_role_scale.view(1, 1, ROLE_COUNT), dim=-1, keepdim=True)
-        beta = patch_gate * role_scale.unsqueeze(1).expand_as(patch_gate)
+        role_scale_t = role_scale.unsqueeze(1).expand_as(patch_gate)
+        beta = patch_gate * role_scale_t
 
         if self.patch_residual_mode in {"gap", "patch_gap", "expert_gap"}:
             patch_delta = y_patch - y_graph
@@ -1288,7 +1289,7 @@ class Model(nn.Module):
             patch_delta = torch.tanh(self.patch_residual_head(residual_input))
         residual = beta * patch_delta
         fused = y_graph + residual
-        residual_candidate = y_graph + patch_delta
+        residual_candidate = y_graph + role_scale_t * patch_delta
 
         aux_losses = {}
         if self.lambda_patch_residual > 0:
