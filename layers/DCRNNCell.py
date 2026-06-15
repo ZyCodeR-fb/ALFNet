@@ -179,6 +179,34 @@ class MGDCRNNCell(nn.Module):
         return self.norm(z * h + (1.0 - z) * c)
 
 
+class LocalGateDCRNNCell(nn.Module):
+
+    def __init__(self, input_size: int, hidden_size: int, k: int = 2):
+        super(LocalGateDCRNNCell, self).__init__()
+        self.hidden_size = hidden_size
+        self.forget_gate = nn.Linear(input_size + hidden_size, hidden_size)
+        self.update_gate = nn.Linear(input_size + hidden_size, hidden_size)
+        self.candidate_gate = DiffConv(input_size + hidden_size, hidden_size, k)
+        self.norm = nn.LayerNorm(hidden_size)
+
+    def initialize_state(self, x):
+        return torch.zeros(
+            x.size(0),
+            x.size(-2),
+            self.hidden_size,
+            dtype=x.dtype,
+            device=x.device,
+        )
+
+    def forward(self, x, h, A_q, A_h):
+        x_gates = torch.cat([x, h], dim=-1)
+        r = torch.sigmoid(self.forget_gate(x_gates))
+        u = torch.sigmoid(self.update_gate(x_gates))
+        x_c = torch.cat([x, r * h], dim=-1)
+        c = torch.tanh(self.candidate_gate(x_c, A_q, A_h))
+        return self.norm(u * h + (1.0 - u) * c)
+
+
 class SwiGLUTransition(nn.Module):
 
     def __init__(self, hidden_size, expansion=2):
