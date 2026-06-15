@@ -208,6 +208,24 @@ class GatedFFNDCRNNCell(DCRNNCell):
         return h_new + self.transition_scale * self.transition(h_new)
 
 
+class AdaptiveGatedFFNDCRNNCell(DCRNNCell):
+
+    def __init__(self, input_size: int, hidden_size: int, k: int = 2, max_scale: float = 0.10, init_gate: float = 0.30):
+        super(AdaptiveGatedFFNDCRNNCell, self).__init__(input_size, hidden_size, k)
+        self.transition = SwiGLUTransition(hidden_size, expansion=2)
+        self.max_scale = float(max_scale)
+        self.gate_norm = nn.LayerNorm(hidden_size)
+        self.gate_proj = nn.Linear(hidden_size, 1)
+        nn.init.zeros_(self.gate_proj.weight)
+        init_gate = min(max(float(init_gate), 1e-4), 1.0 - 1e-4)
+        nn.init.constant_(self.gate_proj.bias, math.log(init_gate / (1.0 - init_gate)))
+
+    def forward(self, x, h, A_q, A_h):
+        h_new = super().forward(x, h, A_q, A_h)
+        gate = torch.sigmoid(self.gate_proj(self.gate_norm(h_new)))
+        return h_new + self.max_scale * gate * self.transition(h_new)
+
+
 class MixHopDCRNNCell(GraphGRUCellBase):
 
     def __init__(self, input_size: int, hidden_size: int, k: int = 2):

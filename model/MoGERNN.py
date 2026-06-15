@@ -2,7 +2,7 @@ from layers.gnn import nn, torch, calculate_random_walk_matrix
 import torch.nn.functional as F
 from einops import rearrange
 from layers.agg import MeanAggregator, WMeanAggregator, MaxPoolingAggregator, MinPoolingAggregator, DiffusionAggregator
-from layers.DCRNNCell import DCRNNCell, DiffConv, GatedFFNDCRNNCell, LayerNormDCRNNCell, MGDCRNNCell, MixHopDCRNNCell, ResidualDCRNNCell
+from layers.DCRNNCell import AdaptiveGatedFFNDCRNNCell, DCRNNCell, DiffConv, GatedFFNDCRNNCell, LayerNormDCRNNCell, MGDCRNNCell, MixHopDCRNNCell, ResidualDCRNNCell
 from lib.utils import infer_project_num_nodes
 
 
@@ -260,6 +260,17 @@ def _build_recurrent_cell(cell_type, input_size, hidden_size, k):
         scale_token = cell_type.rsplit("_s", 1)[-1]
         transition_scale = float(scale_token) if "." in scale_token else float(scale_token) / 100.0
         return GatedFFNDCRNNCell(input_size, hidden_size, k, transition_scale=transition_scale)
+    if cell_type.startswith("agffn_dcrnn"):
+        max_scale = 0.10
+        init_gate = 0.30
+        for token in cell_type.split("_"):
+            if token.startswith("s") and len(token) > 1:
+                scale_token = token[1:]
+                max_scale = float(scale_token) if "." in scale_token else float(scale_token) / 100.0
+            elif token.startswith("g") and len(token) > 1:
+                gate_token = token[1:]
+                init_gate = float(gate_token) if "." in gate_token else float(gate_token) / 100.0
+        return AdaptiveGatedFFNDCRNNCell(input_size, hidden_size, k, max_scale=max_scale, init_gate=init_gate)
     if cell_type in {"mixhop_dcrnn", "mh_dcrnn", "multiorder_dcrnn"}:
         return MixHopDCRNNCell(input_size, hidden_size, k)
     raise ValueError(f"Unsupported MoGERNN recurrent cell_type: {cell_type}")
