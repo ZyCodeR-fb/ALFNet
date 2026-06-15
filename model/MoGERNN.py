@@ -213,6 +213,37 @@ class AdaptiveGraphSupport(nn.Module):
         return (1.0 - mix) * A_q + mix * adaptive, (1.0 - mix) * A_h + mix * adaptive.transpose(0, 1)
 
 
+class LifecycleOutputAdapter(nn.Module):
+
+    def __init__(self, raw_dim, output_dim, hidden_dim, scale=0.05):
+        super(LifecycleOutputAdapter, self).__init__()
+        self.raw_dim = int(raw_dim)
+        self.output_dim = int(output_dim)
+        self.scale = float(scale)
+        state_dim = 4 + 1 + 1 + self.raw_dim
+        self.net = nn.Sequential(
+            nn.Linear(self.output_dim + state_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, self.output_dim),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, pred, x_enc):
+        if x_enc.size(-1) < self.raw_dim + 5:
+            return pred
+        raw_x = x_enc[..., :self.raw_dim]
+        role_seq = x_enc[..., self.raw_dim:self.raw_dim + 4]
+        last_role = role_seq[:, -1]
+        last_age = x_enc[:, -1, :, self.raw_dim + 4:self.raw_dim + 5]
+        visibility_ratio = (role_seq[..., 0:1] + role_seq[..., 1:2]).mean(dim=1)
+        last_raw = raw_x[:, -1]
+        state = torch.cat([last_role, last_age, visibility_ratio, last_raw], dim=-1)
+        state = state.unsqueeze(1).expand(-1, pred.size(1), -1, -1)
+        residual = torch.tanh(self.net(torch.cat([pred, state], dim=-1)))
+        return pred + self.scale * residual
+
+
 def _build_recurrent_cell(cell_type, input_size, hidden_size, k):
     cell_type = str(cell_type).lower()
     if cell_type in {"dcrnn", "dcgru", "graph_gru"}:
@@ -478,6 +509,14 @@ class Model(nn.Module):
                 float(recipe_cfg.get("adaptive_graph_temperature", 1.0)),
                 bool(recipe_cfg.get("adaptive_graph_symmetric", False)),
             )
+        self.lifecycle_output_adapter = None
+        if bool(recipe_cfg.get("use_lifecycle_output_adapter", False)):
+            self.lifecycle_output_adapter = LifecycleOutputAdapter(
+                self.raw_enc_in,
+                self.output_dim,
+                int(recipe_cfg.get("lifecycle_output_adapter_hidden_dim", configs.d_model)),
+                float(recipe_cfg.get("lifecycle_output_adapter_scale", 0.05)),
+            )
         cell_type = recipe_cfg.get("cell_type", recipe_cfg.get("mogernn_cell_type", "dcrnn"))
         self.seq2seq = Seq2Seq(configs.enc_in, configs.c_out, configs.d_model,
                                configs.e_layers, self.out_len, configs.k_hop, cell_type=cell_type)
@@ -508,4 +547,6 @@ class Model(nn.Module):
         teacher_forcing_ratio = 1 - (epoch / 40)
         initial_input = x_enc[:, -1, :, : self.output_dim]
         dec_out = self.seq2seq(x_enc, x_dec, A_q, A_h, initial_input, teacher_forcing_ratio)
+        if self.lifecycle_output_adapter is not None:
+            dec_out = self.lifecycle_output_adapter(dec_out, x_enc)
         return dec_out
