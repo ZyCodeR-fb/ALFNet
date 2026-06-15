@@ -207,6 +207,24 @@ class LocalGateDCRNNCell(nn.Module):
         return self.norm(u * h + (1.0 - u) * c)
 
 
+class HighwayDCRNNCell(DCRNNCell):
+
+    def __init__(self, input_size: int, hidden_size: int, k: int = 2, max_scale: float = 0.10, init_gate: float = 0.10):
+        super(HighwayDCRNNCell, self).__init__(input_size, hidden_size, k)
+        self.max_scale = float(max_scale)
+        self.gate_norm = nn.LayerNorm(hidden_size * 2)
+        self.highway_gate = nn.Linear(hidden_size * 2, hidden_size)
+        nn.init.zeros_(self.highway_gate.weight)
+        init_gate = min(max(float(init_gate), 1e-4), 1.0 - 1e-4)
+        nn.init.constant_(self.highway_gate.bias, math.log(init_gate / (1.0 - init_gate)))
+
+    def forward(self, x, h, A_q, A_h):
+        h_new = super().forward(x, h, A_q, A_h)
+        gate = torch.sigmoid(self.highway_gate(self.gate_norm(torch.cat([h_new, h], dim=-1))))
+        carry = self.max_scale * gate
+        return (1.0 - carry) * h_new + carry * h
+
+
 class SwiGLUTransition(nn.Module):
 
     def __init__(self, hidden_size, expansion=2):

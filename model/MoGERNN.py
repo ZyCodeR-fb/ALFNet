@@ -2,7 +2,7 @@ from layers.gnn import nn, torch, calculate_random_walk_matrix
 import torch.nn.functional as F
 from einops import rearrange
 from layers.agg import MeanAggregator, WMeanAggregator, MaxPoolingAggregator, MinPoolingAggregator, DiffusionAggregator
-from layers.DCRNNCell import AdaptiveGatedFFNDCRNNCell, DCRNNCell, DiffConv, GatedFFNDCRNNCell, LayerNormDCRNNCell, LocalGateDCRNNCell, MGDCRNNCell, MixHopDCRNNCell, ResidualDCRNNCell
+from layers.DCRNNCell import AdaptiveGatedFFNDCRNNCell, DCRNNCell, DiffConv, GatedFFNDCRNNCell, HighwayDCRNNCell, LayerNormDCRNNCell, LocalGateDCRNNCell, MGDCRNNCell, MixHopDCRNNCell, ResidualDCRNNCell
 from lib.utils import infer_project_num_nodes
 
 
@@ -256,6 +256,19 @@ def _build_recurrent_cell(cell_type, input_size, hidden_size, k):
         return MGDCRNNCell(input_size, hidden_size, k)
     if cell_type in {"localgate_dcrnn", "local_gate_dcrnn", "lg_dcrnn"}:
         return LocalGateDCRNNCell(input_size, hidden_size, k)
+    if cell_type in {"highway_dcrnn", "hw_dcrnn", "carry_dcrnn"}:
+        return HighwayDCRNNCell(input_size, hidden_size, k)
+    if cell_type.startswith("highway_dcrnn"):
+        max_scale = 0.10
+        init_gate = 0.10
+        for token in cell_type.split("_"):
+            if token.startswith("s") and len(token) > 1:
+                scale_token = token[1:]
+                max_scale = float(scale_token) if "." in scale_token else float(scale_token) / 100.0
+            elif token.startswith("g") and len(token) > 1:
+                gate_token = token[1:]
+                init_gate = float(gate_token) if "." in gate_token else float(gate_token) / 100.0
+        return HighwayDCRNNCell(input_size, hidden_size, k, max_scale=max_scale, init_gate=init_gate)
     if cell_type in {"gffn_dcrnn", "swiglu_dcrnn", "grn_dcrnn"}:
         return GatedFFNDCRNNCell(input_size, hidden_size, k)
     if cell_type.startswith("gffn_dcrnn_s"):
