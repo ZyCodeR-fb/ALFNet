@@ -477,11 +477,24 @@ class Decoder(nn.Module):
 
 class Seq2Seq(nn.Module):
 
-    def __init__(self, enc_input_size, dec_input_size, hidden_size, num_layers, out_seq_len, k=2, cell_type="dcrnn"):
+    def __init__(
+        self,
+        enc_input_size,
+        dec_input_size,
+        hidden_size,
+        num_layers,
+        out_seq_len,
+        k=2,
+        cell_type="dcrnn",
+        encoder_cell_type=None,
+        decoder_cell_type=None,
+    ):
         super(Seq2Seq, self).__init__()
-        self.encoder = Encoder(enc_input_size, hidden_size, num_layers, k, cell_type=cell_type)
+        encoder_cell_type = cell_type if encoder_cell_type is None else encoder_cell_type
+        decoder_cell_type = cell_type if decoder_cell_type is None else decoder_cell_type
+        self.encoder = Encoder(enc_input_size, hidden_size, num_layers, k, cell_type=encoder_cell_type)
         self.decoder = Decoder(dec_input_size, hidden_size, out_seq_len,
-                               output_size=dec_input_size, num_layers=num_layers, k=k, cell_type=cell_type)
+                               output_size=dec_input_size, num_layers=num_layers, k=k, cell_type=decoder_cell_type)
 
     def forward(self, x_enc, x_dec, A_q, A_h, initial_input, teacher_forcing_ratio=0.5):
         h = self.encoder(x_enc, A_q, A_h)
@@ -533,8 +546,13 @@ class Model(nn.Module):
                 float(recipe_cfg.get("lifecycle_output_adapter_scale", 0.05)),
             )
         cell_type = recipe_cfg.get("cell_type", recipe_cfg.get("mogernn_cell_type", "dcrnn"))
+        encoder_cell_type = recipe_cfg.get("encoder_cell_type", recipe_cfg.get("mogernn_encoder_cell_type", None))
+        decoder_cell_type = recipe_cfg.get("decoder_cell_type", recipe_cfg.get("mogernn_decoder_cell_type", None))
         self.seq2seq = Seq2Seq(configs.enc_in, configs.c_out, configs.d_model,
-                               configs.e_layers, self.out_len, configs.k_hop, cell_type=cell_type)
+                               configs.e_layers, self.out_len, configs.k_hop,
+                               cell_type=cell_type,
+                               encoder_cell_type=encoder_cell_type,
+                               decoder_cell_type=decoder_cell_type)
 
     def set_current_node_ids(self, node_ids):
         self.current_node_ids = node_ids
