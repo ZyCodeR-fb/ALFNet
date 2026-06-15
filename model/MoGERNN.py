@@ -256,6 +256,10 @@ def _build_recurrent_cell(cell_type, input_size, hidden_size, k):
         return MGDCRNNCell(input_size, hidden_size, k)
     if cell_type in {"gffn_dcrnn", "swiglu_dcrnn", "grn_dcrnn"}:
         return GatedFFNDCRNNCell(input_size, hidden_size, k)
+    if cell_type.startswith("gffn_dcrnn_s"):
+        scale_token = cell_type.rsplit("_s", 1)[-1]
+        transition_scale = float(scale_token) if "." in scale_token else float(scale_token) / 100.0
+        return GatedFFNDCRNNCell(input_size, hidden_size, k, transition_scale=transition_scale)
     if cell_type in {"mixhop_dcrnn", "mh_dcrnn", "multiorder_dcrnn"}:
         return MixHopDCRNNCell(input_size, hidden_size, k)
     raise ValueError(f"Unsupported MoGERNN recurrent cell_type: {cell_type}")

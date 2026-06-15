@@ -198,10 +198,10 @@ class SwiGLUTransition(nn.Module):
 
 class GatedFFNDCRNNCell(DCRNNCell):
 
-    def __init__(self, input_size: int, hidden_size: int, k: int = 2):
+    def __init__(self, input_size: int, hidden_size: int, k: int = 2, transition_scale: float = 0.10):
         super(GatedFFNDCRNNCell, self).__init__(input_size, hidden_size, k)
         self.transition = SwiGLUTransition(hidden_size, expansion=2)
-        self.transition_scale = 0.10
+        self.transition_scale = float(transition_scale)
 
     def forward(self, x, h, A_q, A_h):
         h_new = super().forward(x, h, A_q, A_h)
