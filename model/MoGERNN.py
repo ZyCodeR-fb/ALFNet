@@ -74,6 +74,8 @@ class DataPreparation(nn.Module):
         self.use_observed_mask_gate = bool(recipe_cfg.get("use_observed_mask_gate", True))
         self.use_role_gate_features = bool(recipe_cfg.get("use_role_gate_features", True))
         self.use_age_gate_feature = bool(recipe_cfg.get("use_age_gate_feature", True))
+        self.use_temporal_carry_imputer = bool(recipe_cfg.get("use_temporal_carry_imputer", False))
+        self.temporal_carry_mix = float(recipe_cfg.get("temporal_carry_mix", 0.50))
         gate_feature_dim = self.raw_enc_in
         if self.use_mask_aware_gate:
             if self.use_observed_mask_gate:
@@ -120,6 +122,20 @@ class DataPreparation(nn.Module):
             features.append(extra_x[..., 4:5])
         return torch.cat(features, dim=-1)
 
+    def _temporal_carry_completion(self, raw_x):
+        batch_size, _, num_nodes, raw_dim = raw_x.shape
+        last_value = raw_x.new_zeros(batch_size, num_nodes, raw_dim)
+        has_value = raw_x.new_zeros(batch_size, num_nodes, raw_dim)
+        carry_steps = []
+        available_steps = []
+        for t in range(raw_x.size(1)):
+            carry_steps.append(last_value)
+            available_steps.append(has_value)
+            observed = (torch.abs(raw_x[:, t]) > 0).to(dtype=raw_x.dtype)
+            last_value = torch.where(observed.bool(), raw_x[:, t], last_value)
+            has_value = torch.maximum(has_value, observed)
+        return torch.stack(carry_steps, dim=1), torch.stack(available_steps, dim=1)
+
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None):
         if x_enc.size(-1) != self.total_enc_in:
             raise ValueError(
@@ -133,7 +149,8 @@ class DataPreparation(nn.Module):
         gate_x = self._build_gate_input(raw_x, extra_x)
         batch_unknown_nodes = torch.where(
             torch.sum(torch.abs(raw_x), dim=(0, 1, 3)) == 0)[0].cpu().tolist()
-        raw_x = rearrange(raw_x, 'b t n c -> b n (t c)')
+        raw_seq = raw_x
+        raw_x = rearrange(raw_seq, 'b t n c -> b n (t c)')
         gate_x = rearrange(gate_x, 'b t n c -> b n (t c)')
         gate_weights = self.gating(gate_x)
         adj_noselfloop = adj.clone()
@@ -146,9 +163,15 @@ class DataPreparation(nn.Module):
         combied_out = torch.sum(gate_weights.unsqueeze(-1) *
                                 expert_outputs_stack,
                                 dim=2)
-        miss_ix = (raw_x == 0).int()
-        raw_x = raw_x * (1 - miss_ix) + combied_out * miss_ix
-        raw_x = rearrange(raw_x, 'b n (t c) -> b t n c', t=x_enc.shape[1], c=self.raw_enc_in)
+        spatial_completed = rearrange(combied_out, 'b n (t c) -> b t n c', t=x_enc.shape[1], c=self.raw_enc_in)
+        fill_completed = spatial_completed
+        if self.use_temporal_carry_imputer:
+            carry_completed, carry_available = self._temporal_carry_completion(raw_seq)
+            carry_mix = max(0.0, min(1.0, self.temporal_carry_mix))
+            carry_weight = carry_available * carry_mix
+            fill_completed = (1.0 - carry_weight) * spatial_completed + carry_weight * carry_completed
+        miss_ix = (raw_seq == 0).to(dtype=raw_seq.dtype)
+        raw_x = raw_seq * (1.0 - miss_ix) + fill_completed * miss_ix
         if extra_x is None:
             return raw_x
         return torch.cat([raw_x, extra_x], dim=-1)
