@@ -1,0 +1,69 @@
+runtime:
+  model: MoGERNN
+  model_recipe: maskaware_tgate050
+  mode: train
+  save_model: true
+
+dataset:
+  dloader_name: METRLA
+  data_path: ./data/METR-LA/raw_data.pkl
+  unknown_nodes_path: ./data/METR-LA/unknown_nodes.npy
+  input_len: 12
+  pred_len: 12
+  look_back: 0
+  slide_step: 12
+  input_features: v
+  target_features: v
+  freq: min
+
+training:
+  device: cuda:0
+  seed: 32
+  max_epoch: 100
+  patience: 10
+  stop_based: val_mask
+  batch_size: 32
+  num_workers: 8
+  loss: mse
+  optimizer: adamw
+  scheduler: None
+  scheduler_patience: 1
+  lr: 0.0005
+  weight_decay: 0.0001
+  d_model: 64
+  e_layers: 2
+  d_layers: 1
+  k_hop: 1
+  mean_expert: true
+  weight_expert: true
+  max_expert: true
+  min_expert: true
+  diffusion_expert: true
+  num_used_experts: 3
+
+lifecycle:
+  train_for_async_lifecycle: true
+  lifecycle_role_features: true
+  lifecycle_history_age_feature: true
+  lifecycle_event_sampling: mixed
+  lifecycle_training_strategy: round3_event_only
+  lifecycle_aas_loss_weight: 1.0
+  lifecycle_nas_loss_weight: 1.0
+  lifecycle_vs_loss_weight: 1.0
+  lifecycle_fs_loss_weight: 1.0
+
+async_test:
+  async_adaptor: base
+  async_num_events: 4
+  async_commissioning_k: 12
+  async_event_seed: 0
+
+family:
+  recipe:
+    use_temporal_carry_gate: true
+    temporal_carry_gate_max_mix: 0.50
+    temporal_carry_gate_init: 0.10
+    use_mask_aware_gate: true
+    use_observed_mask_gate: true
+    use_role_gate_features: true
+    use_age_gate_feature: true

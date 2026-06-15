@@ -1,3 +1,5 @@
+import math
+
 from layers.gnn import nn, torch, calculate_random_walk_matrix
 import torch.nn.functional as F
 from einops import rearrange
@@ -76,6 +78,8 @@ class DataPreparation(nn.Module):
         self.use_age_gate_feature = bool(recipe_cfg.get("use_age_gate_feature", True))
         self.use_temporal_carry_imputer = bool(recipe_cfg.get("use_temporal_carry_imputer", False))
         self.temporal_carry_mix = float(recipe_cfg.get("temporal_carry_mix", 0.50))
+        self.use_temporal_carry_gate = bool(recipe_cfg.get("use_temporal_carry_gate", False))
+        self.temporal_carry_gate_max_mix = float(recipe_cfg.get("temporal_carry_gate_max_mix", 0.50))
         gate_feature_dim = self.raw_enc_in
         if self.use_mask_aware_gate:
             if self.use_observed_mask_gate:
@@ -103,6 +107,14 @@ class DataPreparation(nn.Module):
                 DiffusionAggregator(flattened_input_dim, flattened_input_dim))
         self.experts = nn.ModuleList([Expert(expert) for expert in experts])
         self.gating = SparseGatingNetwork(configs, input_dim=gate_feature_dim)
+        if self.use_temporal_carry_gate:
+            self.temporal_carry_gate = nn.Linear(self.raw_enc_in * 4, self.raw_enc_in)
+            nn.init.zeros_(self.temporal_carry_gate.weight)
+            init_gate = float(recipe_cfg.get("temporal_carry_gate_init", 0.10))
+            init_gate = min(max(init_gate, 1e-4), 1.0 - 1e-4)
+            nn.init.constant_(self.temporal_carry_gate.bias, math.log(init_gate / (1.0 - init_gate)))
+        else:
+            self.temporal_carry_gate = None
 
     def _observed_mask(self, raw_x, extra_x):
         if extra_x is not None and self.total_enc_in >= self.role_end:
@@ -136,6 +148,15 @@ class DataPreparation(nn.Module):
             has_value = torch.maximum(has_value, observed)
         return torch.stack(carry_steps, dim=1), torch.stack(available_steps, dim=1)
 
+    def _temporal_carry_gate_completion(self, spatial_completed, carry_completed, carry_available):
+        gate_features = torch.cat(
+            [spatial_completed, carry_completed, spatial_completed - carry_completed, carry_available],
+            dim=-1,
+        )
+        max_mix = max(0.0, min(1.0, self.temporal_carry_gate_max_mix))
+        gate = max_mix * carry_available * torch.sigmoid(self.temporal_carry_gate(gate_features))
+        return (1.0 - gate) * spatial_completed + gate * carry_completed
+
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None):
         if x_enc.size(-1) != self.total_enc_in:
             raise ValueError(
@@ -165,7 +186,10 @@ class DataPreparation(nn.Module):
                                 dim=2)
         spatial_completed = rearrange(combied_out, 'b n (t c) -> b t n c', t=x_enc.shape[1], c=self.raw_enc_in)
         fill_completed = spatial_completed
-        if self.use_temporal_carry_imputer:
+        if self.use_temporal_carry_gate:
+            carry_completed, carry_available = self._temporal_carry_completion(raw_seq)
+            fill_completed = self._temporal_carry_gate_completion(spatial_completed, carry_completed, carry_available)
+        elif self.use_temporal_carry_imputer:
             carry_completed, carry_available = self._temporal_carry_completion(raw_seq)
             carry_mix = max(0.0, min(1.0, self.temporal_carry_mix))
             carry_weight = carry_available * carry_mix
