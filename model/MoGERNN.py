@@ -299,6 +299,7 @@ class RoleOutputCalibrator(nn.Module):
         output_dim,
         scale=0.05,
         use_multiplicative=True,
+        use_bias=True,
         out_seq_len=None,
         horizon_conditioned=False,
         state_aware=False,
@@ -310,6 +311,7 @@ class RoleOutputCalibrator(nn.Module):
         self.output_dim = int(output_dim)
         self.scale = float(scale)
         self.use_multiplicative = bool(use_multiplicative)
+        self.use_bias = bool(use_bias)
         self.horizon_conditioned = bool(horizon_conditioned)
         self.state_aware = bool(state_aware)
         self.use_age = bool(use_age)
@@ -323,8 +325,11 @@ class RoleOutputCalibrator(nn.Module):
                 state_dim += 1
             if self.use_visibility:
                 state_dim += 1
-            self.state_bias = nn.Linear(state_dim, self.output_dim, bias=False)
-            nn.init.zeros_(self.state_bias.weight)
+            if self.use_bias:
+                self.state_bias = nn.Linear(state_dim, self.output_dim, bias=False)
+                nn.init.zeros_(self.state_bias.weight)
+            else:
+                self.state_bias = None
             if self.use_multiplicative:
                 self.state_scale = nn.Linear(state_dim, self.output_dim, bias=False)
                 nn.init.zeros_(self.state_scale.weight)
@@ -335,13 +340,19 @@ class RoleOutputCalibrator(nn.Module):
         elif self.horizon_conditioned:
             if self.out_seq_len <= 0:
                 raise ValueError("RoleOutputCalibrator needs out_seq_len when horizon_conditioned=True.")
-            self.role_bias = nn.Parameter(torch.zeros(self.out_seq_len, 4, self.output_dim))
+            if self.use_bias:
+                self.role_bias = nn.Parameter(torch.zeros(self.out_seq_len, 4, self.output_dim))
+            else:
+                self.register_parameter("role_bias", None)
             if self.use_multiplicative:
                 self.role_scale = nn.Parameter(torch.zeros(self.out_seq_len, 4, self.output_dim))
             else:
                 self.register_parameter("role_scale", None)
         else:
-            self.role_bias = nn.Parameter(torch.zeros(4, self.output_dim))
+            if self.use_bias:
+                self.role_bias = nn.Parameter(torch.zeros(4, self.output_dim))
+            else:
+                self.register_parameter("role_bias", None)
             if self.use_multiplicative:
                 self.role_scale = nn.Parameter(torch.zeros(4, self.output_dim))
             else:
@@ -365,23 +376,30 @@ class RoleOutputCalibrator(nn.Module):
         if x_enc.size(-1) < self.raw_dim + 4:
             return pred
         role = x_enc[:, -1, :, self.raw_dim:self.raw_dim + 4]
+        bias = None
         if self.state_aware:
             state = self._state_features(x_enc, role)
-            bias = self.state_bias(state).unsqueeze(1)
+            if self.state_bias is not None:
+                bias = self.state_bias(state).unsqueeze(1)
         elif self.horizon_conditioned:
-            bias = torch.einsum("bnr,hrc->bhnc", role, self.role_bias)
-        else:
+            if self.role_bias is not None:
+                bias = torch.einsum("bnr,hrc->bhnc", role, self.role_bias)
+        elif self.role_bias is not None:
             bias = torch.matmul(role, self.role_bias).unsqueeze(1)
         residual = bias
         if self.state_aware and self.state_scale is not None:
             scale = torch.tanh(self.state_scale(state)).unsqueeze(1)
-            residual = residual + pred * scale
+            scale_residual = pred * scale
+            residual = scale_residual if residual is None else residual + scale_residual
         elif self.role_scale is not None:
             if self.horizon_conditioned:
                 scale = torch.tanh(torch.einsum("bnr,hrc->bhnc", role, self.role_scale))
             else:
                 scale = torch.tanh(torch.matmul(role, self.role_scale)).unsqueeze(1)
-            residual = residual + pred * scale
+            scale_residual = pred * scale
+            residual = scale_residual if residual is None else residual + scale_residual
+        if residual is None:
+            return pred
         return pred + self.scale * residual
 
 
@@ -704,15 +722,16 @@ class Model(nn.Module):
         self.role_output_calibrator = None
         if bool(recipe_cfg.get("use_role_output_calibrator", False)):
             self.role_output_calibrator = RoleOutputCalibrator(
-                self.raw_enc_in,
-                self.output_dim,
-                float(recipe_cfg.get("role_output_calibrator_scale", 0.05)),
-                bool(recipe_cfg.get("role_output_calibrator_multiplicative", True)),
-                self.out_len,
-                bool(recipe_cfg.get("role_output_calibrator_horizon_conditioned", False)),
-                bool(recipe_cfg.get("role_output_calibrator_state_aware", False)),
-                bool(recipe_cfg.get("role_output_calibrator_use_age", True)),
-                bool(recipe_cfg.get("role_output_calibrator_use_visibility", True)),
+                raw_dim=self.raw_enc_in,
+                output_dim=self.output_dim,
+                scale=float(recipe_cfg.get("role_output_calibrator_scale", 0.05)),
+                use_multiplicative=bool(recipe_cfg.get("role_output_calibrator_multiplicative", True)),
+                use_bias=bool(recipe_cfg.get("role_output_calibrator_use_bias", True)),
+                out_seq_len=self.out_len,
+                horizon_conditioned=bool(recipe_cfg.get("role_output_calibrator_horizon_conditioned", False)),
+                state_aware=bool(recipe_cfg.get("role_output_calibrator_state_aware", False)),
+                use_age=bool(recipe_cfg.get("role_output_calibrator_use_age", True)),
+                use_visibility=bool(recipe_cfg.get("role_output_calibrator_use_visibility", True)),
             )
         cell_type = recipe_cfg.get("cell_type", recipe_cfg.get("mogernn_cell_type", "dcrnn"))
         encoder_cell_type = recipe_cfg.get("encoder_cell_type", recipe_cfg.get("mogernn_encoder_cell_type", None))
