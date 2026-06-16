@@ -300,6 +300,8 @@ class RoleOutputCalibrator(nn.Module):
         scale=0.05,
         use_multiplicative=True,
         use_bias=True,
+        bias_weight=1.0,
+        scale_weight=1.0,
         out_seq_len=None,
         horizon_conditioned=False,
         state_aware=False,
@@ -312,6 +314,8 @@ class RoleOutputCalibrator(nn.Module):
         self.scale = float(scale)
         self.use_multiplicative = bool(use_multiplicative)
         self.use_bias = bool(use_bias)
+        self.bias_weight = float(bias_weight)
+        self.scale_weight = float(scale_weight)
         self.horizon_conditioned = bool(horizon_conditioned)
         self.state_aware = bool(state_aware)
         self.use_age = bool(use_age)
@@ -380,23 +384,23 @@ class RoleOutputCalibrator(nn.Module):
         if self.state_aware:
             state = self._state_features(x_enc, role)
             if self.state_bias is not None:
-                bias = self.state_bias(state).unsqueeze(1)
+                bias = self.bias_weight * self.state_bias(state).unsqueeze(1)
         elif self.horizon_conditioned:
             if self.role_bias is not None:
-                bias = torch.einsum("bnr,hrc->bhnc", role, self.role_bias)
+                bias = self.bias_weight * torch.einsum("bnr,hrc->bhnc", role, self.role_bias)
         elif self.role_bias is not None:
-            bias = torch.matmul(role, self.role_bias).unsqueeze(1)
+            bias = self.bias_weight * torch.matmul(role, self.role_bias).unsqueeze(1)
         residual = bias
         if self.state_aware and self.state_scale is not None:
             scale = torch.tanh(self.state_scale(state)).unsqueeze(1)
-            scale_residual = pred * scale
+            scale_residual = self.scale_weight * pred * scale
             residual = scale_residual if residual is None else residual + scale_residual
         elif self.role_scale is not None:
             if self.horizon_conditioned:
                 scale = torch.tanh(torch.einsum("bnr,hrc->bhnc", role, self.role_scale))
             else:
                 scale = torch.tanh(torch.matmul(role, self.role_scale)).unsqueeze(1)
-            scale_residual = pred * scale
+            scale_residual = self.scale_weight * pred * scale
             residual = scale_residual if residual is None else residual + scale_residual
         if residual is None:
             return pred
@@ -727,6 +731,8 @@ class Model(nn.Module):
                 scale=float(recipe_cfg.get("role_output_calibrator_scale", 0.05)),
                 use_multiplicative=bool(recipe_cfg.get("role_output_calibrator_multiplicative", True)),
                 use_bias=bool(recipe_cfg.get("role_output_calibrator_use_bias", True)),
+                bias_weight=float(recipe_cfg.get("role_output_calibrator_bias_weight", 1.0)),
+                scale_weight=float(recipe_cfg.get("role_output_calibrator_scale_weight", 1.0)),
                 out_seq_len=self.out_len,
                 horizon_conditioned=bool(recipe_cfg.get("role_output_calibrator_horizon_conditioned", False)),
                 state_aware=bool(recipe_cfg.get("role_output_calibrator_state_aware", False)),
