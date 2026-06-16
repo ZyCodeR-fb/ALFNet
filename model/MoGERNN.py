@@ -302,6 +302,8 @@ class RoleOutputCalibrator(nn.Module):
         use_bias=True,
         bias_weight=1.0,
         scale_weight=1.0,
+        learned_component_gate=False,
+        component_gate_max=2.0,
         out_seq_len=None,
         horizon_conditioned=False,
         state_aware=False,
@@ -316,6 +318,8 @@ class RoleOutputCalibrator(nn.Module):
         self.use_bias = bool(use_bias)
         self.bias_weight = float(bias_weight)
         self.scale_weight = float(scale_weight)
+        self.learned_component_gate = bool(learned_component_gate)
+        self.component_gate_max = float(component_gate_max)
         self.horizon_conditioned = bool(horizon_conditioned)
         self.state_aware = bool(state_aware)
         self.use_age = bool(use_age)
@@ -361,6 +365,17 @@ class RoleOutputCalibrator(nn.Module):
                 self.role_scale = nn.Parameter(torch.zeros(4, self.output_dim))
             else:
                 self.register_parameter("role_scale", None)
+        gate_init = 1.0 / max(self.component_gate_max, 1e-6)
+        gate_init = min(max(gate_init, 1e-4), 1.0 - 1e-4)
+        gate_logit = math.log(gate_init / (1.0 - gate_init))
+        if self.learned_component_gate and self.use_bias:
+            self.bias_gate_logits = nn.Parameter(torch.full((4, self.output_dim), gate_logit))
+        else:
+            self.register_parameter("bias_gate_logits", None)
+        if self.learned_component_gate and self.use_multiplicative:
+            self.scale_gate_logits = nn.Parameter(torch.full((4, self.output_dim), gate_logit))
+        else:
+            self.register_parameter("scale_gate_logits", None)
 
     def _state_features(self, x_enc, role):
         features = [role]
@@ -376,6 +391,12 @@ class RoleOutputCalibrator(nn.Module):
             features.append(visibility_ratio)
         return torch.cat(features, dim=-1)
 
+    def _component_gate(self, role, logits):
+        if logits is None:
+            return None
+        gate_values = self.component_gate_max * torch.sigmoid(logits)
+        return torch.matmul(role, gate_values).unsqueeze(1)
+
     def forward(self, pred, x_enc):
         if x_enc.size(-1) < self.raw_dim + 4:
             return pred
@@ -390,10 +411,16 @@ class RoleOutputCalibrator(nn.Module):
                 bias = self.bias_weight * torch.einsum("bnr,hrc->bhnc", role, self.role_bias)
         elif self.role_bias is not None:
             bias = self.bias_weight * torch.matmul(role, self.role_bias).unsqueeze(1)
+        bias_gate = self._component_gate(role, self.bias_gate_logits)
+        if bias is not None and bias_gate is not None:
+            bias = bias * bias_gate
         residual = bias
         if self.state_aware and self.state_scale is not None:
             scale = torch.tanh(self.state_scale(state)).unsqueeze(1)
             scale_residual = self.scale_weight * pred * scale
+            scale_gate = self._component_gate(role, self.scale_gate_logits)
+            if scale_gate is not None:
+                scale_residual = scale_residual * scale_gate
             residual = scale_residual if residual is None else residual + scale_residual
         elif self.role_scale is not None:
             if self.horizon_conditioned:
@@ -401,6 +428,9 @@ class RoleOutputCalibrator(nn.Module):
             else:
                 scale = torch.tanh(torch.matmul(role, self.role_scale)).unsqueeze(1)
             scale_residual = self.scale_weight * pred * scale
+            scale_gate = self._component_gate(role, self.scale_gate_logits)
+            if scale_gate is not None:
+                scale_residual = scale_residual * scale_gate
             residual = scale_residual if residual is None else residual + scale_residual
         if residual is None:
             return pred
@@ -733,6 +763,8 @@ class Model(nn.Module):
                 use_bias=bool(recipe_cfg.get("role_output_calibrator_use_bias", True)),
                 bias_weight=float(recipe_cfg.get("role_output_calibrator_bias_weight", 1.0)),
                 scale_weight=float(recipe_cfg.get("role_output_calibrator_scale_weight", 1.0)),
+                learned_component_gate=bool(recipe_cfg.get("role_output_calibrator_learned_component_gate", False)),
+                component_gate_max=float(recipe_cfg.get("role_output_calibrator_component_gate_max", 2.0)),
                 out_seq_len=self.out_len,
                 horizon_conditioned=bool(recipe_cfg.get("role_output_calibrator_horizon_conditioned", False)),
                 state_aware=bool(recipe_cfg.get("role_output_calibrator_state_aware", False)),
