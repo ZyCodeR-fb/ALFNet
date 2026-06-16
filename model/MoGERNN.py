@@ -293,15 +293,33 @@ class LifecycleOutputAdapter(nn.Module):
 
 class RoleOutputCalibrator(nn.Module):
 
-    def __init__(self, raw_dim, output_dim, scale=0.05, use_multiplicative=True):
+    def __init__(
+        self,
+        raw_dim,
+        output_dim,
+        scale=0.05,
+        use_multiplicative=True,
+        out_seq_len=None,
+        horizon_conditioned=False,
+    ):
         super(RoleOutputCalibrator, self).__init__()
         self.raw_dim = int(raw_dim)
         self.output_dim = int(output_dim)
         self.scale = float(scale)
         self.use_multiplicative = bool(use_multiplicative)
-        self.role_bias = nn.Parameter(torch.zeros(4, self.output_dim))
+        self.horizon_conditioned = bool(horizon_conditioned)
+        self.out_seq_len = int(out_seq_len or 0)
+        if self.horizon_conditioned:
+            if self.out_seq_len <= 0:
+                raise ValueError("RoleOutputCalibrator needs out_seq_len when horizon_conditioned=True.")
+            self.role_bias = nn.Parameter(torch.zeros(self.out_seq_len, 4, self.output_dim))
+        else:
+            self.role_bias = nn.Parameter(torch.zeros(4, self.output_dim))
         if self.use_multiplicative:
-            self.role_scale = nn.Parameter(torch.zeros(4, self.output_dim))
+            if self.horizon_conditioned:
+                self.role_scale = nn.Parameter(torch.zeros(self.out_seq_len, 4, self.output_dim))
+            else:
+                self.role_scale = nn.Parameter(torch.zeros(4, self.output_dim))
         else:
             self.register_parameter("role_scale", None)
 
@@ -309,10 +327,16 @@ class RoleOutputCalibrator(nn.Module):
         if x_enc.size(-1) < self.raw_dim + 4:
             return pred
         role = x_enc[:, -1, :, self.raw_dim:self.raw_dim + 4]
-        bias = torch.matmul(role, self.role_bias).unsqueeze(1)
+        if self.horizon_conditioned:
+            bias = torch.einsum("bnr,hrc->bhnc", role, self.role_bias)
+        else:
+            bias = torch.matmul(role, self.role_bias).unsqueeze(1)
         residual = bias
         if self.role_scale is not None:
-            scale = torch.tanh(torch.matmul(role, self.role_scale)).unsqueeze(1)
+            if self.horizon_conditioned:
+                scale = torch.tanh(torch.einsum("bnr,hrc->bhnc", role, self.role_scale))
+            else:
+                scale = torch.tanh(torch.matmul(role, self.role_scale)).unsqueeze(1)
             residual = residual + pred * scale
         return pred + self.scale * residual
 
@@ -640,6 +664,8 @@ class Model(nn.Module):
                 self.output_dim,
                 float(recipe_cfg.get("role_output_calibrator_scale", 0.05)),
                 bool(recipe_cfg.get("role_output_calibrator_multiplicative", True)),
+                self.out_len,
+                bool(recipe_cfg.get("role_output_calibrator_horizon_conditioned", False)),
             )
         cell_type = recipe_cfg.get("cell_type", recipe_cfg.get("mogernn_cell_type", "dcrnn"))
         encoder_cell_type = recipe_cfg.get("encoder_cell_type", recipe_cfg.get("mogernn_encoder_cell_type", None))
