@@ -291,6 +291,32 @@ class LifecycleOutputAdapter(nn.Module):
         return pred + self.scale * residual
 
 
+class RoleOutputCalibrator(nn.Module):
+
+    def __init__(self, raw_dim, output_dim, scale=0.05, use_multiplicative=True):
+        super(RoleOutputCalibrator, self).__init__()
+        self.raw_dim = int(raw_dim)
+        self.output_dim = int(output_dim)
+        self.scale = float(scale)
+        self.use_multiplicative = bool(use_multiplicative)
+        self.role_bias = nn.Parameter(torch.zeros(4, self.output_dim))
+        if self.use_multiplicative:
+            self.role_scale = nn.Parameter(torch.zeros(4, self.output_dim))
+        else:
+            self.register_parameter("role_scale", None)
+
+    def forward(self, pred, x_enc):
+        if x_enc.size(-1) < self.raw_dim + 4:
+            return pred
+        role = x_enc[:, -1, :, self.raw_dim:self.raw_dim + 4]
+        bias = torch.matmul(role, self.role_bias).unsqueeze(1)
+        residual = bias
+        if self.role_scale is not None:
+            scale = torch.tanh(torch.matmul(role, self.role_scale)).unsqueeze(1)
+            residual = residual + pred * scale
+        return pred + self.scale * residual
+
+
 def _build_recurrent_cell(cell_type, input_size, hidden_size, k):
     cell_type = str(cell_type).lower()
     if cell_type in {"dcrnn", "dcgru", "graph_gru"}:
@@ -607,6 +633,14 @@ class Model(nn.Module):
                 int(recipe_cfg.get("lifecycle_output_adapter_hidden_dim", configs.d_model)),
                 float(recipe_cfg.get("lifecycle_output_adapter_scale", 0.05)),
             )
+        self.role_output_calibrator = None
+        if bool(recipe_cfg.get("use_role_output_calibrator", False)):
+            self.role_output_calibrator = RoleOutputCalibrator(
+                self.raw_enc_in,
+                self.output_dim,
+                float(recipe_cfg.get("role_output_calibrator_scale", 0.05)),
+                bool(recipe_cfg.get("role_output_calibrator_multiplicative", True)),
+            )
         cell_type = recipe_cfg.get("cell_type", recipe_cfg.get("mogernn_cell_type", "dcrnn"))
         encoder_cell_type = recipe_cfg.get("encoder_cell_type", recipe_cfg.get("mogernn_encoder_cell_type", None))
         decoder_cell_type = recipe_cfg.get("decoder_cell_type", recipe_cfg.get("mogernn_decoder_cell_type", None))
@@ -644,4 +678,6 @@ class Model(nn.Module):
         dec_out = self.seq2seq(x_enc, x_dec, A_q, A_h, initial_input, teacher_forcing_ratio)
         if self.lifecycle_output_adapter is not None:
             dec_out = self.lifecycle_output_adapter(dec_out, x_enc)
+        if self.role_output_calibrator is not None:
+            dec_out = self.role_output_calibrator(dec_out, x_enc)
         return dec_out
