@@ -394,3 +394,42 @@ def build_stbp_cfg(args):
     cfg["x_len"] = args.input_len
     cfg["year"] = 0
     return cfg
+
+
+def build_mcpst_fsl_cfg(args):
+    project_ctx = build_project_family_context(args)
+    cfg = _build_family_cfg(args)
+    family_cfg = getattr(args, "model_family_cfg", {}) or {}
+    cfg = deep_merge_dict(cfg, family_cfg.get("recipe", {}))
+
+    model_cfg = cfg.get("model", {})
+    model_cfg = deep_merge_dict(model_cfg, family_cfg.get("model", {}))
+    model_cfg.setdefault("input_dim", args.c_out)
+    model_cfg.setdefault("hidden_dim", args.d_model)
+    model_cfg.setdefault("pred_len", args.pred_len)
+    model_cfg.setdefault("spatial_dim", 4)
+    model_cfg.setdefault("num_diffusion_steps", 3)
+    model_cfg.setdefault("num_oscillator_steps", 4)
+    model_cfg.setdefault("num_eigen_vectors", 6)
+    model_cfg.setdefault("node_minibatch_cpu", 2048)
+    model_cfg.setdefault("node_minibatch_gpu", 1024)
+    cfg["model"] = model_cfg
+
+    dataset_key = str(cfg.get("training", {}).get("test_dataset", project_ctx["dataset_name"])).lower()
+    dataset_cfg = cfg.get("data", {})
+    dataset_cfg.setdefault(dataset_key, {})
+    dataset_cfg[dataset_key]["node_num"] = project_ctx["num_nodes"]
+    cfg["data"] = dataset_cfg
+
+    training_cfg = cfg.get("training", {})
+    training_cfg["test_dataset"] = dataset_key
+    cfg["training"] = training_cfg
+    cfg["dataset_name"] = project_ctx["dataset_name"]
+    cfg["known_nodes"] = project_ctx["known_nodes"]
+    cfg["unknown_nodes_list"] = project_ctx["unknown_nodes"]
+    cfg["num_nodes"] = project_ctx["num_nodes"]
+    cfg["input_dim"] = args.c_out
+    cfg["output_dim"] = args.c_out
+    cfg["seq_len"] = args.input_len
+    cfg["horizon"] = args.pred_len
+    return cfg

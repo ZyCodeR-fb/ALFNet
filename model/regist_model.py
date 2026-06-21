@@ -14,4 +14,6 @@ model_dict = {
     'LifecycleMoGERNN': LifecycleMoGERNN,
     'SLPF': SLPF,
     'STBP': STBP,
+    'MCPST_FSL': MCPST_FSL,
+    'MCPST-FSL': MCPST_FSL,
 }

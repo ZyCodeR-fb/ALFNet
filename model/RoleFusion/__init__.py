@@ -481,6 +481,126 @@ class TemporalConvOutputRefiner(nn.Module):
         return pred + self.scale * residual, residual
 
 
+class MP3PeriodMemoryOutputRefiner(nn.Module):
+    # Adapted from references/MP3/preprocess/model.py::PeriodInceptionEncoder
+    # and MemoryBank. The original MP3 block is a pre-training plugin; here it is
+    # kept as a small output-side residual plugin so it can be switched on/off
+    # without changing either expert backbone.
+    def __init__(
+        self,
+        output_dim,
+        hidden_dim,
+        full_num_nodes,
+        top_k,
+        scale,
+        role_scale,
+        memory_momentum=0.9,
+    ):
+        super().__init__()
+        self.hidden_dim = int(hidden_dim)
+        self.full_num_nodes = int(full_num_nodes)
+        self.top_k = max(1, int(top_k))
+        self.scale = float(scale)
+        self.memory_momentum = float(memory_momentum)
+        self.input_proj = nn.Linear(output_dim, self.hidden_dim)
+        self.period_kernels = nn.ModuleList(
+            [
+                nn.Conv2d(self.hidden_dim, self.hidden_dim, kernel_size=(1, 3), padding=(0, 1)),
+                nn.Conv2d(self.hidden_dim, self.hidden_dim, kernel_size=(3, 1), padding=(1, 0)),
+                nn.Conv2d(self.hidden_dim, self.hidden_dim, kernel_size=1),
+            ]
+        )
+        self.period_norm = nn.LayerNorm(self.hidden_dim)
+        self.memory_proj = nn.Linear(self.hidden_dim * 2, self.hidden_dim)
+        self.output_proj = nn.Linear(self.hidden_dim, output_dim)
+        self.register_buffer("memory", torch.zeros(self.full_num_nodes, self.hidden_dim), persistent=True)
+        self.register_buffer(
+            "role_output_scale",
+            _build_role_scale(role_scale, {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0}),
+            persistent=False,
+        )
+        nn.init.zeros_(self.output_proj.weight)
+        nn.init.zeros_(self.output_proj.bias)
+
+    def _resolve_node_ids(self, num_nodes, current_node_ids, device):
+        if current_node_ids is not None and len(current_node_ids) == num_nodes:
+            node_ids = torch.as_tensor(current_node_ids, device=device, dtype=torch.long)
+        else:
+            node_ids = torch.arange(num_nodes, device=device, dtype=torch.long)
+        return node_ids.clamp_max(self.full_num_nodes - 1)
+
+    def _top_periods(self, x):
+        # x: [B,T,N,D]
+        T = x.size(1)
+        spectrum = torch.fft.rfft(x, dim=1)
+        amplitude = torch.abs(spectrum)
+        energy = amplitude.mean(dim=(0, 2, 3))
+        if energy.numel() <= 1:
+            return [T], x.new_ones(x.size(0), 1, x.size(2), 1)
+        candidate_count = min(self.top_k, energy.numel() - 1)
+        top_freq = torch.topk(energy[1:], k=candidate_count, dim=0).indices + 1
+        periods = []
+        freq_indices = []
+        for idx in top_freq:
+            period = max(1, int(T // int(idx.item())))
+            if period not in periods:
+                periods.append(period)
+                freq_indices.append(int(idx.item()))
+        if not periods:
+            return [T], x.new_ones(x.size(0), 1, x.size(2), 1)
+        freq_tensor = torch.as_tensor(freq_indices, device=x.device, dtype=torch.long)
+        weights = amplitude.index_select(1, freq_tensor).mean(dim=-1).unsqueeze(-1)
+        weights = torch.softmax(weights, dim=1)
+        return periods, weights
+
+    def _period_encode(self, x, period):
+        B, T, N, D = x.shape
+        if T % period != 0:
+            length = ((T // period) + 1) * period
+            pad = x.new_zeros(B, length - T, N, D)
+            x = torch.cat([x, pad], dim=1)
+        else:
+            length = T
+        x = x.reshape(B, length // period, period, N, D).permute(0, 3, 4, 1, 2).contiguous()
+        x = x.reshape(B * N, D, length // period, period)
+        encoded = torch.stack([kernel(x) for kernel in self.period_kernels], dim=0).mean(dim=0)
+        encoded = encoded.reshape(B, N, D, length // period, period).permute(0, 3, 4, 1, 2)
+        encoded = encoded.reshape(B, length, N, D)[:, :T]
+        return encoded
+
+    def forward(self, pred, last_role, current_node_ids=None):
+        B, T, N, _ = pred.shape
+        x = self.input_proj(pred)
+        periods, weights = self._top_periods(x)
+        period_outputs = []
+        for period in periods:
+            period_outputs.append(self._period_encode(x, period))
+        period_stack = torch.stack(period_outputs, dim=1)
+        if weights.size(1) != period_stack.size(1):
+            weights = x.new_full((B, period_stack.size(1), N, 1), 1.0 / period_stack.size(1))
+        period_context = (period_stack * weights.unsqueeze(2)).sum(dim=1)
+        period_context = self.period_norm(period_context)
+
+        node_ids = self._resolve_node_ids(N, current_node_ids, pred.device)
+        if self.training:
+            current_global = period_context.mean(dim=(0, 1)).detach().to(dtype=self.memory.dtype)
+            old_memory = self.memory.index_select(0, node_ids)
+            updated_memory = old_memory * self.memory_momentum + current_global * (1.0 - self.memory_momentum)
+            self.memory.index_copy_(0, node_ids, updated_memory)
+        memory_context = self.memory.index_select(0, node_ids).to(device=pred.device, dtype=period_context.dtype)
+        memory_context = memory_context.view(1, 1, N, self.hidden_dim).expand(B, T, N, self.hidden_dim)
+
+        enriched = self.memory_proj(torch.cat([period_context, memory_context], dim=-1))
+        residual = self.output_proj(F.gelu(enriched))
+        role_scale = torch.sum(
+            last_role * self.role_output_scale.to(last_role.device).view(1, 1, ROLE_COUNT),
+            dim=-1,
+            keepdim=True,
+        )
+        residual = role_scale.unsqueeze(1).to(dtype=residual.dtype) * torch.tanh(residual)
+        return pred + self.scale * residual, residual
+
+
 class GraphDiffusionOutputRefiner(nn.Module):
     def __init__(self, output_dim, hidden_dim, diffusion_steps, scale, role_scale, use_backward=True, add_self_loop=True):
         super().__init__()
@@ -981,6 +1101,9 @@ class Model(nn.Module):
             )
         temporal_hidden_dim = int(model_cfg.get("temporal_refiner_hidden_dim", gate_hidden_dim))
         graph_refiner_hidden_dim = int(model_cfg.get("graph_refiner_hidden_dim", gate_hidden_dim))
+        mp3_hidden_dim = int(model_cfg.get("mp3_hidden_dim", temporal_hidden_dim))
+        mp3_top_k = int(recipe_cfg.get("mp3_period_top_k", 3))
+        mp3_memory_momentum = float(recipe_cfg.get("mp3_memory_momentum", 0.9))
         self.graph_expert_diffusion_refiner = None
         if bool(recipe_cfg.get("use_graph_expert_diffusion_refiner", False)):
             self.graph_expert_diffusion_refiner = GraphDiffusionOutputRefiner(
@@ -1003,6 +1126,17 @@ class Model(nn.Module):
                 use_backward=bool(recipe_cfg.get("graph_spectral_use_backward", True)),
                 add_self_loop=bool(recipe_cfg.get("graph_spectral_add_self_loop", True)),
             )
+        self.graph_expert_mp3_refiner = None
+        if bool(recipe_cfg.get("use_graph_expert_mp3_refiner", False)):
+            self.graph_expert_mp3_refiner = MP3PeriodMemoryOutputRefiner(
+                output_dim=self.output_dim,
+                hidden_dim=mp3_hidden_dim,
+                full_num_nodes=self.full_num_nodes,
+                top_k=int(recipe_cfg.get("graph_mp3_period_top_k", mp3_top_k)),
+                scale=float(recipe_cfg.get("graph_mp3_scale", recipe_cfg.get("mp3_scale", 0.05))),
+                role_scale=recipe_cfg.get("graph_mp3_role_scale", recipe_cfg.get("mp3_role_scale", {})),
+                memory_momentum=float(recipe_cfg.get("graph_mp3_memory_momentum", mp3_memory_momentum)),
+            )
         self.patch_expert_temporal_refiner = None
         if bool(recipe_cfg.get("use_patch_expert_temporal_refiner", False)):
             self.patch_expert_temporal_refiner = TemporalConvOutputRefiner(
@@ -1012,6 +1146,17 @@ class Model(nn.Module):
                 dilation=int(recipe_cfg.get("temporal_refiner_dilation", 1)),
                 scale=float(recipe_cfg.get("temporal_refiner_scale", 0.05)),
                 role_scale=recipe_cfg.get("temporal_refiner_role_scale", {}),
+            )
+        self.patch_expert_mp3_refiner = None
+        if bool(recipe_cfg.get("use_patch_expert_mp3_refiner", False)):
+            self.patch_expert_mp3_refiner = MP3PeriodMemoryOutputRefiner(
+                output_dim=self.output_dim,
+                hidden_dim=mp3_hidden_dim,
+                full_num_nodes=self.full_num_nodes,
+                top_k=int(recipe_cfg.get("patch_mp3_period_top_k", mp3_top_k)),
+                scale=float(recipe_cfg.get("patch_mp3_scale", recipe_cfg.get("mp3_scale", 0.05))),
+                role_scale=recipe_cfg.get("patch_mp3_role_scale", recipe_cfg.get("mp3_role_scale", {})),
+                memory_momentum=float(recipe_cfg.get("patch_mp3_memory_momentum", mp3_memory_momentum)),
             )
         self.fused_graph_diffusion_refiner = None
         if bool(recipe_cfg.get("use_fused_graph_diffusion_refiner", False)):
@@ -1033,6 +1178,17 @@ class Model(nn.Module):
                 dilation=int(recipe_cfg.get("fused_temporal_refiner_dilation", recipe_cfg.get("temporal_refiner_dilation", 1))),
                 scale=float(recipe_cfg.get("fused_temporal_refiner_scale", recipe_cfg.get("temporal_refiner_scale", 0.05))),
                 role_scale=recipe_cfg.get("fused_temporal_refiner_role_scale", recipe_cfg.get("temporal_refiner_role_scale", {})),
+            )
+        self.fused_mp3_refiner = None
+        if bool(recipe_cfg.get("use_fused_mp3_refiner", False)):
+            self.fused_mp3_refiner = MP3PeriodMemoryOutputRefiner(
+                output_dim=self.output_dim,
+                hidden_dim=mp3_hidden_dim,
+                full_num_nodes=self.full_num_nodes,
+                top_k=int(recipe_cfg.get("fused_mp3_period_top_k", mp3_top_k)),
+                scale=float(recipe_cfg.get("fused_mp3_scale", recipe_cfg.get("mp3_scale", 0.05))),
+                role_scale=recipe_cfg.get("fused_mp3_role_scale", recipe_cfg.get("mp3_role_scale", {})),
+                memory_momentum=float(recipe_cfg.get("fused_mp3_memory_momentum", mp3_memory_momentum)),
             )
 
         self._configure_expert_trainability()
@@ -1275,12 +1431,17 @@ class Model(nn.Module):
         _, last_role, last_age, visibility_ratio = self._extract_role_and_age(x_enc)
         state_input = torch.cat([last_role, last_age, visibility_ratio], dim=-1)
         node_state = self.state_encoder(state_input)
+        current_node_ids = self._resolve_current_node_ids(y_graph.size(2))
         if self.graph_expert_diffusion_refiner is not None:
             y_graph, _ = self.graph_expert_diffusion_refiner(y_graph, adj, last_role)
         if self.graph_expert_spectral_refiner is not None:
             y_graph, _ = self.graph_expert_spectral_refiner(y_graph, adj, last_role)
+        if self.graph_expert_mp3_refiner is not None:
+            y_graph, _ = self.graph_expert_mp3_refiner(y_graph, last_role, current_node_ids=current_node_ids)
         if self.patch_expert_temporal_refiner is not None:
             y_patch, _ = self.patch_expert_temporal_refiner(y_patch, last_role)
+        if self.patch_expert_mp3_refiner is not None:
+            y_patch, _ = self.patch_expert_mp3_refiner(y_patch, last_role, current_node_ids=current_node_ids)
         state_t = node_state.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
         gate_input = torch.cat([state_t, y_graph, y_patch, torch.abs(y_graph - y_patch)], dim=-1)
         role_logits = torch.cat([gate(gate_input) for gate in self.role_fusion_gates], dim=-1)
@@ -1322,6 +1483,8 @@ class Model(nn.Module):
             fused, _ = self.fused_graph_diffusion_refiner(fused, adj, last_role)
         if self.fused_temporal_refiner is not None:
             fused, _ = self.fused_temporal_refiner(fused, last_role)
+        if self.fused_mp3_refiner is not None:
+            fused, _ = self.fused_mp3_refiner(fused, last_role, current_node_ids=current_node_ids)
         fused = self._apply_role_heads(adj, x_enc, fused, last_role, aux_losses)
         routing_meta = {
             "alpha": alpha,
@@ -1357,10 +1520,17 @@ class Model(nn.Module):
         _, last_role, last_age, visibility_ratio = self._extract_role_and_age(x_enc)
         state_input = torch.cat([last_role, last_age, visibility_ratio], dim=-1)
         node_state = self.state_encoder(state_input)
+        current_node_ids = self._resolve_current_node_ids(y_graph.size(2))
         if self.graph_expert_diffusion_refiner is not None:
             y_graph, _ = self.graph_expert_diffusion_refiner(y_graph, adj, last_role)
+        if self.graph_expert_spectral_refiner is not None:
+            y_graph, _ = self.graph_expert_spectral_refiner(y_graph, adj, last_role)
+        if self.graph_expert_mp3_refiner is not None:
+            y_graph, _ = self.graph_expert_mp3_refiner(y_graph, last_role, current_node_ids=current_node_ids)
         if self.patch_expert_temporal_refiner is not None:
             y_patch, _ = self.patch_expert_temporal_refiner(y_patch, last_role)
+        if self.patch_expert_mp3_refiner is not None:
+            y_patch, _ = self.patch_expert_mp3_refiner(y_patch, last_role, current_node_ids=current_node_ids)
 
         state_t = node_state.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
         disagreement = torch.abs(y_graph - y_patch)
@@ -1399,6 +1569,8 @@ class Model(nn.Module):
             fused, _ = self.fused_graph_diffusion_refiner(fused, adj, last_role)
         if self.fused_temporal_refiner is not None:
             fused, _ = self.fused_temporal_refiner(fused, last_role)
+        if self.fused_mp3_refiner is not None:
+            fused, _ = self.fused_mp3_refiner(fused, last_role, current_node_ids=current_node_ids)
         fused = self._apply_role_heads(adj, x_enc, fused, last_role, aux_losses)
 
         alpha = 1.0 - beta
