@@ -4,7 +4,8 @@ from layers.gnn import nn, torch, calculate_random_walk_matrix
 import torch.nn.functional as F
 from einops import rearrange
 from layers.agg import MeanAggregator, WMeanAggregator, MaxPoolingAggregator, MinPoolingAggregator, DiffusionAggregator
-from layers.DCRNNCell import AdaptiveGatedFFNDCRNNCell, DCRNNCell, DiffConv, GatedFFNDCRNNCell, HighwayDCRNNCell, LayerNormDCRNNCell, LocalGateDCRNNCell, MGDCRNNCell, MixHopDCRNNCell, ResidualDCRNNCell
+from layers.DCRNNCell import AdaptiveGatedFFNDCRNNCell, DCRNNCell, DiffConv, GatedFFNDCRNNCell, HighwayDCRNNCell, LayerNormDCRNNCell, LocalGateDCRNNCell, MGDCRNNCell, MixHopDCRNNCell, ResidualDCRNNCell, SourceMixHopDCRNNCell
+from layers.source_kan import KANLayer
 from lib.utils import infer_project_num_nodes
 
 
@@ -62,6 +63,41 @@ class SparseGatingNetwork(nn.Module):
         return weights
 
 
+class SparseKANGatingNetwork(nn.Module):
+
+    def __init__(self, configs, input_dim=None, recipe_cfg=None):
+        super(SparseKANGatingNetwork, self).__init__()
+        recipe_cfg = recipe_cfg or {}
+        raw_enc_in = getattr(configs, "raw_enc_in", configs.enc_in)
+        gate_input_dim = configs.input_len * (raw_enc_in if input_dim is None else input_dim)
+        hidden_dim = int(recipe_cfg.get("kan_router_hidden_dim", configs.d_model))
+        self.norm = nn.LayerNorm(gate_input_dim)
+        self.kan = KANLayer(
+            in_dim=gate_input_dim,
+            out_dim=hidden_dim,
+            num=int(recipe_cfg.get("kan_router_grid_size", 8)),
+            k=int(recipe_cfg.get("kan_router_spline_order", 3)),
+            noise_scale=float(recipe_cfg.get("kan_router_noise_scale", 0.5)),
+            scale_sp=float(recipe_cfg.get("kan_router_spline_scale", 0.10)),
+            grid_range=[
+                float(recipe_cfg.get("kan_router_grid_min", -2.0)),
+                float(recipe_cfg.get("kan_router_grid_max", 2.0)),
+            ],
+            sparse_init=bool(recipe_cfg.get("kan_router_sparse_init", False)),
+        )
+        self.fc = nn.Linear(hidden_dim, configs.num_experts)
+        self.k = configs.num_used_experts
+
+    def forward(self, x):
+        hidden, _, _, _ = self.kan(self.norm(x).reshape(-1, x.size(-1)))
+        hidden = F.gelu(hidden.reshape(*x.shape[:-1], -1))
+        logits = self.fc(hidden)
+        top_logits, topk_indices = torch.topk(logits, self.k, dim=-1)
+        zeros = torch.zeros_like(logits)
+        weights = zeros.scatter(2, topk_indices, F.softmax(top_logits, dim=-1))
+        return weights
+
+
 class DataPreparation(nn.Module):
 
     def __init__(self, configs):
@@ -106,7 +142,11 @@ class DataPreparation(nn.Module):
             experts.append(
                 DiffusionAggregator(flattened_input_dim, flattened_input_dim))
         self.experts = nn.ModuleList([Expert(expert) for expert in experts])
-        self.gating = SparseGatingNetwork(configs, input_dim=gate_feature_dim)
+        router_type = str(recipe_cfg.get("mogernn_router_type", recipe_cfg.get("router_type", "sparse_mlp"))).lower()
+        if router_type in {"kan", "source_kan", "rbf_kan", "sparse_kan"}:
+            self.gating = SparseKANGatingNetwork(configs, input_dim=gate_feature_dim, recipe_cfg=recipe_cfg)
+        else:
+            self.gating = SparseGatingNetwork(configs, input_dim=gate_feature_dim)
         if self.use_temporal_carry_gate:
             self.temporal_carry_gate = nn.Linear(self.raw_enc_in * 4, self.raw_enc_in)
             nn.init.zeros_(self.temporal_carry_gate.weight)
@@ -481,6 +521,8 @@ def _build_recurrent_cell(cell_type, input_size, hidden_size, k):
         return AdaptiveGatedFFNDCRNNCell(input_size, hidden_size, k, max_scale=max_scale, init_gate=init_gate)
     if cell_type in {"mixhop_dcrnn", "mh_dcrnn", "multiorder_dcrnn"}:
         return MixHopDCRNNCell(input_size, hidden_size, k)
+    if cell_type in {"source_mixhop_dcrnn", "src_mixhop_dcrnn", "mixhop_source_dcrnn"}:
+        return SourceMixHopDCRNNCell(input_size, hidden_size, k)
     raise ValueError(f"Unsupported MoGERNN recurrent cell_type: {cell_type}")
 
 

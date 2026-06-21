@@ -4,6 +4,7 @@ from torch import nn
 import torch.nn.functional as F
 from .GRUCell import MoGEGRUCellBase, GraphGRUCellBase
 from layers.agg import MeanAggregator, WMeanAggregator, MaxPoolingAggregator, MinPoolingAggregator, DiffusionAggregator
+from layers.source_mixhop import SourceMixHopDiffConv
 
 
 class DiffConv(nn.Module):
@@ -282,6 +283,22 @@ class MixHopDCRNNCell(GraphGRUCellBase):
                                               forget_gate=forget_gate,
                                               update_gate=update_gate,
                                               candidate_gate=candidate_gate)
+        self.norm = nn.LayerNorm(hidden_size)
+
+    def forward(self, x, h, A_q, A_h):
+        return self.norm(super().forward(x, h, A_q, A_h))
+
+
+class SourceMixHopDCRNNCell(GraphGRUCellBase):
+
+    def __init__(self, input_size: int, hidden_size: int, k: int = 2):
+        forget_gate = SourceMixHopDiffConv(input_size + hidden_size, hidden_size, k)
+        update_gate = SourceMixHopDiffConv(input_size + hidden_size, hidden_size, k)
+        candidate_gate = SourceMixHopDiffConv(input_size + hidden_size, hidden_size, k)
+        super(SourceMixHopDCRNNCell, self).__init__(hidden_size=hidden_size,
+                                                    forget_gate=forget_gate,
+                                                    update_gate=update_gate,
+                                                    candidate_gate=candidate_gate)
         self.norm = nn.LayerNorm(hidden_size)
 
     def forward(self, x, h, A_q, A_h):
