@@ -197,21 +197,134 @@ def _patch_compatible_state_dict(model, state_dict):
     return compatible_state
 
 
+_CHECKPOINT_VARIANT_ALIASES = {
+    "rf_s_skan": ["rf_s_p2groc05sourcekan"],
+    "rf_s_smh": ["rf_s_p2groc05sourcemixhop"],
+    "rf_s_skan_smh": ["rf_s_p2groc05sourcekansourcemixhop"],
+    "rf_s_smh_bf": ["rf_s_p2groc05sourcemixhopspecbf"],
+    "rf_s_skan_smh_bf": ["rf_s_p2groc05sourcekansourcemixhopspecbf"],
+}
+
+
+def _variant_aliases(model_variant):
+    aliases = [model_variant]
+    aliases.extend(_CHECKPOINT_VARIANT_ALIASES.get(model_variant, []))
+    for short_name, long_names in _CHECKPOINT_VARIANT_ALIASES.items():
+        if model_variant in long_names:
+            aliases.append(short_name)
+    return list(dict.fromkeys(aliases))
+
+
+def _checkpoint_files(checkpoint_dir):
+    return [
+        os.path.join(checkpoint_dir, "best_val_checkpoint.pth"),
+        os.path.join(checkpoint_dir, "best_train_checkpoint.pth"),
+        os.path.join(checkpoint_dir, "best_test_checkpoint.pth"),
+    ]
+
+
+def _select_checkpoint_file(checkpoint_dir):
+    for checkpoint_file in _checkpoint_files(checkpoint_dir):
+        if os.path.exists(checkpoint_file):
+            return checkpoint_file
+    return None
+
+
+def _exp_id_without_cfg_hash(exp_id):
+    marker_index = exp_id.rfind("-cfg")
+    if marker_index == -1:
+        return exp_id
+    return exp_id[:marker_index]
+
+
+def _compatible_checkpoint_prefixes(args):
+    base_prefix = _exp_id_without_cfg_hash(args.exp_id)
+    variant_marker = f"var-{args.model_variant}"
+    prefixes = [base_prefix]
+    if variant_marker in base_prefix:
+        for variant_alias in _variant_aliases(args.model_variant):
+            prefixes.append(base_prefix.replace(variant_marker, f"var-{variant_alias}", 1))
+    return list(dict.fromkeys(prefixes))
+
+
+def _find_compatible_checkpoint_dir(args, requested_checkpoint_dir):
+    root_dir = args.best_checkpoint_path
+    if not os.path.isdir(root_dir):
+        return None
+
+    requested_checkpoint_dir = os.path.normpath(requested_checkpoint_dir)
+    prefixes = _compatible_checkpoint_prefixes(args)
+    candidates = []
+    for dirname in os.listdir(root_dir):
+        checkpoint_dir = os.path.join(root_dir, dirname)
+        if not os.path.isdir(checkpoint_dir):
+            continue
+        if os.path.normpath(checkpoint_dir) == requested_checkpoint_dir:
+            continue
+        checkpoint_file = _select_checkpoint_file(checkpoint_dir)
+        if checkpoint_file is None:
+            continue
+        if not any(dirname.startswith(prefix) for prefix in prefixes):
+            continue
+        candidates.append((os.path.getmtime(checkpoint_file), checkpoint_dir, checkpoint_file))
+
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+def _load_checkpoint_from_dir(args, checkpoint_dir):
+    checkpoint_file = _select_checkpoint_file(checkpoint_dir)
+    if checkpoint_file is None:
+        fallback_dir = _find_compatible_checkpoint_dir(args, checkpoint_dir)
+        if fallback_dir is not None:
+            print(f"-> Current exp_id checkpoint not found: {checkpoint_dir}")
+            print(f"-> Use compatible checkpoint directory: {fallback_dir}")
+            checkpoint_dir = fallback_dir
+            checkpoint_file = _select_checkpoint_file(checkpoint_dir)
+
+    if checkpoint_file is None:
+        expected_files = ", ".join(_checkpoint_files(checkpoint_dir))
+        raise FileNotFoundError(f"No checkpoint file found. Expected one of: {expected_files}")
+
+    checkpoint = torch.load(checkpoint_file, weights_only=False)
+    print(f"├── load pretrained from {checkpoint_dir}/")
+    return checkpoint, checkpoint_dir
+
+
 def load_pretrained_model(model, args):
-    checkpoint_dir = args.best_checkpoint_path + args.exp_id + "/"
+    checkpoint_dir = os.path.join(args.best_checkpoint_path, args.exp_id)
     if args.pretrained_model_path is None:
-        try:
-            checkpoint = torch.load(checkpoint_dir + "best_val_checkpoint.pth", weights_only=False)
-            print(f"├── load pretrained from {checkpoint_dir}")
-        except FileNotFoundError:
-            checkpoint = torch.load(checkpoint_dir + "best_train_checkpoint.pth", weights_only=False)
-            print(f"├── load pretrained from {checkpoint_dir}")
+        checkpoint, checkpoint_dir = _load_checkpoint_from_dir(args, checkpoint_dir)
         model = _load_model_state(model, checkpoint, args, _validate_checkpoint_compatibility)
-        return model, checkpoint_dir
+        return model, checkpoint_dir + os.sep
 
     loaded = torch.load(args.pretrained_model_path, weights_only=False)
     model = _load_model_state(model, loaded, args, _validate_checkpoint_compatibility)
-    return model, checkpoint_dir
+    return model, checkpoint_dir + os.sep
+
+
+def _safe_pretrained_snapshot_path(args):
+    os.makedirs("./pretrained", exist_ok=True)
+    exp_hash = hashlib.md5(args.exp_id.encode("utf-8")).hexdigest()[:12]
+    variant = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in args.model_variant)
+    filename = f"{args.model}-{variant}-cfg{exp_hash}.pth"
+    if len(filename) > 160:
+        filename = f"{args.model}-cfg{exp_hash}.pth"
+    return os.path.join("./pretrained", filename)
+
+
+def save_pretrained_snapshot(pretrained, args):
+    snapshot_path = _safe_pretrained_snapshot_path(args)
+    try:
+        torch.save(pretrained, snapshot_path)
+        with open(snapshot_path + ".exp_id.txt", "w", encoding="utf-8") as fp:
+            fp.write(args.exp_id + "\n")
+        print(f"-> Saved full model snapshot to {snapshot_path}")
+    except Exception as exc:
+        print(f"-> Skip full-model snapshot save to {snapshot_path}: {exc}")
+        print(f"   Best checkpoints remain available under {args.best_checkpoint_path}")
 
 
 def initialize_training_from_checkpoint(model, args):
@@ -326,11 +439,7 @@ if __name__ == "__main__":
         wandb=wandb,
     )
     if args.save_model:
-        import os
-
-        if not os.path.exists("./pretrained"):
-            os.makedirs("./pretrained")
-        torch.save(pretrained, f"./pretrained/{args.exp_id}.pth")
+        save_pretrained_snapshot(pretrained, args)
 
     path = f"{args.best_prediction_path}best_total_y.pkl"
     y_pred, y, AAS, VS, FS, NAS = load_prediction(path, "val")
