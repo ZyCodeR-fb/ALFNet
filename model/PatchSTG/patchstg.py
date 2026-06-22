@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from einops import rearrange
+from einops import rearrange, repeat
 from timm.models.vision_transformer import Attention, Mlp
 
 
@@ -128,16 +128,108 @@ class BiFormerAttentionLePE(nn.Module):
         return x
 
 
+class CrossformerFullAttention(nn.Module):
+    # Copied from references/Crossformer/cross_models/attn.py::FullAttention,
+    # with only the class name changed for local PatchSTG use.
+    def __init__(self, scale=None, attention_dropout=0.1):
+        super(CrossformerFullAttention, self).__init__()
+        self.scale = scale
+        self.dropout = nn.Dropout(attention_dropout)
+
+    def forward(self, queries, keys, values):
+        _, _, _, E = queries.shape
+        scale = self.scale or E ** -0.5
+        scores = torch.einsum("blhe,bshe->bhls", queries, keys)
+        attn = self.dropout(torch.softmax(scale * scores, dim=-1))
+        out = torch.einsum("bhls,bshd->blhd", attn, values)
+        return out.contiguous()
+
+
+class CrossformerAttentionLayer(nn.Module):
+    # Copied from references/Crossformer/cross_models/attn.py::AttentionLayer,
+    # with only the class name changed for local PatchSTG use.
+    def __init__(self, d_model, n_heads, d_keys=None, d_values=None, dropout=0.1):
+        super(CrossformerAttentionLayer, self).__init__()
+        d_keys = d_keys or (d_model // n_heads)
+        d_values = d_values or (d_model // n_heads)
+        self.inner_attention = CrossformerFullAttention(scale=None, attention_dropout=dropout)
+        self.query_projection = nn.Linear(d_model, d_keys * n_heads)
+        self.key_projection = nn.Linear(d_model, d_keys * n_heads)
+        self.value_projection = nn.Linear(d_model, d_values * n_heads)
+        self.out_projection = nn.Linear(d_values * n_heads, d_model)
+        self.n_heads = n_heads
+
+    def forward(self, queries, keys, values):
+        B, L, _ = queries.shape
+        _, S, _ = keys.shape
+        H = self.n_heads
+        queries = self.query_projection(queries).view(B, L, H, -1)
+        keys = self.key_projection(keys).view(B, S, H, -1)
+        values = self.value_projection(values).view(B, S, H, -1)
+        out = self.inner_attention(queries, keys, values)
+        out = out.view(B, L, -1)
+        return self.out_projection(out)
+
+
+class CrossformerTwoStageAttentionLayer(nn.Module):
+    # Copied from references/Crossformer/cross_models/attn.py::TwoStageAttentionLayer,
+    # with the class name changed; PatchSTG wraps input as [batch*time, nodes, patches, dim].
+    def __init__(self, seg_num, factor, d_model, n_heads, d_ff=None, dropout=0.1):
+        super(CrossformerTwoStageAttentionLayer, self).__init__()
+        d_ff = d_ff or 4 * d_model
+        self.time_attention = CrossformerAttentionLayer(d_model, n_heads, dropout=dropout)
+        self.dim_sender = CrossformerAttentionLayer(d_model, n_heads, dropout=dropout)
+        self.dim_receiver = CrossformerAttentionLayer(d_model, n_heads, dropout=dropout)
+        self.router = nn.Parameter(torch.randn(seg_num, factor, d_model))
+
+        self.dropout = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.norm4 = nn.LayerNorm(d_model)
+        self.MLP1 = nn.Sequential(nn.Linear(d_model, d_ff), nn.GELU(), nn.Linear(d_ff, d_model))
+        self.MLP2 = nn.Sequential(nn.Linear(d_model, d_ff), nn.GELU(), nn.Linear(d_ff, d_model))
+
+    def forward(self, x):
+        batch = x.shape[0]
+        time_in = rearrange(x, "b ts_d seg_num d_model -> (b ts_d) seg_num d_model")
+        time_enc = self.time_attention(time_in, time_in, time_in)
+        dim_in = time_in + self.dropout(time_enc)
+        dim_in = self.norm1(dim_in)
+        dim_in = dim_in + self.dropout(self.MLP1(dim_in))
+        dim_in = self.norm2(dim_in)
+
+        dim_send = rearrange(dim_in, "(b ts_d) seg_num d_model -> (b seg_num) ts_d d_model", b=batch)
+        batch_router = repeat(self.router, "seg_num factor d_model -> (repeat seg_num) factor d_model", repeat=batch)
+        dim_buffer = self.dim_sender(batch_router, dim_send, dim_send)
+        dim_receive = self.dim_receiver(dim_send, dim_buffer, dim_buffer)
+        dim_enc = dim_send + self.dropout(dim_receive)
+        dim_enc = self.norm3(dim_enc)
+        dim_enc = dim_enc + self.dropout(self.MLP2(dim_enc))
+        dim_enc = self.norm4(dim_enc)
+        return rearrange(dim_enc, "(b seg_num) ts_d d_model -> b ts_d seg_num d_model", b=batch)
+
+
 class WindowAttBlock(nn.Module):
-    def __init__(self, hidden_size, num_heads, num, size, mlp_ratio=4.0, attention_order="depth_breadth", shift_size=0, attention_type="timm", lepe_kernel_size=5):
+    def __init__(self, hidden_size, num_heads, num, size, mlp_ratio=4.0, attention_order="depth_breadth", shift_size=0, attention_type="timm", lepe_kernel_size=5, crossformer_router_factor=4, crossformer_dropout=0.1):
         super().__init__()
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.num, self.size = num, size
         self.attention_order = str(attention_order).lower()
         self.shift_size = int(shift_size)
         self.attention_type = str(attention_type).lower()
+        self.use_crossformer_tsa = self.attention_type in {"crossformer_tsa", "crossformer", "tsa"}
         self.use_depth_lepe = self.attention_type in {"biformer_lepe", "biformer_lepe_depth", "lepe_depth"}
         self.use_breadth_lepe = self.attention_type in {"biformer_lepe", "biformer_lepe_breadth", "lepe_breadth"}
+        if self.use_crossformer_tsa:
+            self.tsa = CrossformerTwoStageAttentionLayer(
+                seg_num=num,
+                factor=int(crossformer_router_factor),
+                d_model=hidden_size,
+                n_heads=num_heads,
+                d_ff=mlp_hidden_dim,
+                dropout=float(crossformer_dropout),
+            )
 
         self.nnorm1 = nn.LayerNorm(hidden_size)
         if self.use_breadth_lepe:
@@ -175,6 +267,11 @@ class WindowAttBlock(nn.Module):
         x = x + self.nmlp(self.nnorm2(x))
         return x
 
+    def _crossformer_tsa_attention(self, x, B, T, P, N, D):
+        tsa_in = x.permute(0, 1, 3, 2, 4).reshape(B * T, N, P, D)
+        tsa_out = self.tsa(tsa_in)
+        return tsa_out.reshape(B, T, N, P, D).permute(0, 1, 3, 2, 4).contiguous()
+
     def forward(self, x):
         B,T,_,D = x.shape
         # P: ptach num and N: patch size
@@ -185,7 +282,9 @@ class WindowAttBlock(nn.Module):
             x = torch.roll(x, shifts=-shift_size, dims=2)
         x = x.reshape(B, T, P, N, D)
 
-        if self.attention_order in {"depth_breadth", "spatial_patch", "default"}:
+        if self.use_crossformer_tsa:
+            x = self._crossformer_tsa_attention(x, B, T, P, N, D)
+        elif self.attention_order in {"depth_breadth", "spatial_patch", "default"}:
             x = self._depth_attention(x, B, T, P, N, D)
             x = self._breadth_attention(x, B, T, P, N, D)
         elif self.attention_order in {"breadth_depth", "cross_local"}:
@@ -210,6 +309,8 @@ class PatchSTG(nn.Module):
                         shift_size=0,
                         attention_type="timm",
                         lepe_kernel_size=5,
+                        crossformer_router_factor=4,
+                        crossformer_dropout=0.1,
                         use_staeformer_adapter=False,
                         staeformer_adapter_mode="temporal",
                         staeformer_adapter_layers=1,
@@ -255,6 +356,8 @@ class PatchSTG(nn.Module):
                 shift_size=(int(shift_size) if i % 2 == 1 else 0),
                 attention_type=attention_type,
                 lepe_kernel_size=lepe_kernel_size,
+                crossformer_router_factor=crossformer_router_factor,
+                crossformer_dropout=crossformer_dropout,
             )
             for i in range(layers)
         ])

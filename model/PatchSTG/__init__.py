@@ -164,6 +164,8 @@ class Model(nn.Module):
             shift_size=int(model_cfg.get("attention_shift_size", 0)),
             attention_type=model_cfg.get("attention_type", "timm"),
             lepe_kernel_size=int(model_cfg.get("lepe_kernel_size", 5)),
+            crossformer_router_factor=int(model_cfg.get("crossformer_router_factor", 4)),
+            crossformer_dropout=float(model_cfg.get("crossformer_dropout", 0.1)),
             use_staeformer_adapter=bool(model_cfg.get("use_staeformer_adapter", False)),
             staeformer_adapter_mode=model_cfg.get("staeformer_adapter_mode", "temporal"),
             staeformer_adapter_layers=int(model_cfg.get("staeformer_adapter_layers", 1)),

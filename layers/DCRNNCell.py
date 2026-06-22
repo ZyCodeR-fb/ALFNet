@@ -226,6 +226,25 @@ class HighwayDCRNNCell(DCRNNCell):
         return (1.0 - carry) * h_new + carry * h
 
 
+class StateDecayDCRNNCell(DCRNNCell):
+    # GRU-D-inspired state retention gate for lifecycle inputs with missingness/age
+    # features. The base diffusion GRU update is unchanged; this gate only controls
+    # how much previous hidden state is carried forward.
+    def __init__(self, input_size: int, hidden_size: int, k: int = 2, max_decay_scale: float = 0.10, init_decay: float = 0.30):
+        super(StateDecayDCRNNCell, self).__init__(input_size, hidden_size, k)
+        self.max_decay_scale = float(max_decay_scale)
+        self.decay_norm = nn.LayerNorm(input_size + hidden_size)
+        self.decay_gate = nn.Linear(input_size + hidden_size, hidden_size)
+        nn.init.zeros_(self.decay_gate.weight)
+        init_decay = min(max(float(init_decay), 1e-4), 1.0 - 1e-4)
+        nn.init.constant_(self.decay_gate.bias, math.log(init_decay / (1.0 - init_decay)))
+
+    def forward(self, x, h, A_q, A_h):
+        h_new = super().forward(x, h, A_q, A_h)
+        decay = self.max_decay_scale * torch.sigmoid(self.decay_gate(self.decay_norm(torch.cat([x, h], dim=-1))))
+        return (1.0 - decay) * h_new + decay * h
+
+
 class SwiGLUTransition(nn.Module):
 
     def __init__(self, hidden_size, expansion=2):

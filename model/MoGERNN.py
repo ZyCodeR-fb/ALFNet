@@ -4,7 +4,7 @@ from layers.gnn import nn, torch, calculate_random_walk_matrix
 import torch.nn.functional as F
 from einops import rearrange
 from layers.agg import MeanAggregator, WMeanAggregator, MaxPoolingAggregator, MinPoolingAggregator, DiffusionAggregator
-from layers.DCRNNCell import AdaptiveGatedFFNDCRNNCell, DCRNNCell, DiffConv, GatedFFNDCRNNCell, HighwayDCRNNCell, LayerNormDCRNNCell, LocalGateDCRNNCell, MGDCRNNCell, MixHopDCRNNCell, ResidualDCRNNCell, SourceMixHopDCRNNCell
+from layers.DCRNNCell import AdaptiveGatedFFNDCRNNCell, DCRNNCell, DiffConv, GatedFFNDCRNNCell, HighwayDCRNNCell, LayerNormDCRNNCell, LocalGateDCRNNCell, MGDCRNNCell, MixHopDCRNNCell, ResidualDCRNNCell, SourceMixHopDCRNNCell, StateDecayDCRNNCell
 from layers.source_kan import KANLayer
 from lib.utils import infer_project_num_nodes
 
@@ -502,6 +502,19 @@ def _build_recurrent_cell(cell_type, input_size, hidden_size, k):
                 gate_token = token[1:]
                 init_gate = float(gate_token) if "." in gate_token else float(gate_token) / 100.0
         return HighwayDCRNNCell(input_size, hidden_size, k, max_scale=max_scale, init_gate=init_gate)
+    if cell_type in {"state_decay_dcrnn", "statedecay_dcrnn", "grud_dcrnn"}:
+        return StateDecayDCRNNCell(input_size, hidden_size, k)
+    if cell_type.startswith("state_decay_dcrnn") or cell_type.startswith("statedecay_dcrnn") or cell_type.startswith("grud_dcrnn"):
+        max_decay_scale = 0.10
+        init_decay = 0.30
+        for token in cell_type.split("_"):
+            if token.startswith("s") and len(token) > 1 and token[1:].replace(".", "", 1).isdigit():
+                scale_token = token[1:]
+                max_decay_scale = float(scale_token) if "." in scale_token else float(scale_token) / 100.0
+            elif token.startswith("g") and len(token) > 1 and token[1:].replace(".", "", 1).isdigit():
+                gate_token = token[1:]
+                init_decay = float(gate_token) if "." in gate_token else float(gate_token) / 100.0
+        return StateDecayDCRNNCell(input_size, hidden_size, k, max_decay_scale=max_decay_scale, init_decay=init_decay)
     if cell_type in {"gffn_dcrnn", "swiglu_dcrnn", "grn_dcrnn"}:
         return GatedFFNDCRNNCell(input_size, hidden_size, k)
     if cell_type.startswith("gffn_dcrnn_s"):
