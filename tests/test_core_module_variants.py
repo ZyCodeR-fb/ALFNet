@@ -54,6 +54,7 @@ _mogernn = _load_module("mogernn_for_core_variant_test", "model/MoGERNN.py")
 _patchstg = _load_module("patchstg_for_core_variant_test", "model/PatchSTG/patchstg.py")
 _build_recurrent_cell = _mogernn._build_recurrent_cell
 WindowAttBlock = _patchstg.WindowAttBlock
+PatchRevIN = _patchstg.PatchRevIN
 
 
 def test_state_decay_dcrnn_cell_preserves_hidden_shape():
@@ -84,3 +85,13 @@ def test_patchstg_crossformer_tsa_window_block_preserves_shape():
 
     assert out.shape == x.shape
     assert torch.isfinite(out).all()
+
+
+def test_patch_revin_round_trip_preserves_values():
+    revin = PatchRevIN(num_features=1, affine=True)
+    x = torch.randn(3, 12, 5, 1) * 7.0 + 40.0
+
+    out = revin(revin(x, "norm"), "denorm")
+
+    assert out.shape == x.shape
+    assert torch.allclose(out, x, atol=1e-4, rtol=1e-4)

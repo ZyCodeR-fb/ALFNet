@@ -1,10 +1,12 @@
 # Async Lifecycle MAPE Summary
 
+Macro MAPE = mean(VS MAPE, AAS MAPE, NAS MAPE, FS MAPE), not the logged AvailabilityMacro.
+
 | Models | VS MAPE | AAS MAPE | NAS MAPE | FS MAPE | Macro MAPE |
 |---|---:|---:|---:|---:|---:|
 | MoGERNN | 15.69 | 10.59 | 9.83 | 13.26 | 12.34 |
 | PatchSTG | 19.53 | 9.12 | 11.67 | 10.15 | 12.62 |
-| MCPST-FSL | 21.0799 | 11.6311 | 10.3643 | 16.9372 | 15.4316 |
+| MCPST-FSL | 21.0799 | 11.6311 | 10.3643 | 16.9372 | 15.0031 |
 | STGODE | 19.22 | 12.50 | 10.91 | 19.37 | 15.50 |
 | STID | 25.97 | 10.36 | 11.56 | 18.62 | 16.63 |
 | STGCN | 22.53 | 13.58 | 13.31 | 19.63 | 17.26 |

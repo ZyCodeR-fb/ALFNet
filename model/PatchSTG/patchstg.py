@@ -4,6 +4,45 @@ from einops import rearrange, repeat
 from timm.models.vision_transformer import Attention, Mlp
 
 
+class PatchRevIN(nn.Module):
+    # Adapted from RevIN for PatchSTG tensors shaped as [batch, time, node, channel].
+    # The original module treats variables as features; here each node-channel pair keeps
+    # its own time-wise statistics to avoid mixing sensor scales.
+    def __init__(self, num_features, eps=1e-5, affine=True):
+        super().__init__()
+        self.num_features = int(num_features)
+        self.eps = float(eps)
+        self.affine = bool(affine)
+        if self.affine:
+            self.affine_weight = nn.Parameter(torch.ones(1, 1, 1, self.num_features))
+            self.affine_bias = nn.Parameter(torch.zeros(1, 1, 1, self.num_features))
+
+    def forward(self, x, mode):
+        if mode == "norm":
+            self._get_statistics(x)
+            x = self._normalize(x)
+        elif mode == "denorm":
+            x = self._denormalize(x)
+        else:
+            raise NotImplementedError
+        return x
+
+    def _get_statistics(self, x):
+        self.mean = torch.mean(x, dim=1, keepdim=True).detach()
+        self.stdev = torch.sqrt(torch.var(x, dim=1, keepdim=True, unbiased=False) + self.eps).detach()
+
+    def _normalize(self, x):
+        x = (x - self.mean) / self.stdev
+        if self.affine:
+            x = x * self.affine_weight + self.affine_bias
+        return x
+
+    def _denormalize(self, x):
+        if self.affine:
+            x = (x - self.affine_bias) / (self.affine_weight + self.eps * self.eps)
+        return x * self.stdev + self.mean
+
+
 class STAEAttentionLayer(nn.Module):
     # Copied from references/STAEformer/model/STAEformer.py::AttentionLayer,
     # with the class name changed to avoid colliding with timm Attention.

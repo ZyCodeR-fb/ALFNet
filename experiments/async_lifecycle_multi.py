@@ -948,6 +948,9 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
                 summary_metrics[role_name].append(metrics)
 
     summary_metrics = {role: _mean_metric_dicts(metrics) for role, metrics in summary_metrics.items()}
+    role_macro_metrics = _mean_metric_dicts(
+        [summary_metrics[role] for role in ["VS", "AAS", "NAS", "FS"] if summary_metrics.get(role) is not None]
+    )
     state_metrics, state_macro_metrics, worst_state = _summarize_state_buffers(state_buffers)
     event_age_curve = _summarize_event_age_curve(event_metrics)
     role_gap = _compute_role_gap(summary_metrics)
@@ -970,6 +973,7 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
         "adaptor_has_output_calibration": adaptor_state["has_output_calibration"],
         "event_plan": _to_builtin(event_plan),
         "summary_metrics": summary_metrics,
+        "role_macro_metrics": role_macro_metrics,
         "availability_state_metrics": state_metrics,
         "availability_state_macro_metrics": state_macro_metrics,
         "worst_availability_state": worst_state,
@@ -1001,6 +1005,15 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
                 f"MAPE={metrics['MAPE']:.4f} | "
                 f"MAE={metrics['MAE']:.4f} | "
                 f"RMSE={metrics['RMSE']:.4f}"
+            )
+            handle.write(line + "\n")
+            print(line)
+        if role_macro_metrics is not None:
+            line = (
+                f"RoleMacro: "
+                f"MAPE={role_macro_metrics['MAPE']:.4f} | "
+                f"MAE={role_macro_metrics['MAE']:.4f} | "
+                f"RMSE={role_macro_metrics['RMSE']:.4f}"
             )
             handle.write(line + "\n")
             print(line)

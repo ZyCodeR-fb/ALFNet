@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from lib.utils import load_project_adjacency, load_project_positions
 from model.family_utils import build_patchstg_cfg
-from .patchstg import PatchSTG as PatchSTGBackbone
+from .patchstg import PatchRevIN, PatchSTG as PatchSTGBackbone
 
 
 def _augment_align(dist_matrix, auglen):
@@ -124,6 +124,12 @@ class Model(nn.Module):
         self.full_num_nodes = int(self.cfg["node_num"])
         self.known_nodes = list(self.cfg["known_nodes"])
         self.output_dim = configs.c_out
+        self.use_revin = bool(model_cfg.get("use_revin", False))
+        self.revin = PatchRevIN(
+            self.output_dim,
+            eps=float(model_cfg.get("revin_eps", 1e-5)),
+            affine=bool(model_cfg.get("revin_affine", True)),
+        ) if self.use_revin else None
 
         full_adj = load_project_adjacency({"data_path": configs.data_path}).cpu().numpy()
         positions = load_project_positions({"data_path": configs.data_path})
@@ -202,7 +208,10 @@ class Model(nn.Module):
         current_node_ids = self._resolve_current_node_ids(x_enc.shape[2])
         full_x = self._scatter_to_full_nodes(x_enc, current_node_ids)
         full_te = self._build_temporal_features(full_x, x_t_mark)
-        pred = self.backbone(full_x, full_te).contiguous()
+        backbone_x = self.revin(full_x, "norm") if self.revin is not None else full_x
+        pred = self.backbone(backbone_x, full_te).contiguous()
+        if self.revin is not None:
+            pred = self.revin(pred, "denorm").contiguous()
         if x_enc.shape[2] != self.full_num_nodes:
             pred = pred[..., current_node_ids, :]
         return {"pred": pred}
