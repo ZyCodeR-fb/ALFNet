@@ -315,15 +315,44 @@ def _safe_pretrained_snapshot_path(args):
     return os.path.join("./pretrained", filename)
 
 
+def _pretrained_snapshot_payload(pretrained, args):
+    if isinstance(pretrained, nn.Module):
+        return {
+            "state_dict": pretrained.state_dict(),
+            "config": {
+                "model": args.model,
+                "model_variant": args.model_variant,
+                "model_recipe": args.model_recipe,
+                "exp_id": args.exp_id,
+                "d_model": args.d_model,
+                "k_hop": args.k_hop,
+                "input_len": args.input_len,
+                "pred_len": args.pred_len,
+                "look_back": args.look_back,
+                "slide_step": args.slide_step,
+                "enc_in": args.enc_in,
+                "raw_enc_in": args.raw_enc_in,
+                "c_out": args.c_out,
+                "lifecycle_training_strategy": args.lifecycle_training_strategy,
+                "lifecycle_keep_random_mask": args.lifecycle_keep_random_mask,
+                "lifecycle_role_features": args.lifecycle_role_features,
+                "lifecycle_history_age_feature": args.lifecycle_history_age_feature,
+            },
+            "model_class": pretrained.__class__.__name__,
+            "model_module": pretrained.__class__.__module__,
+        }
+    return pretrained
+
+
 def save_pretrained_snapshot(pretrained, args):
     snapshot_path = _safe_pretrained_snapshot_path(args)
     try:
-        torch.save(pretrained, snapshot_path)
+        torch.save(_pretrained_snapshot_payload(pretrained, args), snapshot_path)
         with open(snapshot_path + ".exp_id.txt", "w", encoding="utf-8") as fp:
             fp.write(args.exp_id + "\n")
-        print(f"-> Saved full model snapshot to {snapshot_path}")
+        print(f"-> Saved pretrained state snapshot to {snapshot_path}")
     except Exception as exc:
-        print(f"-> Skip full-model snapshot save to {snapshot_path}: {exc}")
+        print(f"-> Skip pretrained snapshot save to {snapshot_path}: {exc}")
         print(f"   Best checkpoints remain available under {args.best_checkpoint_path}")
 
 
