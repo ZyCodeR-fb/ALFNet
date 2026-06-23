@@ -6,6 +6,7 @@ import torch.nn as nn
 
 from lib.utils import load_project_adjacency, load_project_positions
 from model.family_utils import build_patchstg_cfg
+from layers.source_graph_unet import graph_unet_parts
 from .patchstg import PatchRevIN, PatchSTG as PatchSTGBackbone
 
 
@@ -109,6 +110,8 @@ def _build_spatial_layout(positions, adj, recur_times, spa_patchsize, layout_typ
         parts_idx = _spectral_graph_parts(adj, part_count)
     elif layout_type in {"adjacency", "adjacency_walk", "graph_walk"}:
         parts_idx = _adjacency_walk_parts(adj, part_count)
+    elif layout_type in {"graph_unet", "gunet", "gpool"}:
+        parts_idx = graph_unet_parts(adj, recur_times)
     else:
         raise ValueError(f"Unsupported PatchSTG spatial_layout: {layout_type}")
     ori_parts_idx, reo_parts_idx, reo_all_idx = _reorder_data(parts_idx, adj, spa_patchsize)
@@ -172,6 +175,21 @@ class Model(nn.Module):
             lepe_kernel_size=int(model_cfg.get("lepe_kernel_size", 5)),
             crossformer_router_factor=int(model_cfg.get("crossformer_router_factor", 4)),
             crossformer_dropout=float(model_cfg.get("crossformer_dropout", 0.1)),
+            use_timefilter_patch_mixer=bool(model_cfg.get("use_timefilter_patch_mixer", False)),
+            timefilter_n_heads=int(model_cfg.get("timefilter_n_heads", 4)),
+            timefilter_layers=int(model_cfg.get("timefilter_layers", 1)),
+            timefilter_d_ff=int(model_cfg.get("timefilter_d_ff", 0) or 0),
+            timefilter_top_p=float(model_cfg.get("timefilter_top_p", 0.5)),
+            timefilter_alpha=float(model_cfg.get("timefilter_alpha", 0.1)),
+            timefilter_dropout=float(model_cfg.get("timefilter_dropout", 0.1)),
+            timefilter_residual_scale=float(model_cfg.get("timefilter_residual_scale", 0.10)),
+            use_duet_patch_router=bool(model_cfg.get("use_duet_patch_router", False)),
+            duet_num_experts=int(model_cfg.get("duet_num_experts", 2)),
+            duet_k=int(model_cfg.get("duet_k", 1)),
+            duet_hidden_size=int(model_cfg.get("duet_hidden_size", 64)),
+            duet_moving_avg=int(model_cfg.get("duet_moving_avg", 3)),
+            duet_residual_scale=float(model_cfg.get("duet_residual_scale", 0.10)),
+            duet_noisy_gating=bool(model_cfg.get("duet_noisy_gating", True)),
             use_staeformer_adapter=bool(model_cfg.get("use_staeformer_adapter", False)),
             staeformer_adapter_mode=model_cfg.get("staeformer_adapter_mode", "temporal"),
             staeformer_adapter_layers=int(model_cfg.get("staeformer_adapter_layers", 1)),

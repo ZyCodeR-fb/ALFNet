@@ -52,9 +52,13 @@ def _load_module(module_name, relative_path):
 _install_timm_stub()
 _mogernn = _load_module("mogernn_for_core_variant_test", "model/MoGERNN.py")
 _patchstg = _load_module("patchstg_for_core_variant_test", "model/PatchSTG/patchstg.py")
+_source_grin = _load_module("source_grin_for_core_variant_test", "layers/source_grin.py")
+_source_graph_unet = _load_module("source_graph_unet_for_core_variant_test", "layers/source_graph_unet.py")
 _build_recurrent_cell = _mogernn._build_recurrent_cell
 WindowAttBlock = _patchstg.WindowAttBlock
 PatchRevIN = _patchstg.PatchRevIN
+GRINInputImputer = _source_grin.GRINInputImputer
+graph_unet_parts = _source_graph_unet.graph_unet_parts
 
 
 def test_state_decay_dcrnn_cell_preserves_hidden_shape():
@@ -95,3 +99,82 @@ def test_patch_revin_round_trip_preserves_values():
 
     assert out.shape == x.shape
     assert torch.allclose(out, x, atol=1e-4, rtol=1e-4)
+
+
+def test_grin_input_imputer_preserves_lifecycle_shape():
+    cfg = types.SimpleNamespace(enc_in=6, raw_enc_in=1, d_model=8)
+    recipe = {
+        "grin_hidden_dim": 8,
+        "grin_ff_dim": 8,
+        "grin_kernel_size": 1,
+        "grin_decoder_order": 1,
+        "grin_use_extra_features": True,
+        "grin_use_role_mask": True,
+    }
+    imputer = GRINInputImputer(cfg, recipe)
+    x = torch.randn(2, 4, 5, 6)
+    x[:, :, 0, 0] = 0.0
+    roles = torch.zeros(2, 4, 5, 4)
+    roles[..., 1] = 1.0
+    x[..., 1:5] = roles
+    adj = torch.eye(5)
+
+    out = imputer(adj, x)
+
+    assert out.shape == x.shape
+    assert torch.isfinite(out).all()
+
+
+def test_graph_unet_parts_cover_all_nodes():
+    adj = torch.eye(8).numpy()
+    adj[0, 1] = adj[1, 0] = 1.0
+    adj[2, 3] = adj[3, 2] = 1.0
+
+    parts = graph_unet_parts(adj, recur_times=2)
+    covered = sorted(int(node) for part in parts for node in part.tolist())
+
+    assert covered == list(range(8))
+    assert len(parts) == 4
+
+
+def test_patchstg_timefilter_window_block_preserves_shape():
+    block = WindowAttBlock(
+        hidden_size=16,
+        num_heads=2,
+        num=4,
+        size=3,
+        attention_type="crossformer_tsa",
+        crossformer_router_factor=2,
+        use_timefilter_patch_mixer=True,
+        timefilter_n_heads=2,
+        timefilter_layers=1,
+        timefilter_residual_scale=0.05,
+    )
+    x = torch.randn(2, 3, 12, 16)
+
+    out = block(x)
+
+    assert out.shape == x.shape
+    assert torch.isfinite(out).all()
+
+
+def test_patchstg_duet_window_block_preserves_shape():
+    block = WindowAttBlock(
+        hidden_size=16,
+        num_heads=2,
+        num=4,
+        size=3,
+        attention_type="crossformer_tsa",
+        crossformer_router_factor=2,
+        use_duet_patch_router=True,
+        duet_num_experts=2,
+        duet_k=1,
+        duet_hidden_size=8,
+        duet_residual_scale=0.05,
+    )
+    x = torch.randn(2, 3, 12, 16)
+
+    out = block(x)
+
+    assert out.shape == x.shape
+    assert torch.isfinite(out).all()

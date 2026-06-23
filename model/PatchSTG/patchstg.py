@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 from einops import rearrange, repeat
 from timm.models.vision_transformer import Attention, Mlp
+from layers.source_duet import DUETPatchRouter
+from layers.source_timefilter import TimeFilterPatchMixer
 
 
 class PatchRevIN(nn.Module):
@@ -250,7 +252,35 @@ class CrossformerTwoStageAttentionLayer(nn.Module):
 
 
 class WindowAttBlock(nn.Module):
-    def __init__(self, hidden_size, num_heads, num, size, mlp_ratio=4.0, attention_order="depth_breadth", shift_size=0, attention_type="timm", lepe_kernel_size=5, crossformer_router_factor=4, crossformer_dropout=0.1):
+    def __init__(
+        self,
+        hidden_size,
+        num_heads,
+        num,
+        size,
+        mlp_ratio=4.0,
+        attention_order="depth_breadth",
+        shift_size=0,
+        attention_type="timm",
+        lepe_kernel_size=5,
+        crossformer_router_factor=4,
+        crossformer_dropout=0.1,
+        use_timefilter_patch_mixer=False,
+        timefilter_n_heads=4,
+        timefilter_layers=1,
+        timefilter_d_ff=0,
+        timefilter_top_p=0.5,
+        timefilter_alpha=0.1,
+        timefilter_dropout=0.1,
+        timefilter_residual_scale=0.10,
+        use_duet_patch_router=False,
+        duet_num_experts=2,
+        duet_k=1,
+        duet_hidden_size=64,
+        duet_moving_avg=3,
+        duet_residual_scale=0.10,
+        duet_noisy_gating=True,
+    ):
         super().__init__()
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.num, self.size = num, size
@@ -260,6 +290,8 @@ class WindowAttBlock(nn.Module):
         self.use_crossformer_tsa = self.attention_type in {"crossformer_tsa", "crossformer", "tsa"}
         self.use_depth_lepe = self.attention_type in {"biformer_lepe", "biformer_lepe_depth", "lepe_depth"}
         self.use_breadth_lepe = self.attention_type in {"biformer_lepe", "biformer_lepe_breadth", "lepe_breadth"}
+        self.use_timefilter_patch_mixer = bool(use_timefilter_patch_mixer)
+        self.use_duet_patch_router = bool(use_duet_patch_router)
         if self.use_crossformer_tsa:
             self.tsa = CrossformerTwoStageAttentionLayer(
                 seg_num=num,
@@ -269,6 +301,34 @@ class WindowAttBlock(nn.Module):
                 d_ff=mlp_hidden_dim,
                 dropout=float(crossformer_dropout),
             )
+        if self.use_timefilter_patch_mixer:
+            self.timefilter_patch_mixer = TimeFilterPatchMixer(
+                hidden_dim=hidden_size,
+                patch_num=num,
+                patch_size=size,
+                n_heads=timefilter_n_heads,
+                n_blocks=timefilter_layers,
+                d_ff=(None if int(timefilter_d_ff) <= 0 else int(timefilter_d_ff)),
+                top_p=timefilter_top_p,
+                alpha=timefilter_alpha,
+                dropout=timefilter_dropout,
+                residual_scale=timefilter_residual_scale,
+            )
+        else:
+            self.timefilter_patch_mixer = None
+        if self.use_duet_patch_router:
+            self.duet_patch_router = DUETPatchRouter(
+                hidden_dim=hidden_size,
+                patch_num=num,
+                num_experts=duet_num_experts,
+                k=duet_k,
+                router_hidden_size=duet_hidden_size,
+                moving_avg=duet_moving_avg,
+                residual_scale=duet_residual_scale,
+                noisy_gating=duet_noisy_gating,
+            )
+        else:
+            self.duet_patch_router = None
 
         self.nnorm1 = nn.LayerNorm(hidden_size)
         if self.use_breadth_lepe:
@@ -331,6 +391,10 @@ class WindowAttBlock(nn.Module):
             x = self._depth_attention(x, B, T, P, N, D)
         else:
             raise ValueError(f"Unsupported PatchSTG attention_order: {self.attention_order}")
+        if self.timefilter_patch_mixer is not None:
+            x = self.timefilter_patch_mixer(x)
+        if self.duet_patch_router is not None:
+            x = self.duet_patch_router(x)
 
         x = x.reshape(B,T,-1,D)
         if shift_size:
@@ -350,6 +414,21 @@ class PatchSTG(nn.Module):
                         lepe_kernel_size=5,
                         crossformer_router_factor=4,
                         crossformer_dropout=0.1,
+                        use_timefilter_patch_mixer=False,
+                        timefilter_n_heads=4,
+                        timefilter_layers=1,
+                        timefilter_d_ff=0,
+                        timefilter_top_p=0.5,
+                        timefilter_alpha=0.1,
+                        timefilter_dropout=0.1,
+                        timefilter_residual_scale=0.10,
+                        use_duet_patch_router=False,
+                        duet_num_experts=2,
+                        duet_k=1,
+                        duet_hidden_size=64,
+                        duet_moving_avg=3,
+                        duet_residual_scale=0.10,
+                        duet_noisy_gating=True,
                         use_staeformer_adapter=False,
                         staeformer_adapter_mode="temporal",
                         staeformer_adapter_layers=1,
@@ -397,6 +476,21 @@ class PatchSTG(nn.Module):
                 lepe_kernel_size=lepe_kernel_size,
                 crossformer_router_factor=crossformer_router_factor,
                 crossformer_dropout=crossformer_dropout,
+                use_timefilter_patch_mixer=use_timefilter_patch_mixer,
+                timefilter_n_heads=timefilter_n_heads,
+                timefilter_layers=timefilter_layers,
+                timefilter_d_ff=timefilter_d_ff,
+                timefilter_top_p=timefilter_top_p,
+                timefilter_alpha=timefilter_alpha,
+                timefilter_dropout=timefilter_dropout,
+                timefilter_residual_scale=timefilter_residual_scale,
+                use_duet_patch_router=use_duet_patch_router,
+                duet_num_experts=duet_num_experts,
+                duet_k=duet_k,
+                duet_hidden_size=duet_hidden_size,
+                duet_moving_avg=duet_moving_avg,
+                duet_residual_scale=duet_residual_scale,
+                duet_noisy_gating=duet_noisy_gating,
             )
             for i in range(layers)
         ])

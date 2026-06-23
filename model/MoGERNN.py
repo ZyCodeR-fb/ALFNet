@@ -6,6 +6,7 @@ from einops import rearrange
 from layers.agg import MeanAggregator, WMeanAggregator, MaxPoolingAggregator, MinPoolingAggregator, DiffusionAggregator
 from layers.DCRNNCell import AdaptiveGatedFFNDCRNNCell, DCRNNCell, DiffConv, GatedFFNDCRNNCell, HighwayDCRNNCell, LayerNormDCRNNCell, LocalGateDCRNNCell, MGDCRNNCell, MixHopDCRNNCell, ResidualDCRNNCell, SourceMixHopDCRNNCell, StateDecayDCRNNCell
 from layers.source_kan import KANLayer
+from layers.source_grin import GRINInputImputer
 from lib.utils import infer_project_num_nodes
 
 
@@ -773,7 +774,9 @@ class Model(nn.Module):
         self.out_len = configs.pred_len if configs.pred_len > 0 else configs.look_back
         self.output_dim = configs.c_out
         recipe_cfg = (getattr(configs, "model_family_cfg", {}) or {}).get("recipe", {})
-        if bool(recipe_cfg.get("use_graph_bidir_input_imputer", False)):
+        if bool(recipe_cfg.get("use_grin_input_imputer", False)):
+            self.data_pre = GRINInputImputer(configs, recipe_cfg)
+        elif bool(recipe_cfg.get("use_graph_bidir_input_imputer", False)):
             self.data_pre = GraphBidirInputImputer(configs, recipe_cfg)
         else:
             self.data_pre = DataPreparation(configs)
