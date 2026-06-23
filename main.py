@@ -290,17 +290,42 @@ def _load_checkpoint_from_dir(args, checkpoint_dir):
 
     checkpoint = torch.load(checkpoint_file, weights_only=False)
     print(f"├── load pretrained from {checkpoint_dir}/")
-    return checkpoint, checkpoint_dir
+    return checkpoint, checkpoint_dir, checkpoint_file
+
+
+def _to_plain_number(value):
+    if value is None:
+        return None
+    if hasattr(value, "item"):
+        value = value.item()
+    if isinstance(value, (int, float)):
+        return value
+    return None
+
+
+def _checkpoint_run_metadata(checkpoint, checkpoint_dir, checkpoint_file):
+    config = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
+    return {
+        "checkpoint_dir": checkpoint_dir,
+        "checkpoint_path": checkpoint_file,
+        "loaded_checkpoint_epoch": _to_plain_number(checkpoint.get("epoch")) if isinstance(checkpoint, dict) else None,
+        "loaded_checkpoint_metric": _to_plain_number(checkpoint.get("val_metric")) if isinstance(checkpoint, dict) else None,
+        "max_epoch": config.get("max_epoch") if isinstance(config, dict) else None,
+        "patience": config.get("patience") if isinstance(config, dict) else None,
+        "stop_based": config.get("stop_based") if isinstance(config, dict) else None,
+    }
 
 
 def load_pretrained_model(model, args):
     checkpoint_dir = os.path.join(args.best_checkpoint_path, args.exp_id)
     if args.pretrained_model_path is None:
-        checkpoint, checkpoint_dir = _load_checkpoint_from_dir(args, checkpoint_dir)
+        checkpoint, checkpoint_dir, checkpoint_file = _load_checkpoint_from_dir(args, checkpoint_dir)
+        args.loaded_checkpoint_metadata = _checkpoint_run_metadata(checkpoint, checkpoint_dir, checkpoint_file)
         model = _load_model_state(model, checkpoint, args, _validate_checkpoint_compatibility)
         return model, checkpoint_dir + os.sep
 
     loaded = torch.load(args.pretrained_model_path, weights_only=False)
+    args.loaded_checkpoint_metadata = _checkpoint_run_metadata(loaded, checkpoint_dir, args.pretrained_model_path)
     model = _load_model_state(model, loaded, args, _validate_checkpoint_compatibility)
     return model, checkpoint_dir + os.sep
 

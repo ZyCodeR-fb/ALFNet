@@ -362,6 +362,57 @@ def _to_builtin(obj):
     return obj
 
 
+def _load_training_trace(args):
+    checkpoint_dir = getattr(args, "best_checkpoint_path", None)
+    loaded_checkpoint = getattr(args, "loaded_checkpoint_metadata", None)
+    if loaded_checkpoint:
+        checkpoint_dir = loaded_checkpoint.get("checkpoint_dir") or checkpoint_dir
+    training_summary = None
+    if checkpoint_dir:
+        summary_path = os.path.join(checkpoint_dir, "training_summary.json")
+        if os.path.exists(summary_path):
+            with open(summary_path, "r", encoding="utf-8") as handle:
+                training_summary = json.load(handle)
+    return {
+        "checkpoint_dir": checkpoint_dir,
+        "training_summary": training_summary,
+        "loaded_checkpoint": loaded_checkpoint,
+    }
+
+
+def _format_training_trace_text(training_trace):
+    if not training_trace:
+        return None
+    training_summary = training_trace.get("training_summary") or {}
+    loaded_checkpoint = training_trace.get("loaded_checkpoint") or {}
+    parts = []
+    finished_epoch = training_summary.get("finished_epoch")
+    max_epoch = training_summary.get("max_epoch") or loaded_checkpoint.get("max_epoch")
+    if finished_epoch is not None:
+        finished_text = str(finished_epoch)
+        if max_epoch is not None:
+            finished_text = f"{finished_text}/{max_epoch}"
+        parts.append(f"finished_epoch={finished_text}")
+    else:
+        parts.append("finished_epoch=NA")
+    stop_reason = training_summary.get("stop_reason")
+    if stop_reason is not None:
+        parts.append(f"stop_reason={stop_reason}")
+    best_val_epoch = training_summary.get("best_val_metric_epoch")
+    if best_val_epoch is not None:
+        parts.append(f"best_val_epoch={best_val_epoch}")
+    best_train_epoch = training_summary.get("best_train_metric_epoch")
+    if best_train_epoch is not None:
+        parts.append(f"best_train_epoch={best_train_epoch}")
+    loaded_epoch = loaded_checkpoint.get("loaded_checkpoint_epoch")
+    if loaded_epoch is not None:
+        parts.append(f"loaded_checkpoint_epoch={loaded_epoch}")
+    loaded_metric = loaded_checkpoint.get("loaded_checkpoint_metric")
+    if loaded_metric is not None:
+        parts.append(f"loaded_checkpoint_metric={loaded_metric:.6g}")
+    return "TrainingTrace: " + " | ".join(parts)
+
+
 def _freeze_model_params(model):
     requires_grad = [param.requires_grad for param in model.parameters()]
     for param in model.parameters():
@@ -821,6 +872,7 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
     output_path = os.path.join(output_dir, "async_lifecycle_results.pkl")
     summary_path = os.path.join(output_dir, "async_lifecycle_summary.json")
     text_path = os.path.join(output_dir, "async_lifecycle_results.txt")
+    training_trace = _load_training_trace(args)
 
     model.eval()
     adj, pos_mark = dataset.get_adj_and_pos_mark()
@@ -980,6 +1032,7 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
         "event_age_curve": event_age_curve,
         "role_gap": role_gap,
         "routing_diagnostics": routing_diagnostics,
+        "training_trace": training_trace,
         "event_metrics": event_metrics,
         "initial_aas_nodes": bundle["initial_aas_nodes"],
         "initial_vs_nodes": bundle["initial_vs_nodes"],
@@ -992,6 +1045,10 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
     with open(summary_path, "w", encoding="utf-8") as handle:
         json.dump(_to_builtin(results), handle, ensure_ascii=False, indent=2)
     with open(text_path, "w", encoding="utf-8") as handle:
+        training_trace_line = _format_training_trace_text(training_trace)
+        if training_trace_line is not None:
+            handle.write(training_trace_line + "\n")
+            print(training_trace_line)
         adaptor_line = _format_adaptor_text(adaptor_state)
         if adaptor_line is not None:
             handle.write(adaptor_line + "\n")

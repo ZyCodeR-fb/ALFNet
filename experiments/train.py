@@ -2,12 +2,13 @@
 Training functions and helpers
 """
 
+import json
 import math
-import torch
 import pickle
-import torch
 import os
 import time
+
+import torch
 from .test import read_out
 
 from .inductive_epoch import shared_step
@@ -123,6 +124,9 @@ def save_checkpoint(model, optimizer, args, epoch, mode, now_metric, total_y, me
                         "lifecycle_fs_loss_weight": args.lifecycle_fs_loss_weight,
                         "lifecycle_role_features": args.lifecycle_role_features,
                         "lifecycle_history_age_feature": args.lifecycle_history_age_feature,
+                        "max_epoch": args.max_epoch,
+                        "patience": args.patience,
+                        "stop_based": args.stop_based,
                     },
                 },
                 checkpoint_path,
@@ -131,6 +135,30 @@ def save_checkpoint(model, optimizer, args, epoch, mode, now_metric, total_y, me
             print(f"-> New best {metric_name} loss at epoch {epoch}! ({metric_name} loss: {now_metric:.4f})")
     except Exception as e:
         print(e)
+
+
+def _finite_or_none(value):
+    return float(value) if math.isfinite(value) else None
+
+
+def _write_training_summary(args, finished_epoch, stop_reason):
+    summary = {
+        "finished_epoch": int(finished_epoch),
+        "stop_reason": stop_reason,
+        "max_epoch": int(args.max_epoch),
+        "patience": int(args.patience),
+        "stop_based": args.stop_based,
+        "best_train_metric_epoch": int(args.best_train_metric_epoch),
+        "best_val_metric_epoch": int(args.best_val_metric_epoch),
+        "best_test_metric_epoch": int(args.best_test_metric_epoch),
+        "best_train_metric": _finite_or_none(args.best_train_metric),
+        "best_val_metric": _finite_or_none(args.best_val_metric),
+        "best_test_metric": _finite_or_none(args.best_test_metric),
+    }
+    summary_path = os.path.join(args.best_checkpoint_path, "training_summary.json")
+    with open(summary_path, "w", encoding="utf-8") as handle:
+        json.dump(summary, handle, ensure_ascii=False, indent=2)
+    print(f"-> Training summary saved to: {summary_path}")
 
 
 def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wandb=None):
@@ -169,6 +197,7 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
     args.best_total_y = {}  # save best epoch test results
     print("-> Start training...")
     wait_count = 0
+    stopped_early = False
     for epoch in range(1, args.max_epoch + 1):
         print(f"-> Epoch {epoch} started...")
         train_dataset = data_loaders["train"].dataset
@@ -212,14 +241,19 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
 
         if wait_count == args.patience:
             print(f"Early stopping at epoch {epoch}!")
+            stopped_early = True
             break  # Exit for loop and do early stopping
+    finished_epoch = epoch if args.max_epoch > 0 else 0
+    stop_reason = "early_stop" if stopped_early else "max_epoch"
     print("-> Training finished!")
+    print(f"-> Training stopped at epoch {finished_epoch}/{args.max_epoch} ({stop_reason})")
     if "train" in args.stop_based:
         print(f"-> Saved best train model checkpoint at epoch {args.best_train_metric_epoch}!")
     elif "val" in args.stop_based:
         print(f"-> Saved best val model checkpoint at epoch {args.best_val_metric_epoch}!")
     print(f"-> Saved best test model checkpoint at epoch {args.best_test_metric_epoch}!")
     print(f"   - Saved to: {args.best_checkpoint_path}")
+    _write_training_summary(args, finished_epoch, stop_reason)
 
     if "val" in args.stop_based and args.best_val_metric_epoch < 0:
         raise RuntimeError("Training finished without any finite validation checkpoint. The training loss likely became NaN or Inf.")
