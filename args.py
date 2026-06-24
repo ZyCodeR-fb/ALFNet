@@ -66,7 +66,11 @@ def _add_arguments(parser):
     parser.add_argument("--scheduler_patience", type=int, default=1, help="scheduler patience")
     parser.add_argument("--patience", type=int, default=3, help="early stopping epochs")
     parser.add_argument(
-        "--stop_based", type=str, default="train_mask", choices=["val_total", "val_mask", "train_total", "train_mask"], help="early stopping criteria"
+        "--stop_based",
+        type=str,
+        default="train_mask",
+        choices=["val_total", "val_mask", "val_role", "train_total", "train_mask", "train_role"],
+        help="early stopping criteria",
     )
     parser.add_argument("--return_best", action="store_true", help="return best model")
     parser.add_argument("--test_for_changed", action="store_true", help="test pretrained model in changed sensor network")

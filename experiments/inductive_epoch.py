@@ -294,6 +294,7 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
     metrics2 = metrics.copy()
     metrics3 = metrics.copy()
     metrics4 = metrics.copy()
+    metrics_role = metrics.copy()
     if mode == "train" and train == True:
         model.train()
         model.zero_grad()
@@ -462,6 +463,19 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                 optimize_loss.backward()
                 optimizer.step()
                 optimizer.zero_grad()
+            role_metric_loss = None
+            if mode != "test":
+                with torch.no_grad():
+                    detached_role = last_role.detach() if last_role is not None else None
+                    role_metric_loss = _compute_role_balanced_forecast_loss(
+                        y_hat.detach(),
+                        y_for_loss.detach(),
+                        y_omi.detach(),
+                        detached_role,
+                        args.loss,
+                    )
+                    if role_metric_loss is None:
+                        role_metric_loss = loss.detach()
             y = y_for_loss.detach().cpu()
             y_hat = y_hat.detach().cpu()
             y_omi = y_omi.detach().cpu()
@@ -474,6 +488,20 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
             if mode != "test":
                 metrics = detail_metrics(
                     dataloader, criterions, args, mode + "_total ", metrics, y_omi, loss, inverse_y, inverse_y_hat, max_bacth_num, grad_enabled, batch_ix
+                )
+                metrics_role = detail_metrics(
+                    dataloader,
+                    criterions,
+                    args,
+                    mode + "_role  ",
+                    metrics_role,
+                    y_omi,
+                    role_metric_loss,
+                    inverse_y,
+                    inverse_y_hat,
+                    max_bacth_num,
+                    grad_enabled,
+                    batch_ix,
                 )
                 for i, mask in enumerate([batch_mask, batch_unmask]):
                     if len(mask) == 0:
@@ -537,6 +565,8 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
             metrics2[metric_name] /= batch_ix + 1
         for metric_name in metrics3.keys():
             metrics3[metric_name] /= batch_ix + 1
+        for metric_name in metrics_role.keys():
+            metrics_role[metric_name] /= batch_ix + 1
 
     else:
         for name, nodes in part_nodes.items():
@@ -608,4 +638,4 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                     grad_enabled,
                     batch_ix,
                 )
-    return model, (metrics, metrics2, metrics3, metrics4), total_y
+    return model, (metrics, metrics2, metrics3, metrics4, metrics_role), total_y

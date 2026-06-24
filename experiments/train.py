@@ -65,6 +65,8 @@ def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch
                     f"{mode}_unmask": mode_metrics[2],
                 }
             )
+            if len(mode_metrics) > 4:
+                metrics.update({f"{mode}_role  ": mode_metrics[4]})
         total_y[mode] = total_y_mode
 
     if train:
@@ -72,12 +74,16 @@ def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch
             metric_mode = "val"
             if args.stop_based == "val_total":
                 metric_name = "val_total "
+            elif args.stop_based == "val_role":
+                metric_name = "val_role  "
             else:
                 metric_name = "val_mask  "
         elif "train" in args.stop_based:
             metric_mode = "train"
             if args.stop_based == "train_total":
                 metric_name = "train_total "
+            elif args.stop_based == "train_role":
+                metric_name = "train_role  "
             else:
                 metric_name = "train_mask  "
         save_checkpoint(model, optimizer, args, epoch, metric_mode, metrics[metric_name][args.loss], total_y, metric_name)
