@@ -17,6 +17,18 @@ from utils.logtool import print_config, print_header, print_train, set_wandb
 from utils.report_results import load_prediction, report_error
 
 
+MAX_EXP_ID_COMPONENT_LEN = 250
+
+
+def _shorten_exp_id_component(exp_id):
+    if len(exp_id.encode("utf-8")) <= MAX_EXP_ID_COMPONENT_LEN:
+        return exp_id
+    full_hash = hashlib.md5(exp_id.encode("utf-8")).hexdigest()[:10]
+    suffix = f"-cfg{full_hash}"
+    prefix_budget = MAX_EXP_ID_COMPONENT_LEN - len(suffix)
+    return f"{exp_id[:prefix_budget].rstrip('-_')}{suffix}"
+
+
 def _format_float_token(value):
     token = f"{value:.0e}" if value != 0 and (abs(value) <= 1e-3 or abs(value) >= 1e2) else f"{value:g}"
     return token.replace("+0", "").replace("+", "").replace("-0", "-")
@@ -126,7 +138,7 @@ def build_exp_id(args):
             f"role-{int(args.lifecycle_role_features)}-"
             f"age-{int(args.lifecycle_history_age_feature)}"
         )
-    return f"{exp_prefix}-{exp_id}"
+    return _shorten_exp_id_component(f"{exp_prefix}-{exp_id}")
 
 
 def _validate_checkpoint_compatibility(checkpoint, args):
