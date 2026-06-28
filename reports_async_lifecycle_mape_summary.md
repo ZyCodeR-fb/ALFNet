@@ -16,4 +16,4 @@ Macro MAPE = mean(VS MAPE, AAS MAPE, NAS MAPE, FS MAPE), not the logged Availabi
 | FCLSTM | 28.26 | 12.72 | 11.10 | 31.20 | 20.82 |
 | GWNET | 23.41 | 18.74 | 18.08 | 23.23 | 20.86 |
 | HA | 28.28 | 14.88 | 12.69 | 31.21 | 21.77 |
-| RoleFusion-final (rf_s_plp2grintftop065vr) | 16.5368 | 9.2406 | 10.1420 | 9.8316 | 11.4378 |
+| RoleFusion-final (rf_s_plp2grintftop065r003vr) | 15.9901 | 9.1792 | 10.1130 | 9.9785 | 11.3152 |
