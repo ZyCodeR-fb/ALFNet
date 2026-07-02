@@ -40,13 +40,15 @@ class GatingNetwork(nn.Module):
 
 class SparseGatingNetwork(nn.Module):
 
-    def __init__(self, configs, input_dim=None):
+    def __init__(self, configs, input_dim=None, recipe_cfg=None):
         super(SparseGatingNetwork, self).__init__()
+        recipe_cfg = recipe_cfg or {}
         raw_enc_in = getattr(configs, "raw_enc_in", configs.enc_in)
         gate_input_dim = configs.input_len * (raw_enc_in if input_dim is None else input_dim)
         self.fc1 = nn.Linear(gate_input_dim, configs.d_model)
         self.fc2 = nn.Linear(configs.d_model, configs.num_experts)
-        self.k = configs.num_used_experts
+        self.k = max(1, min(int(configs.num_used_experts), int(configs.num_experts)))
+        self.temperature = max(float(recipe_cfg.get("mogernn_router_temperature", 1.0)), 1e-4)
 
     def forward(self, x):
         """
@@ -60,7 +62,7 @@ class SparseGatingNetwork(nn.Module):
         logits = self.fc2(x)
         top_logits, topk_indices = torch.topk(logits, self.k, dim=-1)
         zeros = torch.zeros_like(logits)
-        weights = zeros.scatter(2, topk_indices, F.softmax(top_logits, dim=-1))
+        weights = zeros.scatter(2, topk_indices, F.softmax(top_logits / self.temperature, dim=-1))
         return weights
 
 
@@ -87,7 +89,8 @@ class SparseKANGatingNetwork(nn.Module):
             sparse_init=bool(recipe_cfg.get("kan_router_sparse_init", False)),
         )
         self.fc = nn.Linear(hidden_dim, configs.num_experts)
-        self.k = configs.num_used_experts
+        self.k = max(1, min(int(configs.num_used_experts), int(configs.num_experts)))
+        self.temperature = max(float(recipe_cfg.get("mogernn_router_temperature", 1.0)), 1e-4)
 
     def forward(self, x):
         hidden, _, _, _ = self.kan(self.norm(x).reshape(-1, x.size(-1)))
@@ -95,7 +98,7 @@ class SparseKANGatingNetwork(nn.Module):
         logits = self.fc(hidden)
         top_logits, topk_indices = torch.topk(logits, self.k, dim=-1)
         zeros = torch.zeros_like(logits)
-        weights = zeros.scatter(2, topk_indices, F.softmax(top_logits, dim=-1))
+        weights = zeros.scatter(2, topk_indices, F.softmax(top_logits / self.temperature, dim=-1))
         return weights
 
 
@@ -147,7 +150,7 @@ class DataPreparation(nn.Module):
         if router_type in {"kan", "source_kan", "rbf_kan", "sparse_kan"}:
             self.gating = SparseKANGatingNetwork(configs, input_dim=gate_feature_dim, recipe_cfg=recipe_cfg)
         else:
-            self.gating = SparseGatingNetwork(configs, input_dim=gate_feature_dim)
+            self.gating = SparseGatingNetwork(configs, input_dim=gate_feature_dim, recipe_cfg=recipe_cfg)
         if self.use_temporal_carry_gate:
             self.temporal_carry_gate = nn.Linear(self.raw_enc_in * 4, self.raw_enc_in)
             nn.init.zeros_(self.temporal_carry_gate.weight)
@@ -693,13 +696,17 @@ class Decoder(nn.Module):
                  output_size=None,
                  num_layers=1,
                  k=2,
-                 cell_type="dcrnn"):
+                 cell_type="dcrnn",
+                 output_mode="direct",
+                 residual_scale=1.0):
         super(Decoder, self).__init__()
         self.input_size = input_size
         self.output_size = input_size if output_size is None else output_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.out_seq_len = out_seq_len
+        self.output_mode = str(output_mode).lower()
+        self.residual_scale = float(residual_scale)
 
         self.rnn_cells = nn.ModuleList([
             _build_recurrent_cell(cell_type, input_size if i == 0 else hidden_size, hidden_size, k)
@@ -719,13 +726,18 @@ class Decoder(nn.Module):
         input_at_t = intial_input
         outputs = [None for _ in range(self.out_seq_len)]
         for t in range(self.out_seq_len):
+            decoder_input = input_at_t
             hs = []
             for l in range(self.num_layers):
                 next_h = self.rnn_cells[l](input_at_t, h[l], A_q, A_h)
                 input_at_t = next_h
                 hs.append(next_h)
             h = torch.stack(hs, dim=0)
-            output = self.fc(next_h)
+            raw_output = self.fc(next_h)
+            if self.output_mode in {"residual_delta", "delta", "residual"}:
+                output = decoder_input[..., : self.output_size] + self.residual_scale * raw_output
+            else:
+                output = raw_output
             outputs[t] = output
             # Teacher forcing
             use_teacher_forcing = True if (
@@ -752,13 +764,16 @@ class Seq2Seq(nn.Module):
         cell_type="dcrnn",
         encoder_cell_type=None,
         decoder_cell_type=None,
+        decoder_output_mode="direct",
+        decoder_residual_scale=1.0,
     ):
         super(Seq2Seq, self).__init__()
         encoder_cell_type = cell_type if encoder_cell_type is None else encoder_cell_type
         decoder_cell_type = cell_type if decoder_cell_type is None else decoder_cell_type
         self.encoder = Encoder(enc_input_size, hidden_size, num_layers, k, cell_type=encoder_cell_type)
         self.decoder = Decoder(dec_input_size, hidden_size, out_seq_len,
-                               output_size=dec_input_size, num_layers=num_layers, k=k, cell_type=decoder_cell_type)
+                               output_size=dec_input_size, num_layers=num_layers, k=k, cell_type=decoder_cell_type,
+                               output_mode=decoder_output_mode, residual_scale=decoder_residual_scale)
 
     def forward(self, x_enc, x_dec, A_q, A_h, initial_input, teacher_forcing_ratio=0.5):
         h = self.encoder(x_enc, A_q, A_h)
@@ -836,7 +851,9 @@ class Model(nn.Module):
                                configs.e_layers, self.out_len, configs.k_hop,
                                cell_type=cell_type,
                                encoder_cell_type=encoder_cell_type,
-                               decoder_cell_type=decoder_cell_type)
+                               decoder_cell_type=decoder_cell_type,
+                               decoder_output_mode=recipe_cfg.get("decoder_output_mode", "direct"),
+                               decoder_residual_scale=float(recipe_cfg.get("decoder_residual_scale", 1.0)))
 
     def set_current_node_ids(self, node_ids):
         self.current_node_ids = node_ids

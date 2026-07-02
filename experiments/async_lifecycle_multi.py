@@ -47,6 +47,15 @@ AVAILABILITY_STATE_ORDER = [
     "stable_observed",
 ]
 
+AVAILABILITY_SENSOR_ALIASES = {
+    "zero_history_virtual": "Cold-start",
+    "new_sensor_early": "Warm-up",
+    "new_sensor_late": "Adapted",
+    "failed_sensor_early": "Degrading",
+    "failed_sensor_late": "Outage",
+    "stable_observed": "Steady",
+}
+
 
 def _validate_async_args(args):
     if args.input_len != 12 or args.pred_len != 12 or args.slide_step != 12:
@@ -1027,6 +1036,11 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
         "summary_metrics": summary_metrics,
         "role_macro_metrics": role_macro_metrics,
         "availability_state_metrics": state_metrics,
+        "availability_sensor_aliases": AVAILABILITY_SENSOR_ALIASES,
+        "availability_sensor_metrics": {
+            AVAILABILITY_SENSOR_ALIASES.get(state_name, state_name): metrics
+            for state_name, metrics in state_metrics.items()
+        },
         "availability_state_macro_metrics": state_macro_metrics,
         "worst_availability_state": worst_state,
         "event_age_curve": event_age_curve,
@@ -1087,8 +1101,9 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
             metrics = state_metrics[state_name]
             if metrics is None:
                 continue
+            sensor_name = AVAILABILITY_SENSOR_ALIASES.get(state_name, state_name)
             line = (
-                f"{state_name}: "
+                f"{sensor_name} ({state_name}): "
                 f"MAPE={metrics['MAPE']:.4f} | "
                 f"MAE={metrics['MAE']:.4f} | "
                 f"RMSE={metrics['RMSE']:.4f}"
@@ -1097,7 +1112,8 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
             print(line)
         if worst_state is not None:
             metrics = worst_state["metrics"]
-            line = f"WorstAvailabilityState: {worst_state['name']} | MAPE={metrics['MAPE']:.4f}"
+            sensor_name = AVAILABILITY_SENSOR_ALIASES.get(worst_state["name"], worst_state["name"])
+            line = f"WorstAvailabilityState: {sensor_name} ({worst_state['name']}) | MAPE={metrics['MAPE']:.4f}"
             handle.write(line + "\n")
             print(line)
         if role_gap is not None:

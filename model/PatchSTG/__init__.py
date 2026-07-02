@@ -101,6 +101,17 @@ def _adjacency_walk_parts(adj, part_count):
     return _split_order_to_parts(order, part_count)
 
 
+def _topology_balanced_parts(adj, part_count):
+    adj_sym = (adj + adj.T) / 2.0
+    degree = adj_sym.sum(axis=1)
+    sorted_nodes = np.argsort(-degree)
+    buckets = [[] for _ in range(part_count)]
+    for idx, node in enumerate(sorted_nodes):
+        buckets[idx % part_count].append(int(node))
+    parts = [np.sort(np.asarray(bucket, dtype=int)) for bucket in buckets if bucket]
+    return parts
+
+
 def _build_spatial_layout(positions, adj, recur_times, spa_patchsize, layout_type="kd_tree"):
     layout_type = str(layout_type).lower()
     part_count = 2 ** int(recur_times)
@@ -110,6 +121,8 @@ def _build_spatial_layout(positions, adj, recur_times, spa_patchsize, layout_typ
         parts_idx = _spectral_graph_parts(adj, part_count)
     elif layout_type in {"adjacency", "adjacency_walk", "graph_walk"}:
         parts_idx = _adjacency_walk_parts(adj, part_count)
+    elif layout_type in {"topology_balanced", "degree_balanced", "degree"}:
+        parts_idx = _topology_balanced_parts(adj, part_count)
     elif layout_type in {"graph_unet", "gunet", "gpool"}:
         parts_idx = graph_unet_parts(adj, recur_times)
     else:
@@ -196,6 +209,10 @@ class Model(nn.Module):
             staeformer_num_heads=int(model_cfg.get("staeformer_num_heads", 4)),
             staeformer_feed_forward_dim=int(model_cfg.get("staeformer_feed_forward_dim", 256)),
             staeformer_dropout=float(model_cfg.get("staeformer_dropout", 0.1)),
+            use_visibility_token_pruning=bool(model_cfg.get("use_visibility_token_pruning", False)),
+            token_prune_threshold=float(model_cfg.get("token_prune_threshold", 0.25)),
+            token_prune_min_scale=float(model_cfg.get("token_prune_min_scale", 0.0)),
+            token_prune_mode=model_cfg.get("token_prune_mode", "soft"),
         )
 
     def _resolve_current_node_ids(self, current_num_nodes):

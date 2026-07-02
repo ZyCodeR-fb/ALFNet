@@ -434,7 +434,11 @@ class PatchSTG(nn.Module):
                         staeformer_adapter_layers=1,
                         staeformer_num_heads=4,
                         staeformer_feed_forward_dim=256,
-                        staeformer_dropout=0.1
+                        staeformer_dropout=0.1,
+                        use_visibility_token_pruning=False,
+                        token_prune_threshold=0.25,
+                        token_prune_min_scale=0.0,
+                        token_prune_mode="soft",
                 ):
         super(PatchSTG, self).__init__()
         self.node_num = node_num
@@ -443,6 +447,10 @@ class PatchSTG(nn.Module):
         self.tod, self.dow = tod, dow
         self.use_staeformer_adapter = bool(use_staeformer_adapter)
         self.staeformer_adapter_mode = str(staeformer_adapter_mode).lower()
+        self.use_visibility_token_pruning = bool(use_visibility_token_pruning)
+        self.token_prune_threshold = float(token_prune_threshold)
+        self.token_prune_min_scale = float(token_prune_min_scale)
+        self.token_prune_mode = str(token_prune_mode).lower()
 
         # model_dims = input_emb + spa_emb + tem_emb
         dims = input_dims + tod_dims + dow_dims + node_dims
@@ -511,6 +519,21 @@ class PatchSTG(nn.Module):
         # projection decoder -> section 4.4 in paper
         self.regression_conv = nn.Conv2d(in_channels=tem_patchnum*dims, out_channels=tem_patchsize*tem_patchnum, kernel_size=(1, 1), bias=True)
 
+    def _apply_visibility_token_pruning(self, tokens, raw_x):
+        if not self.use_visibility_token_pruning or self.token_prune_threshold <= 0:
+            return tokens
+        observed = (torch.abs(raw_x).sum(dim=-1) > 0).to(dtype=tokens.dtype)
+        visibility = observed.mean(dim=1)
+        token_index = torch.as_tensor(self.reo_all_idx, dtype=torch.long, device=raw_x.device)
+        token_visibility = visibility.index_select(1, token_index)
+        if self.token_prune_mode == "hard":
+            gate = (token_visibility >= self.token_prune_threshold).to(dtype=tokens.dtype)
+        else:
+            gate = torch.clamp(token_visibility / self.token_prune_threshold, min=0.0, max=1.0)
+        min_scale = max(0.0, min(1.0, self.token_prune_min_scale))
+        gate = min_scale + (1.0 - min_scale) * gate
+        return tokens * gate.unsqueeze(1).unsqueeze(-1)
+
     def forward(self, x, te):
         # x: [B,T,N,1] input traffic
         # te: [B,T,N,2] time information
@@ -518,6 +541,7 @@ class PatchSTG(nn.Module):
         # spatio-temporal embedding -> section 4.1 in paper
         embeded_x = self.embedding(x, te)
         rex = embeded_x[:,:,self.reo_all_idx,:] # select patched points
+        rex = self._apply_visibility_token_pruning(rex, x)
 
         # dual attention encoder -> section 4.3 in paper
         for block in self.spa_encoder:
