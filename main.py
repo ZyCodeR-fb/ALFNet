@@ -403,7 +403,7 @@ def initialize_training_from_checkpoint(model, args):
 
 
 def should_skip_model_checkpoint_load(args):
-    return args.model == "RoleFusion" and args.model_recipe == "hard_route"
+    return args.model in {"RoleFusion", "ALFNet"} and args.model_recipe == "hard_route"
 
 
 if __name__ == "__main__":
@@ -434,7 +434,7 @@ if __name__ == "__main__":
 
     if args.test_for_async_lifecycle:
         if should_skip_model_checkpoint_load(args):
-            print("-> RoleFusion hard_route uses expert checkpoints from family config; skip self-checkpoint loading")
+            print(f"-> {args.model} hard_route uses expert checkpoints from family config; skip self-checkpoint loading")
         else:
             model, args.best_checkpoint_path = load_pretrained_model(model, args)
         args.slide_step = 12

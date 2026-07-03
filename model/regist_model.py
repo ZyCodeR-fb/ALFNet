@@ -1,6 +1,9 @@
 from model import *
 
 model_dict = {
+    'ALFGraph': ALFGraph,
+    'ALFNet': ALFNet,
+    'ALFTemporal': ALFTemporal,
     'MoGERNN': MoGERNN,
     'STFiT': STFiT,
     'STGCN': STGCN,
@@ -11,7 +14,6 @@ model_dict = {
     'STID': STID,
     'PatchSTG': PatchSTG,
     'RoleFusion': RoleFusion,
-    'LifecycleMoGERNN': LifecycleMoGERNN,
     'SLPF': SLPF,
     'STBP': STBP,
     'MCPST_FSL': MCPST_FSL,

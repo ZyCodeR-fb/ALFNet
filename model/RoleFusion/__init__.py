@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from args import load_args_from_config
 from lib.utils import load_project_adjacency, resolve_known_unknown_nodes
 from model.RoleFusion.recovery import GraphInputRecoveryAdapter
-from model.STBP.stbp import STBP_Model
+from model.comparison_model.STBP.stbp import STBP_Model
 from utils.model_output import unpack_model_output
 
 
@@ -702,6 +702,8 @@ class GraphSpectralOutputRefiner(nn.Module):
 
 
 def _resolve_model_module_name(model_name):
+    if model_name in {"ALFGraph", "ALFNet", "ALFTemporal"}:
+        return f"{model_name}.{model_name}"
     if model_name == "GWNET":
         return "GWNet"
     return model_name

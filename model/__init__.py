@@ -1,2 +1,21 @@
-from . import FCLSTM, HA, LifecycleMoGERNN, MCPST_FSL, MoGERNN, PatchSTG, RoleFusion, SLPF, STBP, STFiT, STGCN, STGODE, STID
-from . import GWNet as GWNET
+import importlib as _importlib
+
+ALFGraph = _importlib.import_module("model.ALFGraph.ALFGraph")
+ALFNet = _importlib.import_module("model.ALFNet.ALFNet")
+ALFTemporal = _importlib.import_module("model.ALFTemporal.ALFTemporal")
+
+from . import RoleFusion
+from .comparison_model import (
+    FCLSTM,
+    GWNet as GWNET,
+    HA,
+    MCPST_FSL,
+    MoGERNN,
+    PatchSTG,
+    SLPF,
+    STBP,
+    STFiT,
+    STGCN,
+    STGODE,
+    STID,
+)

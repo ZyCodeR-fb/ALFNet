@@ -1,0 +1,67 @@
+runtime:
+  model: STFiT
+  model_variant: stfit_alc
+  model_recipe: stfit_full
+  mode: train
+  save_model: true
+dataset:
+  dloader_name: METRLA
+  data_path: ./data/METR-LA/raw_data.pkl
+  unknown_nodes_path: ./data/METR-LA/unknown_nodes.npy
+  input_len: 12
+  pred_len: 12
+  look_back: 0
+  slide_step: 12
+  input_features: v
+  target_features: v
+  freq: min
+training:
+  device: cuda:0
+  seed: 32
+  max_epoch: 100
+  patience: 10
+  stop_based: val_mask
+  batch_size: 16
+  num_workers: 8
+  loss: mse
+  optimizer: adam
+  scheduler: None
+  scheduler_patience: 1
+  lr: 0.002
+  weight_decay: 0.0001
+  d_model: 64
+async_test:
+  async_adaptor: base
+  async_num_events: 4
+  async_commissioning_k: 12
+  async_event_seed: 0
+family:
+  model:
+    hidden_channels: 64
+    kernel_size: 3
+    K: 3
+    normalization: sym
+    bias: true
+  recipe:
+    graph_learning: true
+    dynamic_graph: true
+    dynamic_mix: true
+    aug_node: true
+    sim_loss: true
+    fst_loss: true
+    is_vae: false
+    anchor_lambda: 0.5
+    sparse_threshold: 0.9
+    gumbel_softmax: true
+    gumbel_tau: 1.0
+    vae_loss_weight: 2.0
+lifecycle:
+  train_for_async_lifecycle: true
+  lifecycle_role_features: false
+  lifecycle_history_age_feature: false
+  lifecycle_event_sampling: mixed
+  lifecycle_training_strategy: round3_event_only
+  lifecycle_aas_loss_weight: 1.0
+  lifecycle_nas_loss_weight: 1.0
+  lifecycle_vs_loss_weight: 1.0
+  lifecycle_fs_loss_weight: 1.0

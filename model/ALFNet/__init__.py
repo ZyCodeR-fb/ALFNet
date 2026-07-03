@@ -1,0 +1,2 @@
+from .ALFNet import Model
+
