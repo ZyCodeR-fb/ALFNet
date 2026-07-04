@@ -4,17 +4,27 @@ Metric convention: lower is better. `RoleMacro` is the mean of `VS/AAS/NAS/FS` M
 
 ## Current Selection
 
-Current final model: `rf_sub_sd`.
+Current final model: `ALFNet/rf_alf_sd`.
 
-Reproducibility entry after model-name isolation: `configs/ALFNet/rf_alf_sd.yaml`. It keeps the same final structure and hyperparameters as `rf_sub_sd`, but loads the frozen paper-facing expert copies `ALFGraph` and `ALFTemporal` instead of the mutable baseline names `MoGERNN` and `PatchSTG`. Use this entry for future clean-code reruns once `MoGERNN` and `PatchSTG` are restored for original-baseline comparison.
+Reproducibility entry: `configs/ALFNet/rf_alf_sd.yaml`. It keeps the final subtractive structure and loads the paper-facing expert copies `ALFGraph` and `ALFTemporal` instead of the baseline names `MoGERNN` and `PatchSTG`.
 
-Rationale: among the subtractive experiments, `rf_sub_sd` gives the best RoleMacro MAPE and keeps the model story simple: MoGE expert slimming plus residual-delta decoder. It is also slightly better than the previous final `rf_s_plp2grintftop065r003vr` on RoleMacro.
+Rationale: in the latest fair async-lifecycle rerun, `ALFNet/rf_alf_sd` achieves the best RoleMacro MAPE among all compared models while keeping the final method fixed and reproducible.
 
-| Model | VS MAPE | AAS MAPE | NAS MAPE | FS MAPE | RoleMacro MAPE |
-|---|---:|---:|---:|---:|---:|
-| MoGERNN baseline | 15.6900 | 10.5900 | 9.8300 | 13.2600 | 12.3400 |
-| Previous final `rf_s_plp2grintftop065r003vr` | 15.9901 | 9.1792 | 10.1130 | 9.9785 | 11.3152 |
-| Final subtractive `rf_sub_sd` | 15.7572 | 9.2546 | 10.1615 | 9.9384 | 11.2779 |
+| Model | VS MAPE | AAS MAPE | NAS MAPE | FS MAPE | RoleMacro MAPE | AvailabilityMacro MAPE |
+|---|---:|---:|---:|---:|---:|---:|
+| MoGERNN | 16.1936 | 10.7584 | 10.3674 | 13.3324 | 12.6629 | 13.1329 |
+| PatchSTG | 18.9494 | 9.7702 | 12.2808 | 11.1202 | 13.0302 | 12.9066 |
+| MCPST-FSL | 20.5510 | 11.6121 | 10.3523 | 17.2948 | 14.9526 | 15.5645 |
+| STGODE | 18.1941 | 12.5081 | 11.0029 | 18.3536 | 15.0147 | 15.6567 |
+| STID | 26.2253 | 10.3439 | 11.3681 | 18.8221 | 16.6899 | 16.5683 |
+| STGCN | 21.8276 | 13.4656 | 13.1794 | 19.3856 | 16.9645 | 18.5237 |
+| STBP | 32.9664 | 10.7639 | 15.7531 | 13.7169 | 18.3001 | 17.6048 |
+| SLPF | 28.7382 | 11.6053 | 22.7713 | 11.7983 | 18.7283 | 18.7832 |
+| STFiT | 25.6467 | 12.8769 | 10.9427 | 26.9178 | 19.0960 | 20.3511 |
+| FCLSTM | 28.2361 | 12.6307 | 11.0028 | 31.1963 | 20.7665 | 21.8237 |
+| GWNET | 19.8382 | 12.0414 | 12.1132 | 15.5388 | 14.8829 | 15.3844 |
+| HA | 28.2764 | 14.8849 | 12.6929 | 31.2096 | 21.7659 | 22.8078 |
+| ALFNet (ours) | 15.6285 | 9.2521 | 10.0330 | 9.9205 | 11.2085 | 11.5066 |
 
 ## Subtractive Ablation Results
 
@@ -30,28 +40,86 @@ Rationale: among the subtractive experiments, `rf_sub_sd` gives the best RoleMac
 
 ## Final Six-Sensor Metrics
 
-MoGERNN six-sensor baseline is not available in the current local records. Do not claim improvement over MoGERNN on the six-sensor table until MoGERNN is re-tested with the updated async output or its `async_lifecycle_summary.json` is provided.
-
-| Sensor | Model | MAPE | MAE | RMSE |
+| Sensor State | Models | MAPE | MAE | RMSE |
 |---|---|---:|---:|---:|
-| Cold-start | MoGERNN baseline | TBD | TBD | TBD |
-| Cold-start | Previous final `rf_s_plp2grintftop065r003vr` | 15.8776 | 6.1194 | 9.5369 |
-| Cold-start | Final `rf_sub_sd` | 15.6434 | 6.0364 | 9.3561 |
-| Warm-up | MoGERNN baseline | TBD | TBD | TBD |
-| Warm-up | Previous final `rf_s_plp2grintftop065r003vr` | 11.3577 | 4.0602 | 6.9900 |
-| Warm-up | Final `rf_sub_sd` | 12.3497 | 4.2674 | 7.4375 |
-| Adapted | MoGERNN baseline | TBD | TBD | TBD |
-| Adapted | Previous final `rf_s_plp2grintftop065r003vr` | 10.0339 | 3.7155 | 6.4025 |
-| Adapted | Final `rf_sub_sd` | 10.0554 | 3.8091 | 6.4113 |
-| Degrading | MoGERNN baseline | TBD | TBD | TBD |
-| Degrading | Previous final `rf_s_plp2grintftop065r003vr` | 12.4378 | 4.2701 | 8.2717 |
-| Degrading | Final `rf_sub_sd` | 11.6623 | 3.9446 | 7.4375 |
-| Outage | MoGERNN baseline | TBD | TBD | TBD |
-| Outage | Previous final `rf_s_plp2grintftop065r003vr` | 10.0186 | 3.5367 | 6.8663 |
-| Outage | Final `rf_sub_sd` | 10.0030 | 3.5022 | 6.7243 |
-| Steady | MoGERNN baseline | TBD | TBD | TBD |
-| Steady | Previous final `rf_s_plp2grintftop065r003vr` | 9.0801 | 3.2874 | 6.1898 |
-| Steady | Final `rf_sub_sd` | 9.1516 | 3.2884 | 6.1507 |
+| Cold-start | MoGERNN | 16.0564 | 6.4608 | 9.9416 |
+|  | PatchSTG | 18.7481 | 7.1286 | 11.0736 |
+|  | MCPST-FSL | 20.3519 | 7.9125 | 11.8637 |
+|  | STGODE | 18.0159 | 6.6408 | 10.0260 |
+|  | STID | 26.0818 | 9.9169 | 13.2962 |
+|  | STGCN | 21.6616 | 7.7071 | 11.5875 |
+|  | STBP | 32.8486 | 13.8470 | 15.4510 |
+|  | SLPF | 28.4993 | 10.0148 | 14.0990 |
+|  | STFiT | 25.4052 | 9.3925 | 12.3507 |
+|  | FCLSTM | 28.0360 | 9.4019 | 13.1081 |
+|  | GWNET | 19.6966 | 7.8963 | 11.5212 |
+|  | HA | 28.0774 | 9.4503 | 13.1173 |
+|  | ALFNet (ours) | 15.5032 | 5.9865 | 9.2806 |
+| Warm-up | MoGERNN | 10.3680 | 3.8482 | 6.2759 |
+|  | PatchSTG | 13.5171 | 5.5980 | 8.0032 |
+|  | MCPST-FSL | 12.6832 | 4.3462 | 8.0488 |
+|  | STGODE | 13.1691 | 4.4824 | 8.4414 |
+|  | STID | 13.1975 | 4.5364 | 8.4576 |
+|  | STGCN | 15.6051 | 4.9033 | 9.1522 |
+|  | STBP | 17.0116 | 6.2717 | 9.2424 |
+|  | SLPF | 26.0099 | 9.2037 | 12.9892 |
+|  | STFiT | 13.6571 | 4.6100 | 8.7173 |
+|  | FCLSTM | 13.4508 | 4.4662 | 8.6369 |
+|  | GWNET | 13.0763 | 5.3812 | 8.7546 |
+|  | HA | 15.4302 | 5.7126 | 10.5926 |
+|  | ALFNet (ours) | 12.6511 | 4.2827 | 7.5711 |
+| Adapted | MoGERNN | 10.3851 | 4.0796 | 6.9100 |
+|  | PatchSTG | 12.2885 | 5.1180 | 7.7253 |
+|  | MCPST-FSL | 10.2466 | 3.7599 | 6.7422 |
+|  | STGODE | 10.9109 | 3.9293 | 6.9245 |
+|  | STID | 11.3500 | 4.2796 | 7.2902 |
+|  | STGCN | 13.1629 | 4.2416 | 7.6535 |
+|  | STBP | 15.7255 | 6.0096 | 8.2698 |
+|  | SLPF | 22.7530 | 8.1939 | 11.3537 |
+|  | STFiT | 10.8224 | 3.9338 | 7.0148 |
+|  | FCLSTM | 10.8733 | 3.8432 | 6.9236 |
+|  | GWNET | 12.0218 | 5.0390 | 8.1584 |
+|  | HA | 12.5015 | 4.8943 | 9.2632 |
+|  | ALFNet (ours) | 9.9011 | 3.7028 | 6.3200 |
+| Degrading | MoGERNN | 18.3006 | 4.9596 | 8.2645 |
+|  | PatchSTG | 12.0316 | 4.3157 | 7.6741 |
+|  | MCPST-FSL | 21.5692 | 6.1882 | 9.9529 |
+|  | STGODE | 21.2970 | 6.7331 | 9.7622 |
+|  | STID | 19.5866 | 4.9906 | 9.0671 |
+|  | STGCN | 28.2235 | 8.2992 | 12.3147 |
+|  | STBP | 15.7398 | 5.1740 | 9.5746 |
+|  | SLPF | 12.0418 | 4.3091 | 7.0822 |
+|  | STFiT | 33.0267 | 9.3378 | 13.1958 |
+|  | FCLSTM | 35.2969 | 8.8610 | 13.5253 |
+|  | GWNET | 20.2114 | 7.2103 | 10.2253 |
+|  | HA | 35.2838 | 8.8851 | 13.5134 |
+|  | ALFNet (ours) | 11.8737 | 4.0405 | 7.6093 |
+| Outage | MoGERNN | 13.0339 | 4.8172 | 7.9816 |
+|  | PatchSTG | 11.1961 | 4.0919 | 7.1189 |
+|  | MCPST-FSL | 17.0617 | 6.1183 | 9.5830 |
+|  | STGODE | 18.1911 | 6.6032 | 9.5948 |
+|  | STID | 18.9664 | 6.2775 | 10.4050 |
+|  | STGCN | 19.1665 | 7.4887 | 10.8666 |
+|  | STBP | 13.6574 | 4.7196 | 8.5462 |
+|  | SLPF | 11.9192 | 4.2485 | 7.0909 |
+|  | STFiT | 26.4708 | 9.4499 | 12.4520 |
+|  | FCLSTM | 30.8057 | 10.3165 | 14.0596 |
+|  | GWNET | 15.3577 | 6.5882 | 9.5129 |
+|  | HA | 30.8223 | 10.3529 | 14.0567 |
+|  | ALFNet (ours) | 9.9623 | 3.4878 | 6.6911 |
+| Steady | MoGERNN | 10.6537 | 3.7855 | 6.7324 |
+|  | PatchSTG | 9.6582 | 3.6817 | 6.3541 |
+|  | MCPST-FSL | 11.4746 | 3.9219 | 7.1014 |
+|  | STGODE | 12.3561 | 4.0907 | 7.2921 |
+|  | STID | 10.2277 | 3.6089 | 6.6132 |
+|  | STGCN | 13.3227 | 4.3515 | 7.6562 |
+|  | STBP | 10.6457 | 3.7593 | 6.6808 |
+|  | SLPF | 11.4757 | 4.2732 | 7.0584 |
+|  | STFiT | 12.7241 | 4.1780 | 7.5148 |
+|  | FCLSTM | 12.4792 | 4.1117 | 7.5333 |
+|  | GWNET | 11.9427 | 5.0827 | 8.2843 |
+|  | HA | 14.7315 | 5.3717 | 10.1870 |
+|  | ALFNet (ours) | 9.1483 | 3.2783 | 6.1551 |
 
 ## Best Subtractive Run By Sensor Metric
 
@@ -65,10 +133,6 @@ This table is diagnostic only. It is not a single deployable model.
 | Degrading | 11.6623 | `rf_sub_sd` | 3.9446 | `rf_sub_sd` | 7.4375 | `rf_sub_sd` |
 | Outage | 10.0030 | `rf_sub_sd` | 3.5022 | `rf_sub_sd` | 6.7230 | `rf_sub_delta` |
 | Steady | 9.1398 | `rf_sub_slim` | 3.2621 | `rf_sub_slim` | 6.1507 | `rf_sub_sd` |
-
-## Notes For Next Baseline Table
-
-To complete the paper-style table, re-test original MoGERNN with the same async lifecycle setting and collect the six sensor metrics. The target comparison table should use the six short sensor names above and report `MAPE/MAE/RMSE` for each model.
 
 ## Fair Async Lifecycle Baseline Protocol
 

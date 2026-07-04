@@ -3,7 +3,10 @@ import torch.nn as nn
 from einops import rearrange, repeat
 from timm.models.vision_transformer import Attention, Mlp
 from layers.source_duet import DUETPatchRouter
+from layers.source_pattern_bank import PatternBankPatchMixer
+from layers.source_set_transformer import SetTransformerPatchMixer
 from layers.source_timefilter import TimeFilterPatchMixer
+from layers.source_token_learner import TokenLearnerPatchMixer
 
 
 class PatchRevIN(nn.Module):
@@ -280,6 +283,19 @@ class WindowAttBlock(nn.Module):
         duet_moving_avg=3,
         duet_residual_scale=0.10,
         duet_noisy_gating=True,
+        use_token_learner_patch_mixer=False,
+        token_learner_num_tokens=8,
+        token_learner_bottleneck_dim=64,
+        token_learner_dropout=0.0,
+        token_learner_residual_scale=0.05,
+        use_set_transformer_patch_mixer=False,
+        set_transformer_num_inds=8,
+        set_transformer_num_heads=2,
+        set_transformer_ln=True,
+        set_transformer_residual_scale=0.05,
+        use_pattern_bank_patch_mixer=False,
+        pattern_bank_num_patterns=16,
+        pattern_bank_residual_scale=0.05,
     ):
         super().__init__()
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
@@ -292,6 +308,9 @@ class WindowAttBlock(nn.Module):
         self.use_breadth_lepe = self.attention_type in {"biformer_lepe", "biformer_lepe_breadth", "lepe_breadth"}
         self.use_timefilter_patch_mixer = bool(use_timefilter_patch_mixer)
         self.use_duet_patch_router = bool(use_duet_patch_router)
+        self.use_token_learner_patch_mixer = bool(use_token_learner_patch_mixer)
+        self.use_set_transformer_patch_mixer = bool(use_set_transformer_patch_mixer)
+        self.use_pattern_bank_patch_mixer = bool(use_pattern_bank_patch_mixer)
         if self.use_crossformer_tsa:
             self.tsa = CrossformerTwoStageAttentionLayer(
                 seg_num=num,
@@ -329,6 +348,34 @@ class WindowAttBlock(nn.Module):
             )
         else:
             self.duet_patch_router = None
+        if self.use_token_learner_patch_mixer:
+            self.token_learner_patch_mixer = TokenLearnerPatchMixer(
+                hidden_dim=hidden_size,
+                num_tokens=token_learner_num_tokens,
+                bottleneck_dim=token_learner_bottleneck_dim,
+                dropout=token_learner_dropout,
+                residual_scale=token_learner_residual_scale,
+            )
+        else:
+            self.token_learner_patch_mixer = None
+        if self.use_set_transformer_patch_mixer:
+            self.set_transformer_patch_mixer = SetTransformerPatchMixer(
+                hidden_dim=hidden_size,
+                num_heads=set_transformer_num_heads,
+                num_inds=set_transformer_num_inds,
+                ln=set_transformer_ln,
+                residual_scale=set_transformer_residual_scale,
+            )
+        else:
+            self.set_transformer_patch_mixer = None
+        if self.use_pattern_bank_patch_mixer:
+            self.pattern_bank_patch_mixer = PatternBankPatchMixer(
+                hidden_dim=hidden_size,
+                num_patterns=pattern_bank_num_patterns,
+                residual_scale=pattern_bank_residual_scale,
+            )
+        else:
+            self.pattern_bank_patch_mixer = None
 
         self.nnorm1 = nn.LayerNorm(hidden_size)
         if self.use_breadth_lepe:
@@ -395,6 +442,12 @@ class WindowAttBlock(nn.Module):
             x = self.timefilter_patch_mixer(x)
         if self.duet_patch_router is not None:
             x = self.duet_patch_router(x)
+        if self.token_learner_patch_mixer is not None:
+            x = self.token_learner_patch_mixer(x)
+        if self.set_transformer_patch_mixer is not None:
+            x = self.set_transformer_patch_mixer(x)
+        if self.pattern_bank_patch_mixer is not None:
+            x = self.pattern_bank_patch_mixer(x)
 
         x = x.reshape(B,T,-1,D)
         if shift_size:
@@ -429,6 +482,19 @@ class PatchSTG(nn.Module):
                         duet_moving_avg=3,
                         duet_residual_scale=0.10,
                         duet_noisy_gating=True,
+                        use_token_learner_patch_mixer=False,
+                        token_learner_num_tokens=8,
+                        token_learner_bottleneck_dim=64,
+                        token_learner_dropout=0.0,
+                        token_learner_residual_scale=0.05,
+                        use_set_transformer_patch_mixer=False,
+                        set_transformer_num_inds=8,
+                        set_transformer_num_heads=2,
+                        set_transformer_ln=True,
+                        set_transformer_residual_scale=0.05,
+                        use_pattern_bank_patch_mixer=False,
+                        pattern_bank_num_patterns=16,
+                        pattern_bank_residual_scale=0.05,
                         use_staeformer_adapter=False,
                         staeformer_adapter_mode="temporal",
                         staeformer_adapter_layers=1,
@@ -499,6 +565,19 @@ class PatchSTG(nn.Module):
                 duet_moving_avg=duet_moving_avg,
                 duet_residual_scale=duet_residual_scale,
                 duet_noisy_gating=duet_noisy_gating,
+                use_token_learner_patch_mixer=use_token_learner_patch_mixer,
+                token_learner_num_tokens=token_learner_num_tokens,
+                token_learner_bottleneck_dim=token_learner_bottleneck_dim,
+                token_learner_dropout=token_learner_dropout,
+                token_learner_residual_scale=token_learner_residual_scale,
+                use_set_transformer_patch_mixer=use_set_transformer_patch_mixer,
+                set_transformer_num_inds=set_transformer_num_inds,
+                set_transformer_num_heads=set_transformer_num_heads,
+                set_transformer_ln=set_transformer_ln,
+                set_transformer_residual_scale=set_transformer_residual_scale,
+                use_pattern_bank_patch_mixer=use_pattern_bank_patch_mixer,
+                pattern_bank_num_patterns=pattern_bank_num_patterns,
+                pattern_bank_residual_scale=pattern_bank_residual_scale,
             )
             for i in range(layers)
         ])

@@ -50,15 +50,21 @@ def _load_module(module_name, relative_path):
 
 
 _install_timm_stub()
-_mogernn = _load_module("mogernn_for_core_variant_test", "model/MoGERNN.py")
-_patchstg = _load_module("patchstg_for_core_variant_test", "model/PatchSTG/patchstg.py")
+_mogernn = _load_module("alfgraph_for_core_variant_test", "model/ALFGraph/ALFGraph.py")
+_patchstg = _load_module("alftemporal_for_core_variant_test", "model/ALFTemporal/patchstg.py")
 _source_grin = _load_module("source_grin_for_core_variant_test", "layers/source_grin.py")
 _source_graph_unet = _load_module("source_graph_unet_for_core_variant_test", "layers/source_graph_unet.py")
+_source_token_learner = _load_module("source_token_learner_for_core_variant_test", "layers/source_token_learner.py")
+_source_set_transformer = _load_module("source_set_transformer_for_core_variant_test", "layers/source_set_transformer.py")
+_source_pattern_bank = _load_module("source_pattern_bank_for_core_variant_test", "layers/source_pattern_bank.py")
 _build_recurrent_cell = _mogernn._build_recurrent_cell
 WindowAttBlock = _patchstg.WindowAttBlock
 PatchRevIN = _patchstg.PatchRevIN
 GRINInputImputer = _source_grin.GRINInputImputer
 graph_unet_parts = _source_graph_unet.graph_unet_parts
+TokenLearnerPatchMixer = _source_token_learner.TokenLearnerPatchMixer
+SetTransformerPatchMixer = _source_set_transformer.SetTransformerPatchMixer
+PatternBankPatchMixer = _source_pattern_bank.PatternBankPatchMixer
 
 
 def test_state_decay_dcrnn_cell_preserves_hidden_shape():
@@ -178,3 +184,112 @@ def test_patchstg_duet_window_block_preserves_shape():
 
     assert out.shape == x.shape
     assert torch.isfinite(out).all()
+
+
+def test_patchstg_token_learner_window_block_preserves_shape():
+    block = WindowAttBlock(
+        hidden_size=16,
+        num_heads=2,
+        num=4,
+        size=3,
+        attention_type="crossformer_tsa",
+        crossformer_router_factor=2,
+        use_token_learner_patch_mixer=True,
+        token_learner_num_tokens=4,
+        token_learner_bottleneck_dim=8,
+        token_learner_residual_scale=0.05,
+    )
+    x = torch.randn(2, 3, 12, 16)
+
+    out = block(x)
+
+    assert out.shape == x.shape
+    assert torch.isfinite(out).all()
+
+
+def test_patchstg_set_transformer_window_block_preserves_shape():
+    block = WindowAttBlock(
+        hidden_size=16,
+        num_heads=2,
+        num=4,
+        size=3,
+        attention_type="crossformer_tsa",
+        crossformer_router_factor=2,
+        use_set_transformer_patch_mixer=True,
+        set_transformer_num_inds=4,
+        set_transformer_num_heads=2,
+        set_transformer_residual_scale=0.05,
+    )
+    x = torch.randn(2, 3, 12, 16)
+
+    out = block(x)
+
+    assert out.shape == x.shape
+    assert torch.isfinite(out).all()
+
+
+def test_patchstg_pattern_bank_window_block_preserves_shape():
+    block = WindowAttBlock(
+        hidden_size=16,
+        num_heads=2,
+        num=4,
+        size=3,
+        attention_type="crossformer_tsa",
+        crossformer_router_factor=2,
+        use_pattern_bank_patch_mixer=True,
+        pattern_bank_num_patterns=6,
+        pattern_bank_residual_scale=0.05,
+    )
+    x = torch.randn(2, 3, 12, 16)
+
+    out = block(x)
+
+    assert out.shape == x.shape
+    assert torch.isfinite(out).all()
+
+
+def test_token_learner_patch_mixer_preserves_shape_and_starts_near_identity():
+    mixer = TokenLearnerPatchMixer(
+        hidden_dim=16,
+        num_tokens=4,
+        bottleneck_dim=8,
+        residual_scale=0.05,
+    )
+    x = torch.randn(2, 3, 4, 5, 16)
+
+    out = mixer(x)
+
+    assert out.shape == x.shape
+    assert torch.isfinite(out).all()
+    assert torch.allclose(out, x, atol=1e-6, rtol=1e-6)
+
+
+def test_set_transformer_patch_mixer_preserves_shape_and_starts_near_identity():
+    mixer = SetTransformerPatchMixer(
+        hidden_dim=16,
+        num_heads=2,
+        num_inds=4,
+        residual_scale=0.05,
+    )
+    x = torch.randn(2, 3, 4, 5, 16)
+
+    out = mixer(x)
+
+    assert out.shape == x.shape
+    assert torch.isfinite(out).all()
+    assert torch.allclose(out, x, atol=1e-6, rtol=1e-6)
+
+
+def test_pattern_bank_patch_mixer_preserves_shape_and_starts_near_identity():
+    mixer = PatternBankPatchMixer(
+        hidden_dim=16,
+        num_patterns=6,
+        residual_scale=0.05,
+    )
+    x = torch.randn(2, 3, 4, 5, 16)
+
+    out = mixer(x)
+
+    assert out.shape == x.shape
+    assert torch.isfinite(out).all()
+    assert torch.allclose(out, x, atol=1e-6, rtol=1e-6)
