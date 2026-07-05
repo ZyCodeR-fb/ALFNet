@@ -3,6 +3,7 @@ import sys
 import types
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -50,7 +51,21 @@ def _load_module(module_name, relative_path):
 
 
 _install_timm_stub()
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+_model_pkg = types.ModuleType("model")
+_model_pkg.__path__ = [str(ROOT / "model")]
+_alftemporal_pkg = types.ModuleType("model.ALFTemporal")
+_alftemporal_pkg.__path__ = [str(ROOT / "model/ALFTemporal")]
+_comparison_pkg = types.ModuleType("model.comparison_model")
+_family_utils = types.ModuleType("model.comparison_model.family_utils")
+_family_utils.build_patchstg_cfg = lambda configs: {}
+sys.modules.setdefault("model", _model_pkg)
+sys.modules.setdefault("model.ALFTemporal", _alftemporal_pkg)
+sys.modules.setdefault("model.comparison_model", _comparison_pkg)
+sys.modules.setdefault("model.comparison_model.family_utils", _family_utils)
 _mogernn = _load_module("alfgraph_for_core_variant_test", "model/ALFGraph/ALFGraph.py")
+_alftemporal = _load_module("model.ALFTemporal.ALFTemporal", "model/ALFTemporal/ALFTemporal.py")
 _patchstg = _load_module("alftemporal_for_core_variant_test", "model/ALFTemporal/patchstg.py")
 _source_grin = _load_module("source_grin_for_core_variant_test", "layers/source_grin.py")
 _source_graph_unet = _load_module("source_graph_unet_for_core_variant_test", "layers/source_graph_unet.py")
@@ -65,6 +80,49 @@ graph_unet_parts = _source_graph_unet.graph_unet_parts
 TokenLearnerPatchMixer = _source_token_learner.TokenLearnerPatchMixer
 SetTransformerPatchMixer = _source_set_transformer.SetTransformerPatchMixer
 PatternBankPatchMixer = _source_pattern_bank.PatternBankPatchMixer
+
+
+def test_alftemporal_new_spatial_layouts_cover_nodes_with_patch_capacity():
+    positions = np.array(
+        [
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.0, 0.1],
+            [1.0, 0.0],
+            [1.1, 0.0],
+            [1.0, 0.1],
+            [0.0, 1.0],
+            [0.1, 1.0],
+            [0.0, 1.1],
+            [1.0, 1.0],
+            [1.1, 1.0],
+            [1.0, 1.1],
+        ],
+        dtype=float,
+    )
+    adj = np.eye(positions.shape[0], dtype=float)
+    for start in (0, 3, 6, 9):
+        for i in range(start, start + 3):
+            for j in range(start, start + 3):
+                if i != j:
+                    adj[i, j] = 1.0
+
+    for layout in ("morton", "fps_anchor", "heavy_edge"):
+        ori_idx, reo_idx, all_idx, part_count = _alftemporal._build_spatial_layout(
+            positions,
+            adj,
+            recur_times=2,
+            spa_patchsize=4,
+            layout_type=layout,
+        )
+
+        assert part_count == 4
+        assert sorted(ori_idx) == list(range(positions.shape[0]))
+        assert len(all_idx) == part_count * 4
+        assert len(reo_idx) == positions.shape[0]
+        assert min(all_idx) >= 0
+        assert max(all_idx) < positions.shape[0]
+        assert max(reo_idx) < len(all_idx)
 
 
 def test_state_decay_dcrnn_cell_preserves_hidden_shape():

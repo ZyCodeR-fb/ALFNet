@@ -62,6 +62,36 @@ def _split_order_to_parts(order, part_count):
     return [np.sort(part.astype(int)) for part in np.array_split(np.asarray(order, dtype=int), part_count) if part.size > 0]
 
 
+def _normalize_positions(positions):
+    coords = np.asarray(positions, dtype=float)
+    if coords.ndim != 2:
+        raise ValueError("PatchSTG spatial layout requires 2D positions")
+    if coords.shape[0] == 2 and coords.shape[1] != 2:
+        coords = coords.T
+    min_v = coords.min(axis=0, keepdims=True)
+    span = coords.max(axis=0, keepdims=True) - min_v
+    span = np.where(span > 0, span, 1.0)
+    return (coords - min_v) / span
+
+
+def _morton_codes(coords, bits=16):
+    quantized = np.clip(coords, 0.0, 1.0)
+    quantized = np.rint(quantized * ((1 << bits) - 1)).astype(np.uint64)
+    codes = np.zeros(quantized.shape[0], dtype=np.uint64)
+    for bit in range(bits):
+        codes |= ((quantized[:, 0] >> bit) & 1) << (2 * bit)
+        if quantized.shape[1] > 1:
+            codes |= ((quantized[:, 1] >> bit) & 1) << (2 * bit + 1)
+    return codes
+
+
+def _morton_spatial_parts(positions, part_count):
+    coords = _normalize_positions(positions)
+    codes = _morton_codes(coords[:, :2])
+    order = np.lexsort((np.arange(coords.shape[0]), codes))
+    return _split_order_to_parts(order, part_count)
+
+
 def _spectral_graph_parts(adj, part_count):
     adj_sym = (adj + adj.T) / 2.0
     degree = adj_sym.sum(axis=1)
@@ -112,17 +142,77 @@ def _topology_balanced_parts(adj, part_count):
     return parts
 
 
+def _heavy_edge_parts(adj, part_count):
+    adj_sym = (np.asarray(adj, dtype=float) + np.asarray(adj, dtype=float).T) / 2.0
+    degree = adj_sym.sum(axis=1)
+    matched = np.zeros(adj_sym.shape[0], dtype=bool)
+    groups = []
+    for node in np.argsort(-degree):
+        node = int(node)
+        if matched[node]:
+            continue
+        matched[node] = True
+        candidates = np.where((adj_sym[node] > 0) & (~matched))[0]
+        if candidates.size > 0:
+            partner = int(candidates[np.argmax(adj_sym[node, candidates])])
+            matched[partner] = True
+            groups.append(np.asarray([node, partner], dtype=int))
+        else:
+            groups.append(np.asarray([node], dtype=int))
+    group_score = [degree[group].sum() for group in groups]
+    order = np.concatenate([np.sort(groups[idx]) for idx in np.argsort(-np.asarray(group_score))])
+    return _split_order_to_parts(order, part_count)
+
+
+def _fps_anchor_parts(positions, part_count):
+    coords = _normalize_positions(positions)
+    node_count = coords.shape[0]
+    if node_count == 0:
+        return []
+    anchor_count = min(int(part_count), node_count)
+    center = coords.mean(axis=0, keepdims=True)
+    first = int(np.argmin(np.sum((coords - center) ** 2, axis=1)))
+    anchors = [first]
+    min_dist = np.sum((coords - coords[first]) ** 2, axis=1)
+    for _ in range(1, anchor_count):
+        next_anchor = int(np.argmax(min_dist))
+        anchors.append(next_anchor)
+        min_dist = np.minimum(min_dist, np.sum((coords - coords[next_anchor]) ** 2, axis=1))
+    anchors = np.asarray(anchors, dtype=int)
+    dist_to_anchors = np.sum((coords[:, None, :] - coords[anchors][None, :, :]) ** 2, axis=2)
+    assignment = np.argmin(dist_to_anchors, axis=1)
+    anchor_codes = _morton_codes(coords[anchors, :2])
+    ordered_anchor_slots = np.lexsort((anchors, anchor_codes))
+    ordered_nodes = []
+    for slot in ordered_anchor_slots:
+        members = np.where(assignment == slot)[0]
+        if members.size == 0:
+            continue
+        local_dist = dist_to_anchors[members, slot]
+        ordered_nodes.extend(members[np.lexsort((members, local_dist))].tolist())
+    if len(ordered_nodes) < node_count:
+        missing = [idx for idx in range(node_count) if idx not in set(ordered_nodes)]
+        ordered_nodes.extend(missing)
+    return _split_order_to_parts(np.asarray(ordered_nodes, dtype=int), part_count)
+
+
 def _build_spatial_layout(positions, adj, recur_times, spa_patchsize, layout_type="kd_tree"):
     layout_type = str(layout_type).lower()
     part_count = 2 ** int(recur_times)
     if layout_type in {"kd_tree", "kdtree", "position"}:
         parts_idx = _kd_tree(positions.T, recur_times, 0)
+    elif layout_type in {"morton", "z_order", "zorder", "space_filling"}:
+        parts_idx = _morton_spatial_parts(positions, part_count)
     elif layout_type in {"spectral", "graph_spectral"}:
         parts_idx = _spectral_graph_parts(adj, part_count)
     elif layout_type in {"adjacency", "adjacency_walk", "graph_walk"}:
         parts_idx = _adjacency_walk_parts(adj, part_count)
     elif layout_type in {"topology_balanced", "degree_balanced", "degree"}:
         parts_idx = _topology_balanced_parts(adj, part_count)
+    elif layout_type in {"heavy_edge", "heavy_edge_matching", "hem", "graclus_like"}:
+        parts_idx = _heavy_edge_parts(adj, part_count)
+    elif layout_type in {"fps_anchor", "fps", "pointnet2_fps", "anchor"}:
+        parts_idx = _fps_anchor_parts(positions, part_count)
     elif layout_type in {"graph_unet", "gunet", "gpool"}:
         parts_idx = graph_unet_parts(adj, recur_times)
     else:

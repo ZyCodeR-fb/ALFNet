@@ -38,6 +38,22 @@ Rationale: in the latest fair async-lifecycle rerun, `ALFNet/rf_alf_sd` achieves
 | `rf_sub_tp` | topology layout + pruning | 16.0729 | 9.7680 | 9.9997 | 11.7463 | 11.8967 | 12.1962 |
 | `rf_sub_all` | all four subtractive changes | 15.8139 | 9.5782 | 11.1609 | 11.8740 | 12.1067 | 12.4810 |
 
+## Source-Inspired Replacement Ablation Results
+
+These runs test lightweight replacements inspired by external backbones and local reference code. They are diagnostic and are not selected as the final model because none improves over `ALFNet/rf_alf_sd`.
+
+| Variant | Main Change | Params | VS MAPE | AAS MAPE | NAS MAPE | FS MAPE | RoleMacro MAPE | AvailabilityMacro MAPE |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `rf_x_pb` | spectral layout + pattern-bank patch mixer | 4,831,519 | 16.1345 | 9.5442 | 10.2196 | 10.7776 | 11.6690 | 11.6568 |
+| `rf_x_agset` | adaptive graph support + Set Transformer patch mixer | 5,351,631 | 16.6403 | 9.5561 | 10.1143 | 10.5995 | 11.7275 | 11.9293 |
+| `rf_x_set` | spectral layout + Set Transformer patch mixer | 5,348,319 | 16.8075 | 9.5186 | 10.8399 | 10.6202 | 11.9466 | 12.0161 |
+| `rf_x_tl` | spectral layout + TokenLearner patch mixer | 4,744,839 | 16.7268 | 9.6556 | 10.9591 | 10.5320 | 11.9684 | 12.2248 |
+| `rf_x_ag` | adaptive graph support | 4,850,111 | 17.8358 | 9.2417 | 11.2418 | 10.1400 | 12.1148 | 12.1349 |
+| `rf_x_agpb` | adaptive graph support + pattern-bank patch mixer | 4,834,831 | 16.1423 | 9.4651 | 12.3081 | 10.6888 | 12.1511 | 13.0762 |
+| `rf_x_agtl` | adaptive graph support + TokenLearner patch mixer | 4,748,151 | 18.0456 | 9.9333 | 11.3921 | 12.4708 | 12.9604 | 14.3717 |
+
+Diagnostic summary: `rf_x_pb` is the best source-inspired variant by RoleMacro and gives the cleanest pattern-bank story, but it is still worse than the selected final model. Adaptive graph support is unstable in combination runs: it improves some failed-sensor states in isolation but hurts cold-start/NAS and makes the graph expert error much larger for AAS/FS.
+
 ## Final Six-Sensor Metrics
 
 | Sensor State | Models | MAPE | MAE | RMSE |
