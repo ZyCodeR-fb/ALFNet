@@ -287,11 +287,12 @@ def _empty_routing_diag_buffers():
 
 
 def _append_routing_diagnostics(buffers, output_meta, roles, fused_pred, target, dataset):
+    window_summary = {}
     routing = output_meta.get("oracle_routing") or output_meta.get("route_routing")
     if not routing:
-        return
+        return window_summary
     if not all(key in routing for key in ["alpha", "y_graph", "y_patch"]):
-        return
+        return window_summary
     alpha = routing["alpha"].detach()
     graph_pred = _inverse_transform_with_grad(dataset, routing["y_graph"].detach())
     patch_pred = _inverse_transform_with_grad(dataset, routing["y_patch"].detach())
@@ -311,6 +312,12 @@ def _append_routing_diagnostics(buffers, output_meta, roles, fused_pred, target,
         graph_win = (graph_err <= patch_err).to(dtype=graph_part.dtype)
         gate_graph = (alpha_part >= 0.5).to(dtype=graph_part.dtype)
         gate_match = (gate_graph == graph_win).to(dtype=graph_part.dtype)
+        alpha_valid = alpha_part[valid_mask]
+        window_summary[role_name] = {
+            "alpha_mean": float(alpha_valid.mean().item()),
+            "graph_weight": float(alpha_valid.mean().item()),
+            "patch_residual_weight": float(1.0 - alpha_valid.mean().item()),
+        }
         buffers[role_name]["alpha"].append(alpha_part[valid_mask].detach().cpu())
         buffers[role_name]["graph_win"].append(graph_win[valid_mask].detach().cpu())
         buffers[role_name]["gate_match"].append(gate_match[valid_mask].detach().cpu())
@@ -318,6 +325,7 @@ def _append_routing_diagnostics(buffers, output_meta, roles, fused_pred, target,
         buffers[role_name]["patch_pred"].append(patch_part.reshape(-1, patch_part.shape[-1]).detach().cpu())
         buffers[role_name]["fused_pred"].append(fused_part.reshape(-1, fused_part.shape[-1]).detach().cpu())
         buffers[role_name]["true"].append(target_part.reshape(-1, target_part.shape[-1]).detach().cpu())
+    return window_summary
 
 
 def _summarize_routing_diagnostics(buffers):
@@ -951,7 +959,7 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
                 "AAS": event["aas_nodes"],
                 "VS": event["vs_nodes"],
             }
-            _append_routing_diagnostics(
+            window_routing = _append_routing_diagnostics(
                 routing_diag_buffers,
                 prediction_bundle.get("output_meta", {}),
                 roles,
@@ -967,10 +975,12 @@ def async_lifecycle_inference(model, data_loader, args, criterions):
                 role_buffers[event["event_id"]][role_name]["true"].append(target_part)
                 metrics = _compute_metrics(pred_part, target_part)
                 if metrics is not None:
+                    routing_metrics = window_routing.get(role_name, {})
                     role_buffers[event["event_id"]][role_name]["window_metrics"].append(
                         {
                             "window_index": batch_ix,
                             "window_offset": batch_ix - event["evaluation_window_range"][0],
+                            **routing_metrics,
                             **metrics,
                         }
                     )

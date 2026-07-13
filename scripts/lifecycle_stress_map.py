@@ -8,7 +8,8 @@ from pathlib import Path
 
 
 ROLE_ORDER = ["VS", "AAS", "NAS", "FS"]
-DEFAULT_AGE_BINS = [0, 3, 6, 12, 24, 48, 96, math.inf]
+SENSOR_STATES = ["Cold-start", "Warm-up", "Adapted", "Degrading", "Outage", "Steady"]
+DEFAULT_AGE_BINS = [0, 1, 4, 7, 10, 13, math.inf]
 DEFAULT_VISIBILITY_BINS = [0.0, 0.25, 0.5, 0.75, 1.0]
 
 
@@ -70,7 +71,13 @@ def _role_visibility(role, event, window_index, input_len, slide_step):
     return visible / float(input_len)
 
 
-def _routing_weight(results, role):
+def _routing_weight(results, role, window_metric=None):
+    window_metric = window_metric or {}
+    alpha = window_metric.get("alpha_mean", window_metric.get("graph_weight"))
+    if alpha is not None:
+        graph_weight = float(alpha)
+        patch_weight = window_metric.get("patch_residual_weight")
+        return graph_weight, float(1.0 - graph_weight if patch_weight is None else patch_weight)
     routing = results.get("routing_diagnostics") or {}
     role_diag = routing.get(role) or {}
     alpha = role_diag.get("alpha_mean")
@@ -93,11 +100,13 @@ def build_stress_rows(results, model_name):
         evaluation_start = int(event.get("evaluation_window_range", [0, 0])[0])
         for role in ROLE_ORDER:
             role_metrics = (event_roles or {}).get(role) or {}
-            graph_weight, patch_residual_weight = _routing_weight(results, role)
             for metric in role_metrics.get("window_metrics") or []:
                 window_index = int(metric["window_index"])
                 window_offset = int(metric.get("window_offset", window_index - evaluation_start))
                 visibility = _role_visibility(role, event, window_index, input_len, slide_step)
+                graph_weight, patch_residual_weight = _routing_weight(results, role, metric)
+                lifecycle_age = float(max(0, window_offset))
+                history_steps = float(round(visibility * input_len))
                 rows.append(
                     {
                         "model": model_name,
@@ -106,8 +115,10 @@ def build_stress_rows(results, model_name):
                         "sensor_state": _role_sensor_state(role, window_offset, event),
                         "window_index": window_index,
                         "window_offset": window_offset,
-                        "event_age": float(max(0, window_offset)),
-                        "history_age": float(visibility),
+                        "lifecycle_age": lifecycle_age,
+                        "event_age": lifecycle_age,
+                        "history_steps": history_steps,
+                        "history_age": history_steps,
                         "visibility": float(visibility),
                         "mape": float(metric["MAPE"]),
                         "mae": float(metric["MAE"]),
@@ -151,11 +162,21 @@ def _bin_index(value, bins):
     return None
 
 
-def _bin_label(bins, index):
+def _age_bin_label(bins, index):
     lo, hi = bins[index], bins[index + 1]
     if math.isinf(hi):
         return f"{lo:g}+"
+    if float(lo).is_integer() and float(hi).is_integer():
+        lo_int, hi_int = int(lo), int(hi)
+        if hi_int == lo_int + 1:
+            return str(lo_int)
+        return f"{lo_int}-{hi_int - 1}"
     return f"{lo:g}-{hi:g}"
+
+
+def _visibility_bin_label(bins, index):
+    lo, hi = bins[index], bins[index + 1]
+    return f"{100 * lo:g}-{100 * hi:g}%"
 
 
 def _mean(values):
@@ -165,9 +186,9 @@ def _mean(values):
     return sum(clean) / len(clean)
 
 
-def aggregate_grid(aligned_rows, age_bins, visibility_bins, x_axis="event_age"):
-    if x_axis not in {"event_age", "history_age"}:
-        raise ValueError("x_axis must be 'event_age' or 'history_age'")
+def aggregate_grid(aligned_rows, age_bins, visibility_bins, x_axis="lifecycle_age"):
+    if x_axis not in {"lifecycle_age", "event_age", "history_steps", "history_age"}:
+        raise ValueError("x_axis must be lifecycle_age/event_age or history_steps/history_age")
     grouped = defaultdict(list)
     for row in aligned_rows:
         age_index = _bin_index(float(row[x_axis]), age_bins)
@@ -178,16 +199,21 @@ def aggregate_grid(aligned_rows, age_bins, visibility_bins, x_axis="event_age"):
 
     cells = []
     for (age_index, visibility_index), rows in sorted(grouped.items()):
+        mape = _mean([row["mape"] for row in rows])
+        baseline_mape = _mean([row["baseline_mape"] for row in rows])
+        improvement_pct = None
+        if mape is not None and baseline_mape not in {None, 0.0}:
+            improvement_pct = (baseline_mape - mape) / baseline_mape * 100.0
         cells.append(
             {
-                "age_bin": _bin_label(age_bins, age_index),
-                "visibility_bin": _bin_label(visibility_bins, visibility_index),
+                "age_bin": _age_bin_label(age_bins, age_index),
+                "visibility_bin": _visibility_bin_label(visibility_bins, visibility_index),
                 "count": len(rows),
-                "mape": _mean([row["mape"] for row in rows]),
+                "mape": mape,
                 "mae": _mean([row["mae"] for row in rows]),
                 "rmse": _mean([row["rmse"] for row in rows]),
-                "baseline_mape": _mean([row["baseline_mape"] for row in rows]),
-                "improvement_pct": _mean([row["improvement_pct"] for row in rows]),
+                "baseline_mape": baseline_mape,
+                "improvement_pct": improvement_pct,
                 "graph_weight": _mean([row.get("graph_weight") for row in rows]),
                 "patch_residual_weight": _mean([row.get("patch_residual_weight") for row in rows]),
             }
@@ -208,17 +234,27 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
-def plot_heatmap(cells, age_bins, visibility_bins, value_key, output_path, title):
+def plot_heatmap(
+    cells,
+    age_bins,
+    visibility_bins,
+    value_key,
+    output_path,
+    title,
+    x_axis="lifecycle_age",
+    overlay_key="patch_residual_weight",
+):
     try:
         import matplotlib.pyplot as plt
         import numpy as np
     except ImportError:
         return False
 
-    age_labels = [_bin_label(age_bins, index) for index in range(len(age_bins) - 1)]
-    visibility_labels = [_bin_label(visibility_bins, index) for index in range(len(visibility_bins) - 1)]
+    age_labels = [_age_bin_label(age_bins, index) for index in range(len(age_bins) - 1)]
+    visibility_labels = [_visibility_bin_label(visibility_bins, index) for index in range(len(visibility_bins) - 1)]
     matrix = np.full((len(visibility_labels), len(age_labels)), np.nan, dtype=float)
-    beta_matrix = np.full_like(matrix, np.nan)
+    overlay_matrix = np.full_like(matrix, np.nan)
+    count_matrix = np.zeros_like(matrix, dtype=int)
     age_to_index = {label: index for index, label in enumerate(age_labels)}
     visibility_to_index = {label: index for index, label in enumerate(visibility_labels)}
     for cell in cells:
@@ -227,16 +263,24 @@ def plot_heatmap(cells, age_bins, visibility_bins, value_key, output_path, title
         value = cell.get(value_key)
         if value is not None:
             matrix[y, x] = float(value)
-        beta = cell.get("patch_residual_weight")
-        if beta is not None:
-            beta_matrix[y, x] = float(beta)
+        overlay = cell.get(overlay_key) if overlay_key != "none" else None
+        if overlay is not None:
+            overlay_matrix[y, x] = float(overlay)
+        count_matrix[y, x] = int(cell.get("count", 0))
 
     fig, ax = plt.subplots(figsize=(10, 5.5))
     cmap = "RdYlGn" if value_key == "improvement_pct" else "viridis_r"
-    image = ax.imshow(matrix, aspect="auto", cmap=cmap)
+    norm = None
+    if value_key == "improvement_pct":
+        finite = matrix[np.isfinite(matrix)]
+        if finite.size and finite.min() < 0.0 < finite.max():
+            from matplotlib.colors import TwoSlopeNorm
+
+            norm = TwoSlopeNorm(vmin=float(finite.min()), vcenter=0.0, vmax=float(finite.max()))
+    image = ax.imshow(matrix, aspect="auto", cmap=cmap, norm=norm, origin="lower")
     ax.set_xticks(range(len(age_labels)), age_labels, rotation=35, ha="right")
     ax.set_yticks(range(len(visibility_labels)), visibility_labels)
-    ax.set_xlabel("Event age bin" if value_key == "improvement_pct" else "Age bin")
+    ax.set_xlabel("Lifecycle age (evaluation windows since event)" if x_axis in {"lifecycle_age", "event_age"} else "Observed history steps")
     ax.set_ylabel("Visibility bin")
     ax.set_title(title)
     cbar = fig.colorbar(image, ax=ax)
@@ -246,9 +290,10 @@ def plot_heatmap(cells, age_bins, visibility_bins, value_key, output_path, title
         for x in range(matrix.shape[1]):
             if np.isnan(matrix[y, x]):
                 continue
-            text = f"{matrix[y, x]:.1f}"
-            if not np.isnan(beta_matrix[y, x]):
-                text += f"\nbeta={beta_matrix[y, x]:.2f}"
+            text = f"{matrix[y, x]:.1f}\nn={count_matrix[y, x]}"
+            if not np.isnan(overlay_matrix[y, x]):
+                overlay_name = "beta" if overlay_key == "patch_residual_weight" else "alpha"
+                text += f"\n{overlay_name}={overlay_matrix[y, x]:.2f}"
             ax.text(x, y, text, ha="center", va="center", fontsize=8, color="black")
 
     fig.tight_layout()
@@ -268,7 +313,18 @@ def main():
     parser.add_argument("--baseline-name", default="MoGERNN")
     parser.add_argument("--age-bins", default=None, help="Comma-separated event-age/history-age bin edges")
     parser.add_argument("--visibility-bins", default=None, help="Comma-separated visibility bin edges")
-    parser.add_argument("--x-axis", choices=["event_age", "history_age"], default="event_age")
+    parser.add_argument(
+        "--x-axis",
+        choices=["lifecycle_age", "event_age", "history_steps", "history_age"],
+        default="lifecycle_age",
+        help="Use lifecycle_age for the paper figure; history_steps is correlated with visibility.",
+    )
+    parser.add_argument("--sensor-state", choices=["all", *SENSOR_STATES], default="all")
+    parser.add_argument(
+        "--overlay",
+        choices=["patch_residual_weight", "graph_weight", "none"],
+        default="patch_residual_weight",
+    )
     args = parser.parse_args()
 
     age_bins = parse_bins(args.age_bins, DEFAULT_AGE_BINS)
@@ -276,6 +332,8 @@ def main():
     ours_rows = build_stress_rows(load_results(args.ours), args.ours_name)
     baseline_rows = build_stress_rows(load_results(args.baseline), args.baseline_name)
     aligned_rows = align_with_baseline(ours_rows, baseline_rows)
+    if args.sensor_state != "all":
+        aligned_rows = [row for row in aligned_rows if row["sensor_state"] == args.sensor_state]
     grid = aggregate_grid(aligned_rows, age_bins, visibility_bins, x_axis=args.x_axis)
 
     out_dir = Path(args.out_dir)
@@ -288,6 +346,8 @@ def main():
         "improvement_pct",
         out_dir / "lifecycle_stress_improvement.png",
         f"{args.ours_name} improvement over {args.baseline_name}",
+        x_axis=args.x_axis,
+        overlay_key=args.overlay,
     )
     plotted_mape = plot_heatmap(
         grid,
@@ -296,6 +356,8 @@ def main():
         "mape",
         out_dir / "lifecycle_stress_mape.png",
         f"{args.ours_name} MAPE",
+        x_axis=args.x_axis,
+        overlay_key=args.overlay,
     )
     print(f"rows={len(aligned_rows)} grid_cells={len(grid)}")
     print(f"wrote {out_dir / 'lifecycle_stress_rows.csv'}")

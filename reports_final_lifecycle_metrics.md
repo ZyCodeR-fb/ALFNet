@@ -54,6 +54,19 @@ These runs test lightweight replacements inspired by external backbones and loca
 
 Diagnostic summary: `rf_x_pb` is the best source-inspired variant by RoleMacro and gives the cleanest pattern-bank story, but it is still worse than the selected final model. Adaptive graph support is unstable in combination runs: it improves some failed-sensor states in isolation but hurts cold-start/NAS and makes the graph expert error much larger for AAS/FS.
 
+## KDTree Layout Replacement Ablation Results
+
+These runs keep `ALFNet/rf_alf_sd` unchanged except for the ALFTemporal spatial patch layout. They test whether the old KDTree-style irregular spatial patching can be replaced by lighter geometric or topology-aware layouts.
+
+| Variant | Main Change | VS MAPE | AAS MAPE | NAS MAPE | FS MAPE | RoleMacro MAPE | AvailabilityMacro MAPE |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `rf_kdmo` | Morton/Z-order spatial layout | 16.4002 | 9.3955 | 9.7435 | 10.1113 | 11.4126 | 11.3575 |
+| `rf_kdfps` | FPS-anchor spatial layout | 16.2668 | 9.3363 | 10.3245 | 10.1802 | 11.5269 | 11.7235 |
+| `rf_kdsp` | spectral graph layout | 16.5093 | 9.6718 | 10.5474 | 10.5425 | 11.8178 | 12.1299 |
+| `rf_kdhem` | heavy-edge graph layout | 16.4126 | 9.9077 | 10.3675 | 11.0826 | 11.9426 | 11.9742 |
+
+Diagnostic summary: `rf_kdmo` is the strongest KDTree replacement and improves AvailabilityMacro, Warm-up, and Adapted states, but it is still worse than the final `ALFNet/rf_alf_sd` under RoleMacro. The final paper model therefore remains `ALFNet/rf_alf_sd`; `rf_kdmo` can be reported as a clean optional layout-ablation showing that replacing KDTree is feasible but not selected.
+
 ## Final Six-Sensor Metrics
 
 | Sensor State | Models | MAPE | MAE | RMSE |

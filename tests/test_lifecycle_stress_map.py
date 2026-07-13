@@ -40,7 +40,14 @@ def _sample_results(scale=1.0, include_routing=False):
                 "NAS": {
                     "metrics": None,
                     "window_metrics": [
-                        {"window_index": 11, "window_offset": 0, "MAPE": 10.0 * scale, "MAE": 1.0, "RMSE": 2.0},
+                        {
+                            "window_index": 11,
+                            "window_offset": 0,
+                            "alpha_mean": 0.6,
+                            "MAPE": 10.0 * scale,
+                            "MAE": 1.0,
+                            "RMSE": 2.0,
+                        },
                         {"window_index": 14, "window_offset": 3, "MAPE": 8.0 * scale, "MAE": 1.0, "RMSE": 2.0},
                     ],
                 },
@@ -74,6 +81,9 @@ def test_build_stress_rows_derives_sensor_state_and_visibility():
     assert by_role[("FS", 0)]["sensor_state"] == "Degrading"
     assert by_role[("VS", 0)]["sensor_state"] == "Cold-start"
     assert by_role[("NAS", 0)]["visibility"] == 1.0
+    assert by_role[("NAS", 0)]["lifecycle_age"] == 0.0
+    assert by_role[("NAS", 0)]["history_steps"] == 12.0
+    assert by_role[("NAS", 0)]["patch_residual_weight"] == 0.4
     assert by_role[("FS", 0)]["visibility"] == 0.0
     assert by_role[("AAS", 0)]["graph_weight"] is None if ("AAS", 0) in by_role else True
     assert by_role[("FS", 0)]["patch_residual_weight"] == 0.30000000000000004
@@ -89,10 +99,48 @@ def test_align_and_aggregate_grid_computes_relative_improvement():
         aligned,
         age_bins=[0, 2, 10],
         visibility_bins=[0.0, 0.5, 1.0],
-        x_axis="event_age",
+        x_axis="lifecycle_age",
     )
 
     assert aligned[0]["baseline_mape"] == aligned[0]["mape"] * 2
     assert aligned[0]["improvement_pct"] == 50.0
     assert any(cell["improvement_pct"] == 50.0 for cell in grid)
     assert any(cell["patch_residual_weight"] is not None for cell in grid)
+
+
+def test_aggregate_grid_uses_ratio_of_cell_means_for_improvement():
+    stress = _load_script_module()
+    rows = [
+        {
+            "lifecycle_age": 0.0,
+            "visibility": 0.2,
+            "mape": 5.0,
+            "mae": 1.0,
+            "rmse": 2.0,
+            "baseline_mape": 10.0,
+            "improvement_pct": 50.0,
+            "graph_weight": 0.8,
+            "patch_residual_weight": 0.2,
+        },
+        {
+            "lifecycle_age": 0.0,
+            "visibility": 0.2,
+            "mape": 9.0,
+            "mae": 1.0,
+            "rmse": 2.0,
+            "baseline_mape": 10.0,
+            "improvement_pct": 10.0,
+            "graph_weight": 0.6,
+            "patch_residual_weight": 0.4,
+        },
+    ]
+    grid = stress.aggregate_grid(
+        rows,
+        age_bins=[0, 1],
+        visibility_bins=[0.0, 0.5],
+        x_axis="lifecycle_age",
+    )
+
+    assert grid[0]["age_bin"] == "0"
+    assert grid[0]["visibility_bin"] == "0-50%"
+    assert grid[0]["improvement_pct"] == 30.0
