@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from args import load_args_from_config
 from lib.utils import load_project_adjacency, resolve_known_unknown_nodes
-from model.ALFNet.recovery import GraphInputRecoveryAdapter
+from model.ALFNet.recovery import GraphInputRecoveryAdapter, SENSOR_STATE_COUNT, build_sensor_state_context
 from model.comparison_model.STBP.stbp import STBP_Model
 from utils.model_output import unpack_model_output
 
@@ -778,6 +778,43 @@ class Model(nn.Module):
 
         recipe_cfg = self.cfg.get("recipe", {})
         model_cfg = self.cfg.get("model", {})
+        lifecycle_state_mode = str(recipe_cfg.get("lifecycle_state_mode", "legacy_role")).lower()
+        lifecycle_state_aliases = {
+            "legacy": "legacy_role",
+            "legacy_4": "legacy_role",
+            "role": "legacy_role",
+            "role4": "legacy_role",
+            "six_state": "sensor_state_6",
+            "sensor6": "sensor_state_6",
+        }
+        self.lifecycle_state_mode = lifecycle_state_aliases.get(lifecycle_state_mode, lifecycle_state_mode)
+        if self.lifecycle_state_mode not in {"legacy_role", "sensor_state_6"}:
+            raise ValueError(
+                "family.recipe.lifecycle_state_mode must be one of "
+                "legacy_role or sensor_state_6"
+            )
+        self.routing_context_count = SENSOR_STATE_COUNT if self.lifecycle_state_mode == "sensor_state_6" else ROLE_COUNT
+
+        shared_input_recovery = str(recipe_cfg.get("shared_input_recovery", "none")).lower()
+        shared_input_aliases = {
+            "": "none",
+            "off": "none",
+            "false": "none",
+            "disabled": "none",
+            "graph": "graph_preprocessor",
+            "graph_expert": "graph_preprocessor",
+            "graph_grin": "graph_preprocessor",
+        }
+        self.shared_input_recovery = shared_input_aliases.get(shared_input_recovery, shared_input_recovery)
+        if self.shared_input_recovery not in {"none", "graph_preprocessor"}:
+            raise ValueError(
+                "family.recipe.shared_input_recovery must be none or graph_preprocessor"
+            )
+        if self.shared_input_recovery == "graph_preprocessor" and not hasattr(self.graph_expert, "preprocess_input"):
+            raise ValueError(
+                "shared_input_recovery=graph_preprocessor requires the graph expert "
+                "to implement preprocess_input(...)"
+            )
         state_hidden_dim = int(model_cfg.get("state_hidden_dim", 32))
         state_dim = int(model_cfg.get("state_dim", 32))
         gate_hidden_dim = int(model_cfg.get("gate_hidden_dim", 32))
@@ -949,7 +986,7 @@ class Model(nn.Module):
 
         if self.recipe in {"soft_fuse", "oracle_gate", "role_mmoe", "testam_role_mmoe"}:
             self.state_encoder = nn.Sequential(
-                nn.Linear(ROLE_COUNT + 2, state_hidden_dim),
+                nn.Linear(self.routing_context_count + 2, state_hidden_dim),
                 nn.ReLU(),
                 nn.Linear(state_hidden_dim, state_dim),
                 nn.ReLU(),
@@ -972,7 +1009,7 @@ class Model(nn.Module):
                             nn.ReLU(),
                             nn.Linear(gate_hidden_dim, 1),
                         )
-                        for _ in range(ROLE_COUNT)
+                        for _ in range(self.routing_context_count)
                     ]
                 )
             else:
@@ -986,7 +1023,7 @@ class Model(nn.Module):
                             nn.ReLU(),
                             nn.Linear(gate_hidden_dim, self.output_dim),
                         )
-                        for _ in range(ROLE_COUNT)
+                        for _ in range(self.routing_context_count)
                     ]
                 )
             else:
@@ -1004,7 +1041,7 @@ class Model(nn.Module):
             else:
                 self.patch_residual_head = nn.Identity()
         elif self.recipe == "soft_fuse_v2":
-            state_input_dim = ROLE_COUNT + 5
+            state_input_dim = self.routing_context_count + 5
             self.state_encoder = nn.Sequential(
                 nn.Linear(state_input_dim, state_hidden_dim),
                 nn.ReLU(),
@@ -1263,9 +1300,15 @@ class Model(nn.Module):
             return list(range(self.full_num_nodes))
         return list(range(current_num_nodes))
 
+    def _routing_context(self, last_role, visibility_ratio):
+        if self.lifecycle_state_mode == "sensor_state_6":
+            return build_sensor_state_context(last_role, visibility_ratio)
+        return last_role
+
     def _build_gate_features(self, x_enc):
         _, last_role, last_age, visibility_ratio = self._extract_role_and_age(x_enc)
-        state_input = torch.cat([last_role, last_age, visibility_ratio], dim=-1)
+        routing_context = self._routing_context(last_role, visibility_ratio)
+        state_input = torch.cat([routing_context, last_age, visibility_ratio], dim=-1)
         return self.state_encoder(state_input), last_role
 
     def _build_confidence_state(self, x_enc):
@@ -1291,7 +1334,8 @@ class Model(nn.Module):
             prev_visible = torch.where(take_prev, raw_seq[:, t], prev_visible)
             found_prev = found_prev | take_prev
         recent_trend = torch.where(found_prev, last_visible - prev_visible, torch.zeros_like(last_visible))
-        state_input = torch.cat([last_role, last_age, visibility_ratio, last_visible, recent_trend, visible_std], dim=-1)
+        routing_context = self._routing_context(last_role, visibility_ratio)
+        state_input = torch.cat([routing_context, last_age, visibility_ratio, last_visible, recent_trend, visible_std], dim=-1)
         return self.state_encoder(state_input), last_role, last_visible
 
     def _format_graph_expert_input(self, raw_graph_x, x_enc):
@@ -1311,6 +1355,16 @@ class Model(nn.Module):
         expert_x_dec = None if x_dec is None else x_dec[..., : self.output_dim]
         aux_losses = {}
         current_node_ids = self._resolve_current_node_ids(raw_x_enc.size(2))
+        shared_graph_input = None
+        if self.shared_input_recovery == "graph_preprocessor":
+            shared_graph_input = self._format_graph_expert_input(raw_x_enc, x_enc)
+            shared_graph_input = self.graph_expert.preprocess_input(
+                adj,
+                shared_graph_input,
+                x_t_mark,
+                pos_mark,
+            )
+            raw_x_enc = shared_graph_input[..., :self.raw_enc_in]
         graph_x_enc = raw_x_enc
         recovered_graph_x_enc = None
         use_recovery_as_expert = self.graph_input_recovery is not None and self.graph_recovery_apply_to in {"role_expert", "role_delta"}
@@ -1346,20 +1400,49 @@ class Model(nn.Module):
             history_age_seq = x_enc[..., self.age_idx:self.age_idx + 1]
             graph_x_enc, prompt = self.tpb_graph_input_adapter(graph_x_enc, role_seq, history_age_seq=history_age_seq)
             aux_losses["ALFNet_tpb_input"] = self.lambda_tpb_input * prompt.pow(2).mean()
-        graph_expert_x_enc = self._format_graph_expert_input(graph_x_enc, x_enc)
+        graph_context_x_enc = shared_graph_input if shared_graph_input is not None else x_enc
+        graph_expert_x_enc = self._format_graph_expert_input(graph_x_enc, graph_context_x_enc)
         if hasattr(self.graph_expert, "set_current_node_ids"):
             self.graph_expert.set_current_node_ids(current_node_ids)
+        graph_forward_kwargs = {"input_is_preprocessed": True} if shared_graph_input is not None else {}
         if self.end_to_end or has_graph_input_adapter:
-            graph_output = self.graph_expert(adj, graph_expert_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
+            graph_output = self.graph_expert(
+                adj,
+                graph_expert_x_enc,
+                x_t_mark,
+                pos_mark,
+                expert_x_dec,
+                dec_t_mark,
+                epoch,
+                **graph_forward_kwargs,
+            )
         else:
             with torch.no_grad():
-                graph_output = self.graph_expert(adj, graph_expert_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
+                graph_output = self.graph_expert(
+                    adj,
+                    graph_expert_x_enc,
+                    x_t_mark,
+                    pos_mark,
+                    expert_x_dec,
+                    dec_t_mark,
+                    epoch,
+                    **graph_forward_kwargs,
+                )
         recovery_graph_output = None
         if use_recovery_as_expert:
             recovered_expert_x_enc = self._format_graph_expert_input(recovered_graph_x_enc, x_enc)
             if hasattr(self.graph_expert, "set_current_node_ids"):
                 self.graph_expert.set_current_node_ids(current_node_ids)
-            recovery_graph_output = self.graph_expert(adj, recovered_expert_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
+            recovery_graph_output = self.graph_expert(
+                adj,
+                recovered_expert_x_enc,
+                x_t_mark,
+                pos_mark,
+                expert_x_dec,
+                dec_t_mark,
+                epoch,
+                **graph_forward_kwargs,
+            )
         if self.end_to_end:
             patch_output = self.patch_expert(adj, raw_x_enc, x_t_mark, pos_mark, expert_x_dec, dec_t_mark, epoch)
         else:
@@ -1431,7 +1514,8 @@ class Model(nn.Module):
 
     def _role_gate(self, adj, x_enc, y_graph, y_patch, with_residual=False, y_recovered_graph=None):
         _, last_role, last_age, visibility_ratio = self._extract_role_and_age(x_enc)
-        state_input = torch.cat([last_role, last_age, visibility_ratio], dim=-1)
+        routing_context = self._routing_context(last_role, visibility_ratio)
+        state_input = torch.cat([routing_context, last_age, visibility_ratio], dim=-1)
         node_state = self.state_encoder(state_input)
         current_node_ids = self._resolve_current_node_ids(y_graph.size(2))
         if self.graph_expert_diffusion_refiner is not None:
@@ -1447,7 +1531,7 @@ class Model(nn.Module):
         state_t = node_state.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
         gate_input = torch.cat([state_t, y_graph, y_patch, torch.abs(y_graph - y_patch)], dim=-1)
         role_logits = torch.cat([gate(gate_input) for gate in self.role_fusion_gates], dim=-1)
-        role_weights = last_role.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
+        role_weights = routing_context.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
         alpha = torch.sigmoid(torch.sum(role_logits * role_weights, dim=-1, keepdim=True))
         alpha = self._apply_alpha_floor(alpha, last_role)
         fused = alpha * y_graph + (1.0 - alpha) * y_patch
@@ -1520,7 +1604,8 @@ class Model(nn.Module):
 
     def _graph_patch_residual(self, adj, x_enc, y_graph, y_patch, y_recovered_graph=None):
         _, last_role, last_age, visibility_ratio = self._extract_role_and_age(x_enc)
-        state_input = torch.cat([last_role, last_age, visibility_ratio], dim=-1)
+        routing_context = self._routing_context(last_role, visibility_ratio)
+        state_input = torch.cat([routing_context, last_age, visibility_ratio], dim=-1)
         node_state = self.state_encoder(state_input)
         current_node_ids = self._resolve_current_node_ids(y_graph.size(2))
         if self.graph_expert_diffusion_refiner is not None:
@@ -1538,7 +1623,7 @@ class Model(nn.Module):
         disagreement = torch.abs(y_graph - y_patch)
         gate_input = torch.cat([state_t, y_graph, y_patch, disagreement], dim=-1)
         role_logits = torch.cat([gate(gate_input) for gate in self.role_fusion_gates], dim=-1)
-        role_weights = last_role.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
+        role_weights = routing_context.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
         patch_gate = torch.sigmoid(torch.sum(role_logits * role_weights, dim=-1, keepdim=True))
         role_scale = self._patch_residual_role_budget(last_role, visibility_ratio)
         role_scale_t = role_scale.unsqueeze(1).expand_as(patch_gate)
@@ -1702,4 +1787,3 @@ class Model(nn.Module):
             pred, aux_losses = self._soft_fuse(x_enc, y_graph, y_patch)
         aux_losses.update(expert_aux_losses)
         return {"pred": pred, "aux_losses": aux_losses}
-

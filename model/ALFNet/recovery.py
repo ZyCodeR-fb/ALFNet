@@ -8,7 +8,38 @@ ROLE_NAS = 1
 ROLE_VS = 2
 ROLE_FS = 3
 ROLE_COUNT = 4
+SENSOR_STATE_COLD_START = 0
+SENSOR_STATE_WARM_UP = 1
+SENSOR_STATE_ADAPTED = 2
+SENSOR_STATE_DEGRADING = 3
+SENSOR_STATE_OUTAGE = 4
+SENSOR_STATE_STEADY = 5
+SENSOR_STATE_COUNT = 6
 EPSILON = 1e-8
+
+
+def build_sensor_state_context(last_role, visibility_ratio):
+    """Convert legacy transition roles into six paper-facing sensor states."""
+    if last_role.size(-1) != ROLE_COUNT:
+        raise ValueError(f"last_role must have {ROLE_COUNT} channels, got {last_role.size(-1)}")
+    if visibility_ratio.size(-1) != 1:
+        raise ValueError(f"visibility_ratio must have one channel, got {visibility_ratio.size(-1)}")
+    visibility = visibility_ratio.to(dtype=last_role.dtype).clamp(0.0, 1.0)
+    aas = last_role[..., ROLE_AAS:ROLE_AAS + 1]
+    nas = last_role[..., ROLE_NAS:ROLE_NAS + 1]
+    vs = last_role[..., ROLE_VS:ROLE_VS + 1]
+    fs = last_role[..., ROLE_FS:ROLE_FS + 1]
+    return torch.cat(
+        [
+            vs,
+            nas * (1.0 - visibility),
+            nas * visibility,
+            fs * visibility,
+            fs * (1.0 - visibility),
+            aas,
+        ],
+        dim=-1,
+    )
 
 
 def reverse_tensor(tensor=None, axis=-1):

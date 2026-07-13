@@ -1,5 +1,10 @@
 import importlib.util
+import math
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -144,3 +149,260 @@ def test_aggregate_grid_uses_ratio_of_cell_means_for_improvement():
     assert grid[0]["age_bin"] == "0"
     assert grid[0]["visibility_bin"] == "0-50%"
     assert grid[0]["improvement_pct"] == 30.0
+
+
+def test_idw_fill_preserves_measured_values_and_fills_sparse_cells():
+    stress = _load_script_module()
+    matrix = [
+        [20.0, None, 10.0],
+        [None, None, None],
+        [-10.0, None, 5.0],
+    ]
+
+    filled = stress.idw_fill_matrix(matrix)
+
+    assert filled[0][0] == 20.0
+    assert filled[2][0] == -10.0
+    assert math.isfinite(filled[1][1])
+
+
+def test_build_role_trajectory_aggregates_beta_by_age_band():
+    stress = _load_script_module()
+    rows = [
+        {
+            "role": "NAS",
+            "lifecycle_age": 0.0,
+            "visibility": 0.10,
+            "improvement_pct": 4.0,
+            "patch_residual_weight": 0.10,
+            "graph_weight": 0.90,
+        },
+        {
+            "role": "NAS",
+            "lifecycle_age": 2.0,
+            "visibility": 0.30,
+            "improvement_pct": 8.0,
+            "patch_residual_weight": 0.30,
+            "graph_weight": 0.70,
+        },
+        {
+            "role": "NAS",
+            "lifecycle_age": 6.0,
+            "visibility": 0.80,
+            "improvement_pct": 12.0,
+            "patch_residual_weight": 0.50,
+            "graph_weight": 0.50,
+        },
+    ]
+
+    points = stress.build_role_trajectory(
+        rows,
+        role="NAS",
+        age_bins=[0, 4, 10],
+        x_axis="lifecycle_age",
+        overlay_key="patch_residual_weight",
+    )
+
+    assert len(points) == 2
+    assert points[0]["x"] == 0.5
+    assert points[0]["visibility"] == pytest.approx(0.20)
+    assert points[0]["overlay_weight"] == pytest.approx(0.20)
+    assert points[1]["x"] == 1.5
+    assert points[1]["visibility"] == pytest.approx(0.80)
+
+
+def test_plot_paper_stress_map_writes_a_nonempty_figure():
+    age_bins = [0, 4, 10, math.inf]
+    visibility_bins = [0.0, 0.25, 0.75, 1.0]
+    cells = [
+        {
+            "age_bin": "0-3",
+            "visibility_bin": "0-25%",
+            "count": 8,
+            "improvement_pct": 20.0,
+            "mape": 12.0,
+            "graph_weight": 0.9,
+            "patch_residual_weight": 0.1,
+        },
+        {
+            "age_bin": "10+",
+            "visibility_bin": "75-100%",
+            "count": 24,
+            "improvement_pct": 8.0,
+            "mape": 9.0,
+            "graph_weight": 0.8,
+            "patch_residual_weight": 0.2,
+        },
+    ]
+    rows = [
+        {
+            "role": "NAS",
+            "lifecycle_age": 0.0,
+            "visibility": 0.10,
+            "improvement_pct": 20.0,
+            "patch_residual_weight": 0.1,
+            "graph_weight": 0.9,
+        },
+        {
+            "role": "NAS",
+            "lifecycle_age": 12.0,
+            "visibility": 0.90,
+            "improvement_pct": 8.0,
+            "patch_residual_weight": 0.2,
+            "graph_weight": 0.8,
+        },
+    ]
+    output_path = ROOT / ".pytest_cache" / "paper_stress_map.png"
+    plot_script = f"""
+import importlib.util
+from pathlib import Path
+
+inf = float("inf")
+spec = importlib.util.spec_from_file_location("lifecycle_stress_map_plot_test", Path({str(SCRIPT_PATH)!r}))
+stress = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(stress)
+plotted = stress.plot_paper_stress_map(
+    {cells!r},
+    {rows!r},
+    {age_bins!r},
+    {visibility_bins!r},
+    value_key="improvement_pct",
+    output_path=Path({str(output_path)!r}),
+    title="Lifecycle Stress Map",
+    x_axis="lifecycle_age",
+    overlay_key="patch_residual_weight",
+)
+raise SystemExit(0 if plotted else 1)
+"""
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", plot_script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert output_path.stat().st_size > 1000
+    finally:
+        output_path.unlink(missing_ok=True)
+
+
+def test_aggregate_transition_profile_uses_all_events_in_each_age_block():
+    stress = _load_script_module()
+    rows_by_model = {
+        "ALFNet": [
+            {"event_id": 1, "role": "NAS", "lifecycle_age": 0, "mape": 10.0},
+            {"event_id": 1, "role": "NAS", "lifecycle_age": 1, "mape": 12.0},
+            {"event_id": 2, "role": "NAS", "lifecycle_age": 0, "mape": 14.0},
+            {"event_id": 2, "role": "NAS", "lifecycle_age": 1, "mape": 16.0},
+        ],
+        "MoGERNN": [
+            {"event_id": 1, "role": "NAS", "lifecycle_age": 0, "mape": 12.0},
+            {"event_id": 1, "role": "NAS", "lifecycle_age": 1, "mape": 14.0},
+            {"event_id": 2, "role": "NAS", "lifecycle_age": 0, "mape": 16.0},
+            {"event_id": 2, "role": "NAS", "lifecycle_age": 1, "mape": 18.0},
+        ],
+    }
+
+    profile = stress.aggregate_transition_profile(rows_by_model, roles=["NAS"], block_size=2)
+
+    alf = next(row for row in profile if row["model"] == "ALFNet")
+    assert alf["age_start"] == 0
+    assert alf["age_end"] == 1
+    assert alf["event_count"] == 2
+    assert alf["window_count"] == 4
+    assert alf["mape"] == pytest.approx(13.0)
+    assert alf["mape_q25"] < alf["mape"] < alf["mape_q75"]
+
+
+def test_summarize_transition_profile_reports_integrated_gain_and_win_rate():
+    stress = _load_script_module()
+    profile = []
+    values = {
+        "ALFNet": [10.0, 8.0],
+        "MoGERNN": [12.0, 10.0],
+        "PatchSTG": [11.0, 9.0],
+    }
+    for model, mapes in values.items():
+        for block, mape in enumerate(mapes):
+            profile.append(
+                {
+                    "model": model,
+                    "role": "NAS",
+                    "age_block": block,
+                    "age_start": block * 6,
+                    "age_end": block * 6 + 5,
+                    "age_center": block * 6 + 2.5,
+                    "age_width": 6,
+                    "mape": mape,
+                }
+            )
+
+    summary = stress.summarize_transition_profile(profile, "ALFNet", ["MoGERNN", "PatchSTG"])
+
+    patch = next(row for row in summary if row["baseline"] == "PatchSTG")
+    assert patch["integrated_gain_pct"] == pytest.approx(10.0)
+    assert patch["transition_win_rate"] == pytest.approx(1.0)
+    assert patch["win_blocks"] == 2
+    assert patch["total_blocks"] == 2
+
+
+def test_plot_transition_response_writes_a_nonempty_figure():
+    profile = []
+    for role, role_shift in [("NAS", 0.0), ("FS", 2.0)]:
+        for model, model_shift in [("ALFNet", 0.0), ("MoGERNN", 2.0), ("PatchSTG", 1.0)]:
+            for block in range(3):
+                mape = 12.0 + role_shift + model_shift - block
+                profile.append(
+                    {
+                        "model": model,
+                        "role": role,
+                        "age_block": block,
+                        "age_start": block * 6,
+                        "age_end": block * 6 + 5,
+                        "age_center": block * 6 + 2.5,
+                        "age_width": 6,
+                        "event_count": 4,
+                        "window_count": 24,
+                        "mape": mape,
+                        "mape_q25": mape - 0.5,
+                        "mape_q75": mape + 0.5,
+                    }
+                )
+    output_path = ROOT / ".pytest_cache" / "lifecycle_transition_response.png"
+    plot_script = f"""
+import importlib.util
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("lifecycle_transition_plot_test", Path({str(SCRIPT_PATH)!r}))
+stress = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(stress)
+profile = {profile!r}
+summary = stress.summarize_transition_profile(profile, "ALFNet", ["MoGERNN", "PatchSTG"])
+plotted = stress.plot_transition_response(
+    profile,
+    summary,
+    Path({str(output_path)!r}),
+    ours_name="ALFNet",
+    baseline_names=["MoGERNN", "PatchSTG"],
+    early_horizon=6,
+)
+raise SystemExit(0 if plotted else 1)
+"""
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", plot_script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert output_path.stat().st_size > 1000
+    finally:
+        output_path.unlink(missing_ok=True)

@@ -858,6 +858,10 @@ class Model(nn.Module):
     def set_current_node_ids(self, node_ids):
         self.current_node_ids = node_ids
 
+    def preprocess_input(self, adj, x_enc, x_t_mark=None, pos_mark=None):
+        """Run the configured input recovery once for optional family-level sharing."""
+        return self.data_pre(adj, x_enc, x_t_mark, pos_mark)
+
     def _mix_temporal_input(self, x_enc):
         if self.temporal_input_mixer is None:
             return x_enc
@@ -867,7 +871,7 @@ class Model(nn.Module):
             return mixed_raw
         return torch.cat([mixed_raw, x_enc[..., self.raw_enc_in:]], dim=-1)
 
-    def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, *args):
+    def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, *args, input_is_preprocessed=False):
         x_dec = args[0]
         #输入的adj应该转一下
         A_q = calculate_random_walk_matrix(adj)
@@ -875,7 +879,8 @@ class Model(nn.Module):
         if self.adaptive_support is not None:
             A_q, A_h = self.adaptive_support(A_q, A_h, node_ids=self.current_node_ids)
             self.current_node_ids = None
-        x_enc = self.data_pre(adj, x_enc, x_t_mark, pos_mark)
+        if not input_is_preprocessed:
+            x_enc = self.preprocess_input(adj, x_enc, x_t_mark, pos_mark)
         x_enc = self._mix_temporal_input(x_enc)
         epoch = args[-1]
         teacher_forcing_ratio = 1 - (epoch / 40)
