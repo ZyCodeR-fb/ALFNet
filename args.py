@@ -22,7 +22,7 @@ def _add_arguments(parser):
         "--mode",
         type=str,
         default=None,
-        choices=["train", "test_async", "test_changed", "inference"],
+        choices=["train", "test_async", "test_shockwave", "test_changed", "inference"],
         help="optional high-level run mode override",
     )
     parser.add_argument("--project_name", type=str, default="MoGERNN")
@@ -75,6 +75,7 @@ def _add_arguments(parser):
     parser.add_argument("--return_best", action="store_true", help="return best model")
     parser.add_argument("--test_for_changed", action="store_true", help="test pretrained model in changed sensor network")
     parser.add_argument("--test_for_async_lifecycle", action="store_true", help="test pretrained model in async lifecycle sensor network")
+    parser.add_argument("--test_for_shockwave", action="store_true", help="export dense counterfactual lifecycle shockwave errors")
     parser.add_argument("--train_for_async_lifecycle", action="store_true", help="train model with lifecycle-aware window simulation")
     parser.add_argument("--train_init_checkpoint_path", default=None, help="optional checkpoint path used to initialize model weights before training/fine-tuning")
     parser.add_argument("--read_only", action="store_true", help="read only")
@@ -93,6 +94,11 @@ def _add_arguments(parser):
     parser.add_argument("--async_adcsd_queue_len", type=int, default=None, help="optional ADCSD queue length override during async lifecycle test")
     parser.add_argument("--async_adcsd_moving_avg", type=int, default=None, help="optional ADCSD moving-average kernel override during async lifecycle test")
     parser.add_argument("--async_adcsd_lr", type=float, default=None, help="optional ADCSD learning-rate override during async lifecycle test")
+    parser.add_argument("--shockwave_output_dir", type=str, default="./predictions/shockwave", help="short output directory for counterfactual shockwave exports")
+    parser.add_argument("--shockwave_model_name", type=str, default=None, help="paper-facing model label used in shockwave exports")
+    parser.add_argument("--shockwave_pre_steps", type=int, default=12, help="dense 5-minute windows exported before each lifecycle event")
+    parser.add_argument("--shockwave_post_steps", type=int, default=24, help="dense 5-minute windows exported after each lifecycle event")
+    parser.add_argument("--shockwave_max_hop", type=int, default=3, help="largest graph-distance bucket; the final bucket includes all larger distances")
     parser.add_argument("--lifecycle_role_features", action="store_true", help="append lifecycle role one-hot features to async lifecycle inputs")
     parser.add_argument("--lifecycle_history_age_feature", action="store_true", help="append lifecycle history-age feature to async lifecycle inputs")
     parser.add_argument(
@@ -227,9 +233,13 @@ def _apply_mode_overrides(args):
         return
     args.test_for_changed = False
     args.test_for_async_lifecycle = False
+    args.test_for_shockwave = False
     args.inference_only = False
     if args.mode == "test_async":
         args.test_for_async_lifecycle = True
+    elif args.mode == "test_shockwave":
+        args.test_for_async_lifecycle = True
+        args.test_for_shockwave = True
     elif args.mode == "test_changed":
         args.test_for_changed = True
     elif args.mode == "inference":
@@ -246,6 +256,8 @@ def _validate_required_fields(args):
 def finalize_args(args):
     _normalize_node_lists(args)
     _apply_mode_overrides(args)
+    if args.test_for_shockwave:
+        args.test_for_async_lifecycle = True
     _validate_required_fields(args)
 
     assert args.input_features in args.target_features, "input_features should be in target_features"
