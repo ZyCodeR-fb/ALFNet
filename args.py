@@ -75,30 +75,24 @@ def _add_arguments(parser):
     parser.add_argument("--return_best", action="store_true", help="return best model")
     parser.add_argument("--test_for_changed", action="store_true", help="test pretrained model in changed sensor network")
     parser.add_argument("--test_for_async_lifecycle", action="store_true", help="test pretrained model in async lifecycle sensor network")
-    parser.add_argument("--test_for_shockwave", action="store_true", help="export dense counterfactual lifecycle shockwave errors")
+    parser.add_argument("--test_for_shockwave", action="store_true", help="legacy alias for the PLES async test")
     parser.add_argument("--train_for_async_lifecycle", action="store_true", help="train model with lifecycle-aware window simulation")
     parser.add_argument("--train_init_checkpoint_path", default=None, help="optional checkpoint path used to initialize model weights before training/fine-tuning")
     parser.add_argument("--read_only", action="store_true", help="read only")
     parser.add_argument("--inference_only", action="store_true", help="inference only")
     parser.add_argument("--pretrained_model_path", default=None, help="path to pretrained model")
-    parser.add_argument(
-        "--async_adaptor",
-        type=str,
-        default="base",
-        choices=["base", "st_ttc", "adcsd", "cosa", "petsa"],
-        help="async lifecycle adaptor",
-    )
-    parser.add_argument("--async_num_events", type=int, default=4, help="number of lifecycle events during async test")
-    parser.add_argument("--async_commissioning_k", type=int, default=12, help="number of commissioning windows per event")
-    parser.add_argument("--async_event_seed", type=int, default=0, help="seed for async lifecycle event generation")
-    parser.add_argument("--async_adcsd_queue_len", type=int, default=None, help="optional ADCSD queue length override during async lifecycle test")
-    parser.add_argument("--async_adcsd_moving_avg", type=int, default=None, help="optional ADCSD moving-average kernel override during async lifecycle test")
-    parser.add_argument("--async_adcsd_lr", type=float, default=None, help="optional ADCSD learning-rate override during async lifecycle test")
-    parser.add_argument("--shockwave_output_dir", type=str, default="./predictions/shockwave", help="short output directory for counterfactual shockwave exports")
-    parser.add_argument("--shockwave_model_name", type=str, default=None, help="paper-facing model label used in shockwave exports")
-    parser.add_argument("--shockwave_pre_steps", type=int, default=12, help="dense 5-minute windows exported before each lifecycle event")
-    parser.add_argument("--shockwave_post_steps", type=int, default=24, help="dense 5-minute windows exported after each lifecycle event")
-    parser.add_argument("--shockwave_max_hop", type=int, default=3, help="largest graph-distance bucket; the final bucket includes all larger distances")
+    parser.add_argument("--async_num_events", type=int, default=4, help="event-count divisor used by lifecycle-aware training simulation")
+    parser.add_argument("--ples_manifest_root", type=str, default="./protocol_manifests", help="dataset-specific PLES manifest root")
+    parser.add_argument("--ples_pre_steps", type=int, default=12, help="dense pre-event steps in PLES")
+    parser.add_argument("--ples_post_steps", type=int, default=36, help="dense post-event steps in PLES")
+    parser.add_argument("--ples_temporal_blocks", type=int, default=4, help="dataset-adaptive temporal blocks in PLES")
+    parser.add_argument("--ples_cohort_count", type=int, default=5, help="requested disjoint node cohorts in PLES")
+    parser.add_argument("--ples_cohort_fraction", type=float, default=0.05, help="requested changed-node fraction per PLES cohort")
+    parser.add_argument("--ples_min_event_gap", type=int, default=72, help="minimum raw time-step gap between PLES origins")
+    parser.add_argument("--ples_seed", type=int, default=2026, help="PLES protocol seed recorded in the manifest")
+    parser.add_argument("--ples_bootstrap_samples", type=int, default=2000, help="hierarchical bootstrap samples for PLES effects")
+    parser.add_argument("--ples_bootstrap_seed", type=int, default=2026, help="hierarchical bootstrap seed for PLES effects")
+    parser.add_argument("--ples_overwrite_manifest", action="store_true", help="overwrite a mismatched canonical PLES manifest intentionally")
     parser.add_argument("--lifecycle_role_features", action="store_true", help="append lifecycle role one-hot features to async lifecycle inputs")
     parser.add_argument("--lifecycle_history_age_feature", action="store_true", help="append lifecycle history-age feature to async lifecycle inputs")
     parser.add_argument(
@@ -259,6 +253,18 @@ def finalize_args(args):
     if args.test_for_shockwave:
         args.test_for_async_lifecycle = True
     _validate_required_fields(args)
+
+    if args.test_for_async_lifecycle:
+        if args.ples_pre_steps < 1:
+            raise ValueError("ples_pre_steps must be positive")
+        if args.ples_post_steps < args.input_len:
+            raise ValueError("ples_post_steps must cover at least one complete input history")
+        if args.ples_temporal_blocks < 1 or args.ples_cohort_count < 1:
+            raise ValueError("ples_temporal_blocks and ples_cohort_count must be positive")
+        if not 0 < args.ples_cohort_fraction <= 1:
+            raise ValueError("ples_cohort_fraction must be in (0, 1]")
+        if args.ples_min_event_gap < 0 or args.ples_bootstrap_samples < 0:
+            raise ValueError("ples_min_event_gap and ples_bootstrap_samples must be non-negative")
 
     assert args.input_features in args.target_features, "input_features should be in target_features"
     lifecycle_feature_enabled = args.lifecycle_role_features or args.lifecycle_history_age_feature

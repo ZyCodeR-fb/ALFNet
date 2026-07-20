@@ -1,11 +1,12 @@
 import argparse
 import csv
 import json
-import re
 from pathlib import Path
 
 
-ROLES = ("VS", "AAS", "NAS", "FS")
+MAIN_METRICS = ("Join", "Fault", "LifeMacro")
+PHASE_METRICS = ("Cold", "Warm", "Ready", "Onset", "Decay", "Outage")
+ERROR_METRICS = ("MAPE", "MAE", "RMSE")
 
 
 def _parse_label_rules(values):
@@ -13,196 +14,168 @@ def _parse_label_rules(values):
     for value in values:
         if "=" not in value:
             raise ValueError(f"Invalid --label rule: {value!r}; expected NAME=SUBSTRING")
-        name, needle = value.split("=", 1)
-        name = name.strip()
-        needle = needle.strip()
+        name, needle = (part.strip() for part in value.split("=", 1))
         if not name or not needle:
             raise ValueError(f"Invalid --label rule: {value!r}; expected NAME=SUBSTRING")
         rules.append((name, needle))
     return rules
 
 
-def _parse_manual_rows(values):
-    rows = []
-    for value in values:
-        parts = [part.strip() for part in value.split(",")]
-        if len(parts) != 5:
-            raise ValueError(
-                f"Invalid --manual-row: {value!r}; expected METHOD,VS,AAS,NAS,FS"
-            )
-        method = parts[0]
-        metrics = {role: float(raw) for role, raw in zip(ROLES, parts[1:])}
-        rows.append(_build_row(method, metrics, source="manual"))
-    return rows
+def _validate_metric_group(payload, key, names):
+    group = payload.get(key)
+    if not isinstance(group, dict):
+        raise ValueError(f"PLES summary is missing {key!r}")
+    result = {}
+    for name in names:
+        metrics = group.get(name)
+        if not isinstance(metrics, dict):
+            raise ValueError(f"PLES summary is missing {key}.{name}")
+        result[name] = {metric: float(metrics[metric]) for metric in ERROR_METRICS}
+    return result
 
 
-def _metric_float(value):
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _extract_json_metrics(path):
-    with path.open("r", encoding="utf-8") as fh:
-        payload = json.load(fh)
-
-    candidates = []
-    for key in ("summary_metrics", "role_metrics"):
-        value = payload.get(key)
-        if isinstance(value, dict):
-            candidates.append(value)
-
-    for candidate in candidates:
-        metrics = {}
-        for role in ROLES:
-            role_data = candidate.get(role)
-            if not isinstance(role_data, dict):
-                break
-            mape = _metric_float(role_data.get("MAPE"))
-            if mape is None:
-                break
-            metrics[role] = mape
-        if len(metrics) == len(ROLES):
-            return metrics
-    return None
-
-
-def _extract_text_metrics(path):
-    pattern = re.compile(r"^(VS|AAS|NAS|FS):\s+MAPE=([0-9.]+)", re.MULTILINE)
-    text = path.read_text(encoding="utf-8", errors="ignore")
-    metrics = {role: float(value) for role, value in pattern.findall(text)}
-    return metrics if len(metrics) == len(ROLES) else None
-
-
-def _infer_method(exp_dir, async_dir, label_rules):
-    full = f"{exp_dir.name}/{async_dir.name}"
+def _method_name(path, payload, label_rules):
+    full_path = str(path)
     for name, needle in label_rules:
-        if needle in full:
+        if needle in full_path:
             return name
-
-    name = exp_dir.name
-    known = (
-        ("MCPST-FSL", ("MCPST", "mcpst")),
-        ("RoleFusion-final-p2groc05", ("p2groc05",)),
-        ("RoleFusion-e2e-route", ("e2e_route",)),
-        ("MoGERNN", ("MoGERNN",)),
-        ("PatchSTG", ("PatchSTG",)),
-        ("STBP", ("STBP",)),
-        ("STGODE", ("STGODE",)),
-        ("STID", ("STID",)),
-        ("STGCN", ("STGCN",)),
-        ("SLPF", ("SLPF",)),
-    )
-    for label, needles in known:
-        if any(needle in name for needle in needles):
-            return label
-    return name
+    model = str(payload.get("model") or "").strip()
+    variant = str(payload.get("model_variant") or "default").strip()
+    if model == "ALFNet" and variant == "rf_alf_sd":
+        return "ALFNet (ours)"
+    if model:
+        return model if variant == "default" else f"{model} [{variant}]"
+    return path.parent.parent.name
 
 
-def _build_row(method, metrics, source):
-    macro = sum(metrics[role] for role in ROLES) / len(ROLES)
-    row = {"Method": method, "Macro MAPE": macro, "Source": source}
-    for role in ROLES:
-        row[f"{role} MAPE"] = metrics[role]
-    return row
+def _read_summary(path, label_rules):
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if payload.get("protocol") != "Paired Lifecycle Event Study":
+        raise ValueError(f"Not a PLES summary: {path}")
+    return {
+        "Models": _method_name(path, payload, label_rules),
+        "Dataset": payload["dataset"]["name"],
+        "DatasetFingerprint": payload["dataset"]["fingerprint"],
+        "ProtocolHash": payload["protocol_hash"],
+        "Main": _validate_metric_group(payload, "main_metrics", MAIN_METRICS),
+        "Phases": _validate_metric_group(payload, "phase_metrics", PHASE_METRICS),
+        "Source": str(path),
+    }
 
 
 def _collect_rows(args):
-    label_rules = _parse_label_rules(args.label)
-    rows = _parse_manual_rows(args.manual_row)
-    prediction_root = Path(args.predictions)
+    root = Path(args.predictions)
+    rules = _parse_label_rules(args.label)
+    paths = sorted(root.rglob("paired_event_summary.json"))
+    if args.include:
+        paths = [path for path in paths if any(token in str(path) for token in args.include)]
+    rows = [_read_summary(path, rules) for path in paths]
+    if not rows:
+        raise ValueError(f"No paired_event_summary.json found under {root}")
 
-    json_paths = prediction_root.rglob("async_lifecycle_summary.json")
-    text_paths = prediction_root.rglob("async_lifecycle_results.txt")
-    for path in sorted([*json_paths, *text_paths]):
-        async_dir = path.parent
-        if not args.all_async and args.async_filter not in async_dir.name:
-            continue
-        exp_dir = async_dir.parent
-        full = f"{exp_dir.name}/{async_dir.name}"
-        if args.include and not any(needle in full for needle in args.include):
-            continue
+    dataset_keys = {(row["Dataset"], row["DatasetFingerprint"], row["ProtocolHash"]) for row in rows}
+    if len(dataset_keys) != 1:
+        details = sorted((dataset, protocol[:12]) for dataset, _, protocol in dataset_keys)
+        raise ValueError(
+            "Selected PLES results do not share one dataset manifest; collect each protocol separately. "
+            f"found={details}"
+        )
 
-        metrics = _extract_json_metrics(path) if path.suffix == ".json" else _extract_text_metrics(path)
-        if metrics is None:
-            continue
-
-        method = _infer_method(exp_dir, async_dir, label_rules)
-        rows.append(_build_row(method, metrics, source=str(path)))
-
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(row["Models"], []).append(row)
+    duplicates = {name: values for name, values in grouped.items() if len(values) > 1}
+    if duplicates and not args.best_per_method:
+        names = ", ".join(f"{name} ({len(values)})" for name, values in sorted(duplicates.items()))
+        raise ValueError(
+            "Multiple PLES runs map to the same model label. Use --include/--label to select one run, "
+            f"or explicitly pass --best-per-method. duplicates={names}"
+        )
     if args.best_per_method:
-        best = {}
-        for row in rows:
-            key = row["Method"]
-            if key not in best or row["Macro MAPE"] < best[key]["Macro MAPE"]:
-                best[key] = row
-        rows = list(best.values())
-
-    rows.sort(key=lambda row: (row["Macro MAPE"], row["Method"]))
+        rows = [
+            min(values, key=lambda row: row["Main"]["LifeMacro"]["MAPE"])
+            for values in grouped.values()
+        ]
+    rows.sort(key=lambda row: (row["Main"]["LifeMacro"]["MAPE"], row["Models"]))
     return rows
 
 
-def _format_number(value):
-    return f"{value:.4f}"
+def _format(value):
+    return f"{float(value):.4f}"
 
 
-def _write_markdown(rows, out_path):
-    headers = ("Method", "VS MAPE", "AAS MAPE", "NAS MAPE", "FS MAPE", "Macro MAPE")
+def _table_lines(rows, groups):
+    headers = ["Models"] + [f"{group} {metric}" for group in groups for metric in ERROR_METRICS]
     lines = [
-        "# Async Lifecycle MAPE Summary",
-        "",
         "| " + " | ".join(headers) + " |",
         "| " + " | ".join(["---"] * len(headers)) + " |",
     ]
+    source_key = "Main" if groups == MAIN_METRICS else "Phases"
     for row in rows:
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    row["Method"],
-                    _format_number(row["VS MAPE"]),
-                    _format_number(row["AAS MAPE"]),
-                    _format_number(row["NAS MAPE"]),
-                    _format_number(row["FS MAPE"]),
-                    _format_number(row["Macro MAPE"]),
-                ]
-            )
-            + " |"
-        )
-    Path(out_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        values = [row["Models"]]
+        values.extend(_format(row[source_key][group][metric]) for group in groups for metric in ERROR_METRICS)
+        lines.append("| " + " | ".join(values) + " |")
+    return lines
 
 
-def _write_csv(rows, out_path):
-    if not out_path:
+def _write_markdown(rows, path):
+    dataset = rows[0]["Dataset"]
+    protocol_hash = rows[0]["ProtocolHash"]
+    lines = [
+        f"# PLES Metrics: {dataset}",
+        "",
+        f"Protocol manifest: `{protocol_hash}`",
+        "",
+        "## Main Table",
+        "",
+        *_table_lines(rows, MAIN_METRICS),
+        "",
+        "## Phase Table",
+        "",
+        *_table_lines(rows, PHASE_METRICS),
+        "",
+    ]
+    Path(path).write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_csv(rows, path):
+    if not path:
         return
-    headers = ("Method", "VS MAPE", "AAS MAPE", "NAS MAPE", "FS MAPE", "Macro MAPE", "Source")
-    with Path(out_path).open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=headers)
+    headers = ["Models", "Dataset", "ProtocolHash"]
+    headers.extend(f"{group} {metric}" for group in MAIN_METRICS + PHASE_METRICS for metric in ERROR_METRICS)
+    headers.append("Source")
+    with Path(path).open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers)
         writer.writeheader()
         for row in rows:
-            writer.writerow({key: row[key] for key in headers})
+            flat = {key: row[key] for key in ("Models", "Dataset", "ProtocolHash", "Source")}
+            for group in MAIN_METRICS:
+                for metric in ERROR_METRICS:
+                    flat[f"{group} {metric}"] = row["Main"][group][metric]
+            for group in PHASE_METRICS:
+                for metric in ERROR_METRICS:
+                    flat[f"{group} {metric}"] = row["Phases"][group][metric]
+            writer.writerow(flat)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Collect async lifecycle role MAPE tables.")
-    parser.add_argument("--predictions", default="predictions", help="Prediction root directory.")
-    parser.add_argument("--out", default="reports_async_lifecycle_mape_summary_auto.md")
+    parser = argparse.ArgumentParser(description="Collect tables from one frozen PLES manifest.")
+    parser.add_argument("--predictions", default="predictions")
+    parser.add_argument("--out", default="reports_ples_metrics_summary.md")
     parser.add_argument("--csv", default="")
-    parser.add_argument("--async-filter", default="base", help="Substring in async result dir.")
-    parser.add_argument("--all-async", action="store_true", help="Include every async adaptor.")
-    parser.add_argument("--best-per-method", action="store_true", default=True)
-    parser.add_argument("--include", action="append", default=[], help="Only include paths containing this substring.")
-    parser.add_argument("--label", action="append", default=[], help="Map output name: NAME=SUBSTRING.")
-    parser.add_argument("--manual-row", action="append", default=[], help="Add row: METHOD,VS,AAS,NAS,FS.")
+    parser.add_argument("--include", action="append", default=[])
+    parser.add_argument("--label", action="append", default=[], help="Map output name: NAME=SUBSTRING")
+    parser.add_argument(
+        "--best-per-method",
+        action="store_true",
+        help="Explicitly select the lowest test LifeMacro when duplicate labels exist (not recommended for final reporting)",
+    )
     args = parser.parse_args()
-
     rows = _collect_rows(args)
     _write_markdown(rows, args.out)
     _write_csv(rows, args.csv)
-    print(f"wrote {len(rows)} rows to {args.out}")
+    print(f"wrote {len(rows)} PLES rows to {args.out}")
     if args.csv:
         print(f"wrote csv to {args.csv}")
 

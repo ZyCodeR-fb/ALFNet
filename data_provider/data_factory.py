@@ -42,11 +42,17 @@ def data_provider(args, flag):
     )
     if Dataset is AsyncLifecyclePEMS:
         dataset_kwargs.update(
-            async_num_events=args.async_num_events,
-            async_commissioning_k=args.async_commissioning_k,
-            async_event_seed=args.async_event_seed,
             lifecycle_role_features=args.lifecycle_role_features,
             lifecycle_history_age_feature=args.lifecycle_history_age_feature,
+            ples_pre_steps=args.ples_pre_steps,
+            ples_post_steps=args.ples_post_steps,
+            ples_temporal_blocks=args.ples_temporal_blocks,
+            ples_cohort_count=args.ples_cohort_count,
+            ples_cohort_fraction=args.ples_cohort_fraction,
+            ples_min_event_gap=args.ples_min_event_gap,
+            ples_seed=args.ples_seed,
+            ples_bootstrap_samples=args.ples_bootstrap_samples,
+            ples_bootstrap_seed=args.ples_bootstrap_seed,
         )
     elif Dataset is LifecycleTrainPEMS:
         dataset_kwargs.update(

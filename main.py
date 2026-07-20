@@ -10,7 +10,7 @@ from torch import nn
 
 from args import initialize_args
 from data_provider.data_factory import data_provider
-from experiments import async_lifecycle_inference, counterfactual_shockwave_inference, inference_model, train_model
+from experiments import async_lifecycle_inference, inference_model, train_model
 from model.regist_model import model_dict
 from utils.evaluation import MSEPinballLoss, MultiPinBallLoss, SlitPhyLoss, masked_gaussian_nll_loss, rmse_loss
 from utils.logtool import print_config, print_header, print_train, set_wandb
@@ -404,19 +404,18 @@ if __name__ == "__main__":
     print_config(configs)
     print_train(args)
 
-    if args.test_for_shockwave:
+    if args.test_for_async_lifecycle:
+        if args.test_for_shockwave:
+            print("Note: --mode test_shockwave is a compatibility alias for --mode test_async.")
         model, args.best_checkpoint_path = load_pretrained_model(model, args)
         args.slide_step = 1
         test_loader = data_provider(args, "test")
-        print(f"├── shockwave replay data dim: {len(test_loader.dataset)}")  # type: ignore
-        model.to(args.device).float()
-        counterfactual_shockwave_inference(model, test_loader, args)
-        exit()
-
-    if args.test_for_async_lifecycle:
-        model, args.best_checkpoint_path = load_pretrained_model(model, args)
-        args.slide_step = 12
-        test_loader = data_provider(args, "test")
+        manifest = test_loader.dataset.get_protocol_manifest()  # type: ignore
+        print(
+            f"PLES test data: {manifest['dataset']['time_steps']} time steps | "
+            f"{manifest['resolved']['origin_count']} origins | "
+            f"{manifest['resolved']['cohort_count']} cohorts"
+        )
         print(f"├── async test data dim: {len(test_loader.dataset)}")  # type: ignore
         model.to(args.device).float()
         async_lifecycle_inference(model, test_loader, args, criterions)
