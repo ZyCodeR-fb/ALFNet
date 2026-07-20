@@ -1,13 +1,10 @@
-import math
-
 import numpy as np
 import torch
 import torch.nn as nn
 
 from lib.utils import load_project_adjacency, load_project_positions
 from model.comparison_model.family_utils import build_patchstg_cfg
-from layers.source_graph_unet import graph_unet_parts
-from .patchstg import PatchRevIN, PatchSTG as PatchSTGBackbone
+from .patchstg import PatchSTG as PatchSTGBackbone
 
 
 def _augment_align(dist_matrix, auglen):
@@ -30,195 +27,60 @@ def _reorder_data(parts_idx, adj, patch_size):
         part_dist = adj[part_idx, :].copy()
         part_dist[:, part_idx] = 0
         if patch_size - part_idx.shape[0] > 0:
-            local_part_idx = _augment_align(part_dist, patch_size - part_idx.shape[0])
+            local_part_idx = _augment_align(
+                part_dist, patch_size - part_idx.shape[0]
+            )
             auged_part_idx = np.concatenate([part_idx, local_part_idx], 0)
         else:
             auged_part_idx = part_idx
 
-        reo_parts_idx = np.concatenate([reo_parts_idx, np.arange(part_idx.shape[0]) + patch_size * i])
+        reo_parts_idx = np.concatenate([
+            reo_parts_idx,
+            np.arange(part_idx.shape[0]) + patch_size * i,
+        ])
         ori_parts_idx = np.concatenate([ori_parts_idx, part_idx])
         reo_all_idx = np.concatenate([reo_all_idx, auged_part_idx])
-
     return ori_parts_idx, reo_parts_idx, reo_all_idx
 
 
 def _kd_tree(locations, times, axis):
     sorted_idx = np.argsort(locations[axis])
-    part1 = np.sort(sorted_idx[: locations.shape[1] // 2])
-    part2 = np.sort(sorted_idx[locations.shape[1] // 2 :])
+    part1 = np.sort(sorted_idx[:locations.shape[1] // 2])
+    part2 = np.sort(sorted_idx[locations.shape[1] // 2:])
     if times == 1:
         return [part1, part2]
     parts = []
-    left_parts = _kd_tree(locations[:, part1], times - 1, axis ^ 1)
-    right_parts = _kd_tree(locations[:, part2], times - 1, axis ^ 1)
-    for part in left_parts:
+    for part in _kd_tree(locations[:, part1], times - 1, axis ^ 1):
         parts.append(part1[part])
-    for part in right_parts:
+    for part in _kd_tree(locations[:, part2], times - 1, axis ^ 1):
         parts.append(part2[part])
     return parts
 
 
-def _split_order_to_parts(order, part_count):
-    return [np.sort(part.astype(int)) for part in np.array_split(np.asarray(order, dtype=int), part_count) if part.size > 0]
-
-
-def _normalize_positions(positions):
-    coords = np.asarray(positions, dtype=float)
-    if coords.ndim != 2:
-        raise ValueError("PatchSTG spatial layout requires 2D positions")
-    if coords.shape[0] == 2 and coords.shape[1] != 2:
-        coords = coords.T
-    min_v = coords.min(axis=0, keepdims=True)
-    span = coords.max(axis=0, keepdims=True) - min_v
-    span = np.where(span > 0, span, 1.0)
-    return (coords - min_v) / span
-
-
-def _morton_codes(coords, bits=16):
-    quantized = np.clip(coords, 0.0, 1.0)
-    quantized = np.rint(quantized * ((1 << bits) - 1)).astype(np.uint64)
-    codes = np.zeros(quantized.shape[0], dtype=np.uint64)
-    for bit in range(bits):
-        codes |= ((quantized[:, 0] >> bit) & 1) << (2 * bit)
-        if quantized.shape[1] > 1:
-            codes |= ((quantized[:, 1] >> bit) & 1) << (2 * bit + 1)
-    return codes
-
-
-def _morton_spatial_parts(positions, part_count):
-    coords = _normalize_positions(positions)
-    codes = _morton_codes(coords[:, :2])
-    order = np.lexsort((np.arange(coords.shape[0]), codes))
-    return _split_order_to_parts(order, part_count)
-
-
-def _spectral_graph_parts(adj, part_count):
-    adj_sym = (adj + adj.T) / 2.0
-    degree = adj_sym.sum(axis=1)
-    if np.count_nonzero(degree) <= 1:
-        return _split_order_to_parts(np.arange(adj.shape[0]), part_count)
-    degree_safe = np.where(degree > 0, degree, 1.0)
-    d_inv_sqrt = np.diag(np.power(degree_safe, -0.5))
-    laplacian = np.eye(adj.shape[0]) - d_inv_sqrt @ adj_sym @ d_inv_sqrt
-    _, eigvecs = np.linalg.eigh(laplacian)
-    fiedler_idx = 1 if eigvecs.shape[1] > 1 else 0
-    order = np.lexsort((np.arange(adj.shape[0]), eigvecs[:, fiedler_idx]))
-    return _split_order_to_parts(order, part_count)
-
-
-def _adjacency_walk_parts(adj, part_count):
-    adj_sym = (adj + adj.T) / 2.0
-    degree = adj_sym.sum(axis=1)
-    visited = np.zeros(adj.shape[0], dtype=bool)
-    order = []
-    while len(order) < adj.shape[0]:
-        remaining = np.where(~visited)[0]
-        if remaining.size == 0:
-            break
-        seed = int(remaining[np.argmax(degree[remaining])])
-        queue = [seed]
-        visited[seed] = True
-        while queue:
-            node = queue.pop(0)
-            order.append(node)
-            neighbors = np.where((adj_sym[node] > 0) & (~visited))[0]
-            if neighbors.size == 0:
-                continue
-            neighbors = neighbors[np.argsort(adj_sym[node, neighbors] * -1)]
-            for neighbor in neighbors:
-                visited[neighbor] = True
-                queue.append(int(neighbor))
-    return _split_order_to_parts(order, part_count)
-
-
-def _topology_balanced_parts(adj, part_count):
-    adj_sym = (adj + adj.T) / 2.0
-    degree = adj_sym.sum(axis=1)
-    sorted_nodes = np.argsort(-degree)
-    buckets = [[] for _ in range(part_count)]
-    for idx, node in enumerate(sorted_nodes):
-        buckets[idx % part_count].append(int(node))
-    parts = [np.sort(np.asarray(bucket, dtype=int)) for bucket in buckets if bucket]
-    return parts
-
-
-def _heavy_edge_parts(adj, part_count):
-    adj_sym = (np.asarray(adj, dtype=float) + np.asarray(adj, dtype=float).T) / 2.0
-    degree = adj_sym.sum(axis=1)
-    matched = np.zeros(adj_sym.shape[0], dtype=bool)
-    groups = []
-    for node in np.argsort(-degree):
-        node = int(node)
-        if matched[node]:
-            continue
-        matched[node] = True
-        candidates = np.where((adj_sym[node] > 0) & (~matched))[0]
-        if candidates.size > 0:
-            partner = int(candidates[np.argmax(adj_sym[node, candidates])])
-            matched[partner] = True
-            groups.append(np.asarray([node, partner], dtype=int))
-        else:
-            groups.append(np.asarray([node], dtype=int))
-    group_score = [degree[group].sum() for group in groups]
-    order = np.concatenate([np.sort(groups[idx]) for idx in np.argsort(-np.asarray(group_score))])
-    return _split_order_to_parts(order, part_count)
-
-
-def _fps_anchor_parts(positions, part_count):
-    coords = _normalize_positions(positions)
-    node_count = coords.shape[0]
-    if node_count == 0:
-        return []
-    anchor_count = min(int(part_count), node_count)
-    center = coords.mean(axis=0, keepdims=True)
-    first = int(np.argmin(np.sum((coords - center) ** 2, axis=1)))
-    anchors = [first]
-    min_dist = np.sum((coords - coords[first]) ** 2, axis=1)
-    for _ in range(1, anchor_count):
-        next_anchor = int(np.argmax(min_dist))
-        anchors.append(next_anchor)
-        min_dist = np.minimum(min_dist, np.sum((coords - coords[next_anchor]) ** 2, axis=1))
-    anchors = np.asarray(anchors, dtype=int)
-    dist_to_anchors = np.sum((coords[:, None, :] - coords[anchors][None, :, :]) ** 2, axis=2)
-    assignment = np.argmin(dist_to_anchors, axis=1)
-    anchor_codes = _morton_codes(coords[anchors, :2])
-    ordered_anchor_slots = np.lexsort((anchors, anchor_codes))
-    ordered_nodes = []
-    for slot in ordered_anchor_slots:
-        members = np.where(assignment == slot)[0]
-        if members.size == 0:
-            continue
-        local_dist = dist_to_anchors[members, slot]
-        ordered_nodes.extend(members[np.lexsort((members, local_dist))].tolist())
-    if len(ordered_nodes) < node_count:
-        missing = [idx for idx in range(node_count) if idx not in set(ordered_nodes)]
-        ordered_nodes.extend(missing)
-    return _split_order_to_parts(np.asarray(ordered_nodes, dtype=int), part_count)
-
-
-def _build_spatial_layout(positions, adj, recur_times, spa_patchsize, layout_type="kd_tree"):
-    layout_type = str(layout_type).lower()
-    part_count = 2 ** int(recur_times)
-    if layout_type in {"kd_tree", "kdtree", "position"}:
-        parts_idx = _kd_tree(positions.T, recur_times, 0)
-    elif layout_type in {"morton", "z_order", "zorder", "space_filling"}:
-        parts_idx = _morton_spatial_parts(positions, part_count)
-    elif layout_type in {"spectral", "graph_spectral"}:
-        parts_idx = _spectral_graph_parts(adj, part_count)
-    elif layout_type in {"adjacency", "adjacency_walk", "graph_walk"}:
-        parts_idx = _adjacency_walk_parts(adj, part_count)
-    elif layout_type in {"topology_balanced", "degree_balanced", "degree"}:
-        parts_idx = _topology_balanced_parts(adj, part_count)
-    elif layout_type in {"heavy_edge", "heavy_edge_matching", "hem", "graclus_like"}:
-        parts_idx = _heavy_edge_parts(adj, part_count)
-    elif layout_type in {"fps_anchor", "fps", "pointnet2_fps", "anchor"}:
-        parts_idx = _fps_anchor_parts(positions, part_count)
-    elif layout_type in {"graph_unet", "gunet", "gpool"}:
-        parts_idx = graph_unet_parts(adj, recur_times)
-    else:
-        raise ValueError(f"Unsupported PatchSTG spatial_layout: {layout_type}")
-    ori_parts_idx, reo_parts_idx, reo_all_idx = _reorder_data(parts_idx, adj, spa_patchsize)
-    return ori_parts_idx.tolist(), reo_parts_idx.tolist(), reo_all_idx.tolist(), len(parts_idx)
+def _build_spatial_layout(
+    positions,
+    adj,
+    recur_times,
+    spa_patchsize,
+    layout_type="kd_tree",
+):
+    if str(layout_type).lower() not in {"kd_tree", "kdtree", "position"}:
+        raise ValueError(
+            "ALFTemporal only retains the final KDTree spatial layout, "
+            f"got spatial_layout={layout_type}."
+        )
+    parts_idx = _kd_tree(positions.T, int(recur_times), 0)
+    ori_parts_idx, reo_parts_idx, reo_all_idx = _reorder_data(
+        parts_idx,
+        adj,
+        int(spa_patchsize),
+    )
+    return (
+        ori_parts_idx.tolist(),
+        reo_parts_idx.tolist(),
+        reo_all_idx.tolist(),
+        len(parts_idx),
+    )
 
 
 class Model(nn.Module):
@@ -230,21 +92,21 @@ class Model(nn.Module):
         self.full_num_nodes = int(self.cfg["node_num"])
         self.known_nodes = list(self.cfg["known_nodes"])
         self.output_dim = configs.c_out
-        self.use_revin = bool(model_cfg.get("use_revin", False))
-        self.revin = PatchRevIN(
-            self.output_dim,
-            eps=float(model_cfg.get("revin_eps", 1e-5)),
-            affine=bool(model_cfg.get("revin_affine", True)),
-        ) if self.use_revin else None
 
-        full_adj = load_project_adjacency({"data_path": configs.data_path}).cpu().numpy()
+        if bool(model_cfg.get("use_revin", False)):
+            raise ValueError("ALFTemporal no longer includes the failed PatchRevIN variant.")
+        full_adj = load_project_adjacency(
+            {"data_path": configs.data_path}
+        ).cpu().numpy()
         positions = load_project_positions({"data_path": configs.data_path})
-        ori_parts_idx, reo_parts_idx, reo_all_idx, spa_patchnum = _build_spatial_layout(
-            positions,
-            full_adj,
-            int(model_cfg["recur_times"]),
-            int(model_cfg["spa_patchsize"]),
-            model_cfg.get("spatial_layout", "kd_tree"),
+        ori_parts_idx, reo_parts_idx, reo_all_idx, spa_patchnum = (
+            _build_spatial_layout(
+                positions,
+                full_adj,
+                int(model_cfg["recur_times"]),
+                int(model_cfg["spa_patchsize"]),
+                model_cfg.get("spatial_layout", "kd_tree"),
+            )
         )
         self.ori_parts_idx = ori_parts_idx
         self.reo_parts_idx = reo_parts_idx
@@ -253,7 +115,24 @@ class Model(nn.Module):
         tem_patchsize = int(model_cfg["tem_patchsize"])
         tem_patchnum = int(model_cfg["tem_patchnum"])
         if tem_patchsize * tem_patchnum != configs.pred_len:
-            raise ValueError("PatchSTG requires tem_patchsize * tem_patchnum == pred_len under the current adapter")
+            raise ValueError(
+                "PatchSTG requires tem_patchsize * tem_patchnum == pred_len "
+                "under the current adapter"
+            )
+        if str(model_cfg.get("attention_type", "")).lower() not in {
+            "crossformer_tsa",
+            "crossformer",
+            "tsa",
+        }:
+            raise ValueError(
+                "ALFTemporal requires attention_type=crossformer_tsa after "
+                "final-model cleanup."
+            )
+        if not bool(model_cfg.get("use_timefilter_patch_mixer", False)):
+            raise ValueError(
+                "ALFTemporal requires use_timefilter_patch_mixer=true after "
+                "final-model cleanup."
+            )
 
         self.backbone = PatchSTGBackbone(
             tem_patchsize=tem_patchsize,
@@ -272,50 +151,19 @@ class Model(nn.Module):
             ori_parts_idx=self.ori_parts_idx,
             reo_parts_idx=self.reo_parts_idx,
             reo_all_idx=self.reo_all_idx,
-            attention_order=model_cfg.get("attention_order", "depth_breadth"),
-            shift_size=int(model_cfg.get("attention_shift_size", 0)),
-            attention_type=model_cfg.get("attention_type", "timm"),
-            lepe_kernel_size=int(model_cfg.get("lepe_kernel_size", 5)),
-            crossformer_router_factor=int(model_cfg.get("crossformer_router_factor", 4)),
+            crossformer_router_factor=int(
+                model_cfg.get("crossformer_router_factor", 4)
+            ),
             crossformer_dropout=float(model_cfg.get("crossformer_dropout", 0.1)),
-            use_timefilter_patch_mixer=bool(model_cfg.get("use_timefilter_patch_mixer", False)),
             timefilter_n_heads=int(model_cfg.get("timefilter_n_heads", 4)),
             timefilter_layers=int(model_cfg.get("timefilter_layers", 1)),
             timefilter_d_ff=int(model_cfg.get("timefilter_d_ff", 0) or 0),
             timefilter_top_p=float(model_cfg.get("timefilter_top_p", 0.5)),
             timefilter_alpha=float(model_cfg.get("timefilter_alpha", 0.1)),
             timefilter_dropout=float(model_cfg.get("timefilter_dropout", 0.1)),
-            timefilter_residual_scale=float(model_cfg.get("timefilter_residual_scale", 0.10)),
-            use_duet_patch_router=bool(model_cfg.get("use_duet_patch_router", False)),
-            duet_num_experts=int(model_cfg.get("duet_num_experts", 2)),
-            duet_k=int(model_cfg.get("duet_k", 1)),
-            duet_hidden_size=int(model_cfg.get("duet_hidden_size", 64)),
-            duet_moving_avg=int(model_cfg.get("duet_moving_avg", 3)),
-            duet_residual_scale=float(model_cfg.get("duet_residual_scale", 0.10)),
-            duet_noisy_gating=bool(model_cfg.get("duet_noisy_gating", True)),
-            use_token_learner_patch_mixer=bool(model_cfg.get("use_token_learner_patch_mixer", False)),
-            token_learner_num_tokens=int(model_cfg.get("token_learner_num_tokens", 8)),
-            token_learner_bottleneck_dim=int(model_cfg.get("token_learner_bottleneck_dim", 64)),
-            token_learner_dropout=float(model_cfg.get("token_learner_dropout", 0.0)),
-            token_learner_residual_scale=float(model_cfg.get("token_learner_residual_scale", 0.05)),
-            use_set_transformer_patch_mixer=bool(model_cfg.get("use_set_transformer_patch_mixer", False)),
-            set_transformer_num_inds=int(model_cfg.get("set_transformer_num_inds", 8)),
-            set_transformer_num_heads=int(model_cfg.get("set_transformer_num_heads", 2)),
-            set_transformer_ln=bool(model_cfg.get("set_transformer_ln", True)),
-            set_transformer_residual_scale=float(model_cfg.get("set_transformer_residual_scale", 0.05)),
-            use_pattern_bank_patch_mixer=bool(model_cfg.get("use_pattern_bank_patch_mixer", False)),
-            pattern_bank_num_patterns=int(model_cfg.get("pattern_bank_num_patterns", 16)),
-            pattern_bank_residual_scale=float(model_cfg.get("pattern_bank_residual_scale", 0.05)),
-            use_staeformer_adapter=bool(model_cfg.get("use_staeformer_adapter", False)),
-            staeformer_adapter_mode=model_cfg.get("staeformer_adapter_mode", "temporal"),
-            staeformer_adapter_layers=int(model_cfg.get("staeformer_adapter_layers", 1)),
-            staeformer_num_heads=int(model_cfg.get("staeformer_num_heads", 4)),
-            staeformer_feed_forward_dim=int(model_cfg.get("staeformer_feed_forward_dim", 256)),
-            staeformer_dropout=float(model_cfg.get("staeformer_dropout", 0.1)),
-            use_visibility_token_pruning=bool(model_cfg.get("use_visibility_token_pruning", False)),
-            token_prune_threshold=float(model_cfg.get("token_prune_threshold", 0.25)),
-            token_prune_min_scale=float(model_cfg.get("token_prune_min_scale", 0.0)),
-            token_prune_mode=model_cfg.get("token_prune_mode", "soft"),
+            timefilter_residual_scale=float(
+                model_cfg.get("timefilter_residual_scale", 0.10)
+            ),
         )
 
     def _resolve_current_node_ids(self, current_num_nodes):
@@ -327,29 +175,45 @@ class Model(nn.Module):
 
     def _build_temporal_features(self, x_enc, x_t_mark):
         if x_t_mark is None or x_t_mark.shape[-1] < 3:
-            raise ValueError("PatchSTG requires x_t_mark with minute/hour/day-of-week features")
+            raise ValueError(
+                "PatchSTG requires x_t_mark with minute/hour/day-of-week features"
+            )
         minute = x_t_mark[..., 0].to(x_enc.device, dtype=x_enc.dtype)
         hour = x_t_mark[..., 1].to(x_enc.device, dtype=x_enc.dtype)
         dow = x_t_mark[..., 2].to(x_enc.device, dtype=x_enc.dtype)
         tod = hour * 12.0 + torch.floor(minute / 5.0)
-        te = torch.stack([tod, dow], dim=-1).unsqueeze(2).expand(-1, -1, self.full_num_nodes, -1)
-        return te
+        return torch.stack([tod, dow], dim=-1).unsqueeze(2).expand(
+            -1, -1, self.full_num_nodes, -1
+        )
 
     def _scatter_to_full_nodes(self, x_enc, current_node_ids):
         if x_enc.shape[2] == self.full_num_nodes:
-            return x_enc[..., : self.output_dim]
-        full_x = torch.zeros(x_enc.shape[0], x_enc.shape[1], self.full_num_nodes, self.output_dim, device=x_enc.device, dtype=x_enc.dtype)
-        full_x[..., current_node_ids, :] = x_enc[..., : self.output_dim]
+            return x_enc[..., :self.output_dim]
+        full_x = torch.zeros(
+            x_enc.shape[0],
+            x_enc.shape[1],
+            self.full_num_nodes,
+            self.output_dim,
+            device=x_enc.device,
+            dtype=x_enc.dtype,
+        )
+        full_x[..., current_node_ids, :] = x_enc[..., :self.output_dim]
         return full_x
 
-    def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, x_dec=None, dec_t_mark=None, epoch=0):
+    def forward(
+        self,
+        adj,
+        x_enc,
+        x_t_mark=None,
+        pos_mark=None,
+        x_dec=None,
+        dec_t_mark=None,
+        epoch=0,
+    ):
         current_node_ids = self._resolve_current_node_ids(x_enc.shape[2])
         full_x = self._scatter_to_full_nodes(x_enc, current_node_ids)
         full_te = self._build_temporal_features(full_x, x_t_mark)
-        backbone_x = self.revin(full_x, "norm") if self.revin is not None else full_x
-        pred = self.backbone(backbone_x, full_te).contiguous()
-        if self.revin is not None:
-            pred = self.revin(pred, "denorm").contiguous()
+        pred = self.backbone(full_x, full_te).contiguous()
         if x_enc.shape[2] != self.full_num_nodes:
             pred = pred[..., current_node_ids, :]
         return {"pred": pred}

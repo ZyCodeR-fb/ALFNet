@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from layers.gnn import D_GCN, calculate_random_walk_matrix, GCNLayer
+from .gnn import D_GCN, calculate_random_walk_matrix, GCNLayer
 
 
 class MeanAggregator(nn.Module):

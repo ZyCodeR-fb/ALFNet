@@ -201,30 +201,11 @@ def _patch_compatible_state_dict(model, state_dict):
         "role_residual_scale",
         "role_graph_prior",
         "role_graph_alpha_floor",
-        "pstm_mae_role_scale",
     }
     for key in optional_runtime_buffers:
         if key not in compatible_state and key in model_state:
             compatible_state[key] = model_state[key]
     return compatible_state
-
-
-_CHECKPOINT_VARIANT_ALIASES = {
-    "rf_s_skan": ["rf_s_p2groc05sourcekan"],
-    "rf_s_smh": ["rf_s_p2groc05sourcemixhop"],
-    "rf_s_skan_smh": ["rf_s_p2groc05sourcekansourcemixhop"],
-    "rf_s_smh_bf": ["rf_s_p2groc05sourcemixhopspecbf"],
-    "rf_s_skan_smh_bf": ["rf_s_p2groc05sourcekansourcemixhopspecbf"],
-}
-
-
-def _variant_aliases(model_variant):
-    aliases = [model_variant]
-    aliases.extend(_CHECKPOINT_VARIANT_ALIASES.get(model_variant, []))
-    for short_name, long_names in _CHECKPOINT_VARIANT_ALIASES.items():
-        if model_variant in long_names:
-            aliases.append(short_name)
-    return list(dict.fromkeys(aliases))
 
 
 def _checkpoint_files(checkpoint_dir):
@@ -251,12 +232,7 @@ def _exp_id_without_cfg_hash(exp_id):
 
 def _compatible_checkpoint_prefixes(args):
     base_prefix = _exp_id_without_cfg_hash(args.exp_id)
-    variant_marker = f"var-{args.model_variant}"
-    prefixes = [base_prefix]
-    if variant_marker in base_prefix:
-        for variant_alias in _variant_aliases(args.model_variant):
-            prefixes.append(base_prefix.replace(variant_marker, f"var-{variant_alias}", 1))
-    return list(dict.fromkeys(prefixes))
+    return [base_prefix]
 
 
 def _find_compatible_checkpoint_dir(args, requested_checkpoint_dir):
@@ -402,10 +378,6 @@ def initialize_training_from_checkpoint(model, args):
     return model
 
 
-def should_skip_model_checkpoint_load(args):
-    return args.model in {"RoleFusion", "ALFNet"} and args.model_recipe == "hard_route"
-
-
 if __name__ == "__main__":
     args = initialize_args()
     args.exp_id = build_exp_id(args)
@@ -433,10 +405,7 @@ if __name__ == "__main__":
     print_train(args)
 
     if args.test_for_shockwave:
-        if should_skip_model_checkpoint_load(args):
-            print(f"-> {args.model} hard_route uses expert checkpoints from family config; skip self-checkpoint loading")
-        else:
-            model, args.best_checkpoint_path = load_pretrained_model(model, args)
+        model, args.best_checkpoint_path = load_pretrained_model(model, args)
         args.slide_step = 1
         test_loader = data_provider(args, "test")
         print(f"├── shockwave replay data dim: {len(test_loader.dataset)}")  # type: ignore
@@ -445,10 +414,7 @@ if __name__ == "__main__":
         exit()
 
     if args.test_for_async_lifecycle:
-        if should_skip_model_checkpoint_load(args):
-            print(f"-> {args.model} hard_route uses expert checkpoints from family config; skip self-checkpoint loading")
-        else:
-            model, args.best_checkpoint_path = load_pretrained_model(model, args)
+        model, args.best_checkpoint_path = load_pretrained_model(model, args)
         args.slide_step = 12
         test_loader = data_provider(args, "test")
         print(f"├── async test data dim: {len(test_loader.dataset)}")  # type: ignore

@@ -1,413 +1,70 @@
 import math
+
 import torch
 from torch import nn
-import torch.nn.functional as F
-from .GRUCell import MoGEGRUCellBase, GraphGRUCellBase
-from layers.agg import MeanAggregator, WMeanAggregator, MaxPoolingAggregator, MinPoolingAggregator, DiffusionAggregator
-from layers.source_mixhop import SourceMixHopDiffConv
+
+from .GRUCell import GraphGRUCellBase
 
 
 class DiffConv(nn.Module):
-    """
-    Neural network block that applies a diffusion graph convolution to sampled location
-    """
+    """Diffusion graph convolution used by the final ALFGraph DCRNN cell."""
 
     def __init__(self, in_channels, out_channels, k_hop):
-        """
-        :param in_channels: Number of time step.
-        :param out_channels: Desired number of output features at each node in
-        each time step.
-        :param order: The diffusion steps.
-        """
         super(DiffConv, self).__init__()
         self.orders = k_hop
         self.num_matrices = 2 * self.orders + 1
         self.Theta1 = nn.Parameter(
-            torch.FloatTensor(in_channels * self.num_matrices, out_channels))
+            torch.FloatTensor(in_channels * self.num_matrices, out_channels)
+        )
         self.bias = nn.Parameter(torch.FloatTensor(out_channels))
         self.reset_parameters()
 
     def reset_parameters(self):
-        stdv = 1. / math.sqrt(self.Theta1.shape[1])
+        stdv = 1.0 / math.sqrt(self.Theta1.shape[1])
         self.Theta1.data.uniform_(-stdv, stdv)
-        stdv1 = 1. / math.sqrt(self.bias.shape[0])
-        self.bias.data.uniform_(-stdv1, stdv1)
+        stdv = 1.0 / math.sqrt(self.bias.shape[0])
+        self.bias.data.uniform_(-stdv, stdv)
 
-    def _concat(self, x, x_):
-        x_ = x_.unsqueeze(0)
-        return torch.cat([x, x_], dim=0)
+    @staticmethod
+    def _concat(x, x_next):
+        return torch.cat([x, x_next.unsqueeze(0)], dim=0)
 
-    def forward(self, X, A_q, A_h):
-        """
-        :param X: Input data of shape (batch_size, num_nodes, num_timesteps)
-        :A_q: The forward random walk matrix (num_nodes, num_nodes)
-        :A_h: The backward random walk matrix (num_nodes, num_nodes)
-        :return: Output data of shape (batch_size, num_nodes, num_features)
-        """
-        batch_size = X.shape[0]  # batch_size
-        num_node = X.shape[1]
-        input_size = X.size(2)  # time_length
-        supports = []
-        supports.append(A_q)
-        supports.append(A_h)
-
-        x0 = X.permute(1, 2, 0)  #(num_nodes, num_times, batch_size)
-        x0 = torch.reshape(x0, shape=[num_node, input_size * batch_size])
-        x = torch.unsqueeze(x0, 0)
-        for support in supports:
+    def forward(self, x, A_q, A_h):
+        batch_size, num_nodes, input_size = x.shape
+        x0 = x.permute(1, 2, 0).reshape(num_nodes, input_size * batch_size)
+        features = torch.unsqueeze(x0, 0)
+        for support in (A_q, A_h):
             x1 = torch.mm(support, x0)
-            x = self._concat(x, x1)
-            for k in range(2, self.orders + 1):
+            features = self._concat(features, x1)
+            for _ in range(2, self.orders + 1):
                 x2 = 2 * torch.mm(support, x1) - x0
-                x = self._concat(x, x2)
+                features = self._concat(features, x2)
                 x1, x0 = x2, x1
 
-        x = torch.reshape(
-            x, shape=[self.num_matrices, num_node, input_size, batch_size])
-        x = x.permute(3, 1, 2, 0)  # (batch_size, num_nodes, input_size, order)
-        x = torch.reshape(
-            x, shape=[batch_size, num_node, input_size * self.num_matrices])
-        x = torch.matmul(
-            x, self.Theta1)  # (batch_size * self._num_nodes, output_size)
-        x = x + self.bias
-        return x
-
-
-class MixHopDiffConv(nn.Module):
-    """Diffusion convolution with learnable higher-order support mixing."""
-
-    def __init__(self, in_channels, out_channels, k_hop):
-        super(MixHopDiffConv, self).__init__()
-        self.orders = max(1, int(k_hop))
-        self.num_matrices = 2 * self.orders + 1
-        self.Theta1 = nn.Parameter(
-            torch.FloatTensor(in_channels * self.num_matrices, out_channels))
-        self.bias = nn.Parameter(torch.FloatTensor(out_channels))
-        self.support_logits = nn.Parameter(torch.zeros(self.num_matrices))
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        stdv = 1. / math.sqrt(self.Theta1.shape[1])
-        self.Theta1.data.uniform_(-stdv, stdv)
-        stdv1 = 1. / math.sqrt(self.bias.shape[0])
-        self.bias.data.uniform_(-stdv1, stdv1)
-        nn.init.zeros_(self.support_logits)
-
-    def _aggregate(self, support, x):
-        return torch.einsum("nm,bmc->bnc", support, x).contiguous()
-
-    def forward(self, X, A_q, A_h):
-        features = [X]
-        current_q = X
-        current_h = X
-        for _ in range(self.orders):
-            current_q = self._aggregate(A_q, current_q)
-            current_h = self._aggregate(A_h, current_h)
-            features.extend([current_q, current_h])
-        weights = torch.softmax(self.support_logits, dim=0).to(dtype=X.dtype)
-        mixed = torch.cat([feat * weights[idx] for idx, feat in enumerate(features)], dim=-1)
-        return torch.matmul(mixed, self.Theta1) + self.bias
+        features = features.reshape(
+            self.num_matrices,
+            num_nodes,
+            input_size,
+            batch_size,
+        )
+        features = features.permute(3, 1, 2, 0).reshape(
+            batch_size,
+            num_nodes,
+            input_size * self.num_matrices,
+        )
+        return torch.matmul(features, self.Theta1) + self.bias
 
 
 class DCRNNCell(GraphGRUCellBase):
-    """The Diffusion Convolutional Recurrent cell from the paper
-    `"Diffusion Convolutional Recurrent Neural Network: Data-Driven Traffic
-    Forecasting" <https://arxiv.org/abs/1707.01926>`_ (Li et al., ICLR 2018).
-
-    Args:
-        input_size: Size of the input.
-        hidden_size: Number of units in the hidden state.
-        k: Size of the diffusion kernel.
-        root_weight: Whether to learn a separate transformation for the central
-            node.
-    """
+    """Diffusion convolutional recurrent cell (Li et al., ICLR 2018)."""
 
     def __init__(self, input_size: int, hidden_size: int, k: int = 2):
-        # instantiate gates
         forget_gate = DiffConv(input_size + hidden_size, hidden_size, k)
         update_gate = DiffConv(input_size + hidden_size, hidden_size, k)
         candidate_gate = DiffConv(input_size + hidden_size, hidden_size, k)
-        super(DCRNNCell, self).__init__(hidden_size=hidden_size,
-                                        forget_gate=forget_gate,
-                                        update_gate=update_gate,
-                                        candidate_gate=candidate_gate)
-
-
-class LayerNormDCRNNCell(DCRNNCell):
-
-    def __init__(self, input_size: int, hidden_size: int, k: int = 2):
-        super(LayerNormDCRNNCell, self).__init__(input_size, hidden_size, k)
-        self.norm = nn.LayerNorm(hidden_size)
-
-    def forward(self, x, h, A_q, A_h):
-        return self.norm(super().forward(x, h, A_q, A_h))
-
-
-class ResidualDCRNNCell(DCRNNCell):
-
-    def __init__(self, input_size: int, hidden_size: int, k: int = 2):
-        super(ResidualDCRNNCell, self).__init__(input_size, hidden_size, k)
-        self.input_proj = nn.Linear(input_size, hidden_size) if input_size != hidden_size else nn.Identity()
-        self.norm = nn.LayerNorm(hidden_size)
-
-    def forward(self, x, h, A_q, A_h):
-        return self.norm(super().forward(x, h, A_q, A_h) + self.input_proj(x))
-
-
-class MGDCRNNCell(nn.Module):
-
-    def __init__(self, input_size: int, hidden_size: int, k: int = 2):
-        super(MGDCRNNCell, self).__init__()
-        self.hidden_size = hidden_size
-        self.mix_gate = DiffConv(input_size + hidden_size, hidden_size, k)
-        self.candidate_gate = DiffConv(input_size + hidden_size, hidden_size, k)
-        self.norm = nn.LayerNorm(hidden_size)
-
-    def initialize_state(self, x):
-        return torch.zeros(
-            x.size(0),
-            x.size(-2),
-            self.hidden_size,
-            dtype=x.dtype,
-            device=x.device,
+        super(DCRNNCell, self).__init__(
+            hidden_size=hidden_size,
+            forget_gate=forget_gate,
+            update_gate=update_gate,
+            candidate_gate=candidate_gate,
         )
-
-    def forward(self, x, h, A_q, A_h):
-        x_gates = torch.cat([x, h], dim=-1)
-        z = torch.sigmoid(self.mix_gate(x_gates, A_q, A_h))
-        x_c = torch.cat([x, z * h], dim=-1)
-        c = torch.tanh(self.candidate_gate(x_c, A_q, A_h))
-        return self.norm(z * h + (1.0 - z) * c)
-
-
-class LocalGateDCRNNCell(nn.Module):
-
-    def __init__(self, input_size: int, hidden_size: int, k: int = 2):
-        super(LocalGateDCRNNCell, self).__init__()
-        self.hidden_size = hidden_size
-        self.forget_gate = nn.Linear(input_size + hidden_size, hidden_size)
-        self.update_gate = nn.Linear(input_size + hidden_size, hidden_size)
-        self.candidate_gate = DiffConv(input_size + hidden_size, hidden_size, k)
-        self.norm = nn.LayerNorm(hidden_size)
-
-    def initialize_state(self, x):
-        return torch.zeros(
-            x.size(0),
-            x.size(-2),
-            self.hidden_size,
-            dtype=x.dtype,
-            device=x.device,
-        )
-
-    def forward(self, x, h, A_q, A_h):
-        x_gates = torch.cat([x, h], dim=-1)
-        r = torch.sigmoid(self.forget_gate(x_gates))
-        u = torch.sigmoid(self.update_gate(x_gates))
-        x_c = torch.cat([x, r * h], dim=-1)
-        c = torch.tanh(self.candidate_gate(x_c, A_q, A_h))
-        return self.norm(u * h + (1.0 - u) * c)
-
-
-class HighwayDCRNNCell(DCRNNCell):
-
-    def __init__(self, input_size: int, hidden_size: int, k: int = 2, max_scale: float = 0.10, init_gate: float = 0.10):
-        super(HighwayDCRNNCell, self).__init__(input_size, hidden_size, k)
-        self.max_scale = float(max_scale)
-        self.gate_norm = nn.LayerNorm(hidden_size * 2)
-        self.highway_gate = nn.Linear(hidden_size * 2, hidden_size)
-        nn.init.zeros_(self.highway_gate.weight)
-        init_gate = min(max(float(init_gate), 1e-4), 1.0 - 1e-4)
-        nn.init.constant_(self.highway_gate.bias, math.log(init_gate / (1.0 - init_gate)))
-
-    def forward(self, x, h, A_q, A_h):
-        h_new = super().forward(x, h, A_q, A_h)
-        gate = torch.sigmoid(self.highway_gate(self.gate_norm(torch.cat([h_new, h], dim=-1))))
-        carry = self.max_scale * gate
-        return (1.0 - carry) * h_new + carry * h
-
-
-class StateDecayDCRNNCell(DCRNNCell):
-    # GRU-D-inspired state retention gate for lifecycle inputs with missingness/age
-    # features. The base diffusion GRU update is unchanged; this gate only controls
-    # how much previous hidden state is carried forward.
-    def __init__(self, input_size: int, hidden_size: int, k: int = 2, max_decay_scale: float = 0.10, init_decay: float = 0.30):
-        super(StateDecayDCRNNCell, self).__init__(input_size, hidden_size, k)
-        self.max_decay_scale = float(max_decay_scale)
-        self.decay_norm = nn.LayerNorm(input_size + hidden_size)
-        self.decay_gate = nn.Linear(input_size + hidden_size, hidden_size)
-        nn.init.zeros_(self.decay_gate.weight)
-        init_decay = min(max(float(init_decay), 1e-4), 1.0 - 1e-4)
-        nn.init.constant_(self.decay_gate.bias, math.log(init_decay / (1.0 - init_decay)))
-
-    def forward(self, x, h, A_q, A_h):
-        h_new = super().forward(x, h, A_q, A_h)
-        decay = self.max_decay_scale * torch.sigmoid(self.decay_gate(self.decay_norm(torch.cat([x, h], dim=-1))))
-        return (1.0 - decay) * h_new + decay * h
-
-
-class SwiGLUTransition(nn.Module):
-
-    def __init__(self, hidden_size, expansion=2):
-        super(SwiGLUTransition, self).__init__()
-        inner_size = hidden_size * int(expansion)
-        self.norm = nn.LayerNorm(hidden_size)
-        self.value = nn.Linear(hidden_size, inner_size)
-        self.gate = nn.Linear(hidden_size, inner_size)
-        self.out = nn.Linear(inner_size, hidden_size)
-        nn.init.zeros_(self.out.weight)
-        nn.init.zeros_(self.out.bias)
-
-    def forward(self, x):
-        x = self.norm(x)
-        return self.out(self.value(x) * F.silu(self.gate(x)))
-
-
-class GatedFFNDCRNNCell(DCRNNCell):
-
-    def __init__(self, input_size: int, hidden_size: int, k: int = 2, transition_scale: float = 0.10):
-        super(GatedFFNDCRNNCell, self).__init__(input_size, hidden_size, k)
-        self.transition = SwiGLUTransition(hidden_size, expansion=2)
-        self.transition_scale = float(transition_scale)
-
-    def forward(self, x, h, A_q, A_h):
-        h_new = super().forward(x, h, A_q, A_h)
-        return h_new + self.transition_scale * self.transition(h_new)
-
-
-class AdaptiveGatedFFNDCRNNCell(DCRNNCell):
-
-    def __init__(self, input_size: int, hidden_size: int, k: int = 2, max_scale: float = 0.10, init_gate: float = 0.30):
-        super(AdaptiveGatedFFNDCRNNCell, self).__init__(input_size, hidden_size, k)
-        self.transition = SwiGLUTransition(hidden_size, expansion=2)
-        self.max_scale = float(max_scale)
-        self.gate_norm = nn.LayerNorm(hidden_size)
-        self.gate_proj = nn.Linear(hidden_size, 1)
-        nn.init.zeros_(self.gate_proj.weight)
-        init_gate = min(max(float(init_gate), 1e-4), 1.0 - 1e-4)
-        nn.init.constant_(self.gate_proj.bias, math.log(init_gate / (1.0 - init_gate)))
-
-    def forward(self, x, h, A_q, A_h):
-        h_new = super().forward(x, h, A_q, A_h)
-        gate = torch.sigmoid(self.gate_proj(self.gate_norm(h_new)))
-        return h_new + self.max_scale * gate * self.transition(h_new)
-
-
-class MixHopDCRNNCell(GraphGRUCellBase):
-
-    def __init__(self, input_size: int, hidden_size: int, k: int = 2):
-        forget_gate = MixHopDiffConv(input_size + hidden_size, hidden_size, k)
-        update_gate = MixHopDiffConv(input_size + hidden_size, hidden_size, k)
-        candidate_gate = MixHopDiffConv(input_size + hidden_size, hidden_size, k)
-        super(MixHopDCRNNCell, self).__init__(hidden_size=hidden_size,
-                                              forget_gate=forget_gate,
-                                              update_gate=update_gate,
-                                              candidate_gate=candidate_gate)
-        self.norm = nn.LayerNorm(hidden_size)
-
-    def forward(self, x, h, A_q, A_h):
-        return self.norm(super().forward(x, h, A_q, A_h))
-
-
-class SourceMixHopDCRNNCell(GraphGRUCellBase):
-
-    def __init__(self, input_size: int, hidden_size: int, k: int = 2):
-        forget_gate = SourceMixHopDiffConv(input_size + hidden_size, hidden_size, k)
-        update_gate = SourceMixHopDiffConv(input_size + hidden_size, hidden_size, k)
-        candidate_gate = SourceMixHopDiffConv(input_size + hidden_size, hidden_size, k)
-        super(SourceMixHopDCRNNCell, self).__init__(hidden_size=hidden_size,
-                                                    forget_gate=forget_gate,
-                                                    update_gate=update_gate,
-                                                    candidate_gate=candidate_gate)
-        self.norm = nn.LayerNorm(hidden_size)
-
-    def forward(self, x, h, A_q, A_h):
-        return self.norm(super().forward(x, h, A_q, A_h))
-
-
-class MoGERNNCell(MoGEGRUCellBase):
-
-    def __init__(self, experts_list, input_dim, hidden_dim, num_used_experts):
-        forget_gate = MoGE(experts_list, input_dim + hidden_dim, hidden_dim,
-                           num_used_experts)
-        update_gate = MoGE(experts_list, input_dim + hidden_dim, hidden_dim,
-                           num_used_experts)
-        candidate_gate = MoGE(
-            experts_list,
-            input_dim + hidden_dim,
-            hidden_dim,
-            num_used_experts,
-        )
-        super(MoGERNNCell, self).__init__(hidden_size=hidden_dim,
-                                          forget_gate=forget_gate,
-                                          update_gate=update_gate,
-                                          candidate_gate=candidate_gate)
-
-
-class SparseGatingNetwork(nn.Module):
-
-    def __init__(self, input_dim, hidden_dim, num_experts, num_used_experts):
-        super(SparseGatingNetwork, self).__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, num_experts)
-        self.k = num_used_experts
-
-    def forward(self, x):
-        """
-        Args:
-            x (torch.Tensor): 输入特征，维度为 [batch_size, input_dim]
-
-        Returns:
-            torch.Tensor: 每个专家的权重，维度为 [batch_size, num_experts]
-        """
-        x = F.relu(self.fc1(x))
-        logits = self.fc2(x)
-        topk_values, topk_indices = torch.topk(logits, self.k, dim=-1)
-        mask = torch.zeros_like(logits).scatter_(-1, topk_indices, 1.0)
-        sparse_logits = logits * mask
-        weights = F.softmax(sparse_logits, dim=-1)
-        return weights
-
-
-class GraphExpert(nn.Module):
-
-    def __init__(self, gnn: nn.Module):
-        super(GraphExpert, self).__init__()
-        self.gnn = gnn
-
-    def forward(self, x_enc, adj, batch_unknown_nodes, *args):
-        return self.gnn(adj, x_enc, batch_unknown_nodes, *args)
-
-
-class MoGE(nn.Module):
-
-    def __init__(self, experts_list, input_dim, hidden_dim, num_used_experts):
-        super(MoGE, self).__init__()
-        experts = []
-        if 'mean_expert' in experts_list:
-            experts.append(MeanAggregator(input_dim, hidden_dim))
-        if 'weight_expert' in experts_list:
-            experts.append(WMeanAggregator(input_dim, hidden_dim))
-        if 'max_expert' in experts_list:
-            experts.append(MaxPoolingAggregator(input_dim, hidden_dim))
-        if 'min_expert' in experts_list:
-            experts.append(MinPoolingAggregator(input_dim, hidden_dim))
-        if 'diffusion_expert' in experts_list:
-            experts.append(DiffusionAggregator(input_dim, hidden_dim))
-        self.experts = nn.ModuleList(
-            [GraphExpert(expert) for expert in experts])
-        num_experts = len(experts)
-
-        self.gating = SparseGatingNetwork(input_dim, hidden_dim, num_experts,
-                                          num_used_experts)
-
-    def forward(self, x_enc, adj, batch_unknown_nodes, *args):
-        gate_weights = self.gating(x_enc)
-        expert_outputs = [
-            expert(x_enc, adj, batch_unknown_nodes, *args)
-            for expert in self.experts
-        ]
-        expert_outputs_stack = torch.stack(expert_outputs, dim=2)
-        combied_out = torch.sum(gate_weights.unsqueeze(-1) *
-                                expert_outputs_stack,
-                                dim=2)
-        return combied_out

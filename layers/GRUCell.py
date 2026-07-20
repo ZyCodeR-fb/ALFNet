@@ -1,9 +1,5 @@
-from typing import Tuple, Union
-
 import torch
 from torch import Tensor, nn
-
-StateType = Union[Tensor, Tuple[Tensor]]
 
 
 class GRUCell(nn.Module):
@@ -54,31 +50,3 @@ class GraphGRUCellBase(GRUCell):
                            self.hidden_size,
                            dtype=x.dtype,
                            device=x.device)
-
-
-class MoGEGRUCellBase(GRUCell):
-    """Base class for implementing graph-based gated recurrent unit (GRU)
-    cells."""
-
-    def initialize_state(self, x) -> Tensor:
-        return torch.zeros(x.size(0),
-                           x.size(-2),
-                           self.hidden_size,
-                           dtype=x.dtype,
-                           device=x.device)
-
-    def forward(self, x: Tensor, h: Tensor, adj, bacth_unknown_nodes, A_q,
-                A_h) -> Tensor:
-        """"""
-        # x: [batch, *, channels]
-        # h: [batch, *, channels]
-        x_gates = torch.cat([x, h], dim=-1)
-        r = torch.sigmoid(
-            self.forget_gate(x_gates, adj, bacth_unknown_nodes, A_q, A_h))
-        u = torch.sigmoid(
-            self.update_gate(x_gates, adj, bacth_unknown_nodes, A_q, A_h))
-        x_c = torch.cat([x, r * h], dim=-1)
-        c = torch.tanh(
-            self.candidate_gate(x_c, adj, bacth_unknown_nodes, A_q, A_h))
-        h_new = u * h + (1. - u) * c
-        return h_new

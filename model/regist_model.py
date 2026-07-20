@@ -13,7 +13,6 @@ model_dict = {
     'GWNET': GWNET,
     'STID': STID,
     'PatchSTG': PatchSTG,
-    'RoleFusion': RoleFusion,
     'SLPF': SLPF,
     'STBP': STBP,
     'MCPST_FSL': MCPST_FSL,
