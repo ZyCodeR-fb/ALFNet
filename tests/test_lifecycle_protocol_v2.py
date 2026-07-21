@@ -430,7 +430,7 @@ def test_checkpoint_uses_point_one_percent_primary_then_worst_group_tiebreak():
     assert not _accept_lifecycle_checkpoint(10.02, 10.0, 1.0, 11.0)
 
 
-def _build_v2_dataset(tmp_path, flag):
+def _build_v2_dataset(tmp_path, flag, overwrite_manifest=True):
     num_steps = 480
     num_nodes = 12
     values = np.ones((num_steps, num_nodes, 3), dtype=np.float32)
@@ -440,7 +440,7 @@ def _build_v2_dataset(tmp_path, flag):
         + 1.0
     )
     values[20, 3, 2] = np.nan
-    timestamps = np.datetime64("2026-01-01T00:00") + np.arange(num_steps) * np.timedelta64(5, "m")
+    timestamps = np.datetime64("2026-01-01T11:00") + np.arange(num_steps) * np.timedelta64(5, "m")
     data_path = tmp_path / "toy.npy"
     np.save(
         data_path,
@@ -472,7 +472,7 @@ def _build_v2_dataset(tmp_path, flag):
         lcbt_steady_ratio=0.25,
         lcbt_zero_history_ratio=0.25,
         lifecycle_age_mode="state_duration",
-        lcbt_overwrite_manifest=True,
+        lcbt_overwrite_manifest=overwrite_manifest,
     )
 
 
@@ -502,13 +502,26 @@ def test_v2_dataset_uses_true_validation_unseen_and_cohort_only_targets():
     np.testing.assert_array_equal(steady[7], onset[7])
     assert not np.array_equal(unseen[0], cold[0], equal_nan=True)
     assert not np.array_equal(steady[0], onset[0], equal_nan=True)
-
     cold_nodes = np.flatnonzero(cold[7] > 0)
     onset_nodes = np.flatnonzero(onset[7] > 0)
     assert np.all(cold[0][-1, cold_nodes, -1] == 1.0)
     assert np.all(unseen[0][-1, cold_nodes, -1] == 0.0)
     assert np.all(onset[0][-1, onset_nodes, -1] == 0.0)
     assert np.all(steady[0][-1, onset_nodes, -1] == 1.0)
+
+
+def test_v2_train_and_validation_share_one_frozen_manifest_without_overwrite():
+    workdir = ROOT / ".pytest_cache" / "lifecycle_v2_manifest_identity"
+    workdir.mkdir(parents=True, exist_ok=True)
+    manifest_path = workdir / "manifests" / "TOY" / "lcbt_v2" / "protocol_manifest.json"
+    if manifest_path.exists():
+        manifest_path.unlink()
+
+    train = _build_v2_dataset(workdir, "train", overwrite_manifest=False)
+    validation = _build_v2_dataset(workdir, "val", overwrite_manifest=False)
+
+    assert train.training_protocol_hash == validation.training_protocol_hash
+    assert train.protocol_manifest == validation.protocol_manifest
 
 
 def test_async_v2_provider_uses_inclusive_clock_and_frozen_test_unseen_pool():

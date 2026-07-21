@@ -1170,8 +1170,15 @@ class LifecycleCoveragePEMS(Dataset):
             self.input_len,
             self.pred_len,
         )
+        validation_regimes = _lcbt_window_regimes(
+            self.full_timestamps,
+            self.boundaries["val_start"],
+            self.boundaries["val_end"],
+            self.input_len,
+            self.pred_len,
+        )
         regimes = [
-            self.calendar_regimes[int(origin)]
+            validation_regimes[int(origin)]
             for origin in origins
         ]
         selection_schedule = build_lcbt_v2_schedule(
