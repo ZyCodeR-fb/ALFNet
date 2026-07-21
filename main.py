@@ -301,6 +301,11 @@ def _checkpoint_run_metadata(checkpoint, checkpoint_dir, checkpoint_file):
         "max_epoch": config.get("max_epoch") if isinstance(config, dict) else None,
         "patience": config.get("patience") if isinstance(config, dict) else None,
         "stop_based": config.get("stop_based") if isinstance(config, dict) else None,
+        "training_protocol_hash": (
+            config.get("training_protocol_hash")
+            if isinstance(config, dict)
+            else None
+        ),
     }
 
 
@@ -355,6 +360,13 @@ def _pretrained_snapshot_payload(pretrained, args):
                     "lifecycle_observation_mask_feature",
                     False,
                 ),
+                "lifecycle_age_mode": getattr(
+                    args,
+                    "lifecycle_age_mode",
+                    "legacy_cumulative",
+                ),
+                "lce_protocol_version": getattr(args, "lce_protocol_version", 0),
+                "ples_protocol_version": getattr(args, "ples_protocol_version", 1),
             },
             "model_class": pretrained.__class__.__name__,
             "model_module": pretrained.__class__.__module__,
@@ -440,7 +452,7 @@ if __name__ == "__main__":
     train_loader = data_provider(args, "train")
     args.slide_step = slide_step
     val_loader = data_provider(args, "val")
-    is_lcbt = args.lifecycle_training_strategy == "lcbt_v1"
+    is_lcbt = args.lifecycle_training_strategy in {"lcbt_v1", "lcbt_v2"}
     if is_lcbt:
         data_loaders = {"train": train_loader, "val": val_loader}
         test_loader = None

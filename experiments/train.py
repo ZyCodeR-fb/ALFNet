@@ -68,7 +68,12 @@ def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch
             if len(mode_metrics) > 4:
                 metrics.update({f"{mode}_role  ": mode_metrics[4]})
             if len(mode_metrics) > 5 and mode_metrics[5]:
-                metrics.update({f"{mode}_phase": mode_metrics[5]})
+                suffix = (
+                    "lifecycle"
+                    if args.lifecycle_training_strategy == "lcbt_v2"
+                    else "phase"
+                )
+                metrics.update({f"{mode}_{suffix}": mode_metrics[5]})
         total_y[mode] = total_y_mode
 
     if train:
@@ -80,6 +85,8 @@ def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch
                 metric_name = "val_role  "
             elif args.stop_based == "val_phase":
                 metric_name = "val_phase"
+            elif args.stop_based == "val_lifecycle":
+                metric_name = "val_lifecycle"
             else:
                 metric_name = "val_mask  "
         elif "train" in args.stop_based:
@@ -90,7 +97,21 @@ def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch
                 metric_name = "train_role  "
             else:
                 metric_name = "train_mask  "
-        metric_key = "mae" if args.stop_based == "val_phase" else args.loss
+        metric_key = (
+            "mae"
+            if args.stop_based in {"val_phase", "val_lifecycle"}
+            else args.loss
+        )
+        tie_metric = (
+            metrics[metric_name].get("worst_group_mae")
+            if args.stop_based == "val_lifecycle"
+            else None
+        )
+        lifecycle_metrics = (
+            metrics[metric_name]
+            if args.stop_based == "val_lifecycle"
+            else None
+        )
         save_checkpoint(
             model,
             optimizer,
@@ -100,6 +121,8 @@ def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch
             metrics[metric_name][metric_key],
             total_y,
             metric_name,
+            tie_metric=tie_metric,
+            lifecycle_metrics=lifecycle_metrics,
         )
         if "test" in data_loaders:
             save_checkpoint(
@@ -125,20 +148,65 @@ def better_metric(metric_a, metric_b):
     return metric_a < metric_b
 
 
-def save_checkpoint(model, optimizer, args, epoch, mode, now_metric, total_y, metric_name):
+def _accept_lifecycle_checkpoint(now_metric, best_metric, tie_metric, best_tie_metric):
+    if not math.isfinite(best_metric):
+        return True
+    tolerance = max(abs(best_metric), 1e-12) * 0.001
+    if now_metric < best_metric - tolerance:
+        return True
+    if abs(now_metric - best_metric) <= tolerance:
+        return (
+            tie_metric is not None
+            and math.isfinite(tie_metric)
+            and tie_metric < best_tie_metric
+        )
+    return False
+
+
+def save_checkpoint(
+    model,
+    optimizer,
+    args,
+    epoch,
+    mode,
+    now_metric,
+    total_y,
+    metric_name,
+    tie_metric=None,
+    lifecycle_metrics=None,
+):
     checkpoint_path = args.best_checkpoint_path + f"best_{mode}_checkpoint.pth"
     best_metric = getattr(args, f"best_{mode}_metric")
     if not math.isfinite(now_metric):
         print(f"-> Skip saving best {metric_name}: metric is non-finite ({now_metric})")
         return
     try:  # try-except here because checkpoint fname could be too long
-        if better_metric(now_metric, best_metric) or epoch == 0:
+        if args.stop_based == "val_lifecycle" and mode == "val":
+            accepted = _accept_lifecycle_checkpoint(
+                now_metric,
+                best_metric,
+                tie_metric,
+                args.best_val_worst_group_metric,
+            )
+        else:
+            accepted = better_metric(now_metric, best_metric) or epoch == 0
+        if accepted:
             setattr(args, f"best_{mode}_metric", now_metric)
             setattr(args, f"best_{mode}_metric_epoch", epoch)
+            if mode == "val" and tie_metric is not None:
+                args.best_val_worst_group_metric = float(tie_metric)
+            if mode == "val" and lifecycle_metrics is not None:
+                args.best_val_lifecycle_metrics = {
+                    str(key): float(value)
+                    for key, value in lifecycle_metrics.items()
+                    if isinstance(value, (int, float)) and math.isfinite(value)
+                }
             torch.save(
                 {
                     "epoch": epoch,
                     "val_metric": now_metric,
+                    "val_worst_group_metric": tie_metric,
+                    "val_lifecycle_metrics": lifecycle_metrics,
                     "state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "config": {
@@ -158,6 +226,11 @@ def save_checkpoint(model, optimizer, args, epoch, mode, now_metric, total_y, me
                             args,
                             "lifecycle_observation_mask_feature",
                             False,
+                        ),
+                        "lifecycle_age_mode": getattr(
+                            args,
+                            "lifecycle_age_mode",
+                            "legacy_cumulative",
                         ),
                         "training_protocol_hash": getattr(
                             args,
@@ -197,6 +270,16 @@ def _write_training_summary(args, finished_epoch, stop_reason):
         ),
         "best_train_metric": _finite_or_none(args.best_train_metric),
         "best_val_metric": _finite_or_none(args.best_val_metric),
+        "best_val_worst_group_metric": (
+            _finite_or_none(args.best_val_worst_group_metric)
+            if args.stop_based == "val_lifecycle"
+            else None
+        ),
+        "best_val_lifecycle_metrics": getattr(
+            args,
+            "best_val_lifecycle_metrics",
+            {},
+        ),
         "best_test_metric": (
             _finite_or_none(args.best_test_metric) if has_test_checkpoint else None
         ),
@@ -241,6 +324,8 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
 
     args.best_val_metric = 1e10
     args.best_val_metric_epoch = -1
+    args.best_val_worst_group_metric = 1e10
+    args.best_val_lifecycle_metrics = {}
     args.best_train_metric = 1e10  # Interpolation / fitting also good to test
     args.best_train_metric_epoch = -1
     args.best_test_metric = 1e10
@@ -255,7 +340,7 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
     wait_count = 0
     stopped_early = False
     use_legacy_early_stop_grace = (
-        args.lifecycle_training_strategy != "lcbt_v1"
+        args.lifecycle_training_strategy not in {"lcbt_v1", "lcbt_v2"}
     )
     for epoch in range(1, args.max_epoch + 1):
         print(f"-> Epoch {epoch} started...")

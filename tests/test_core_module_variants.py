@@ -72,10 +72,29 @@ def _load_module(module_name, relative_path):
     return module
 
 
+_stubbed_timm_modules = (
+    "timm",
+    "timm.models",
+    "timm.models.vision_transformer",
+)
+_saved_timm_modules = {
+    name: sys.modules.get(name) for name in _stubbed_timm_modules
+}
 _install_timm_stub()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+_stubbed_model_modules = (
+    "model",
+    "model.ALFTemporal",
+    "model.ALFTemporal.ALFTemporal",
+    "model.ALFTemporal.patchstg",
+    "model.comparison_model",
+    "model.comparison_model.family_utils",
+)
+_saved_model_modules = {
+    name: sys.modules.get(name) for name in _stubbed_model_modules
+}
 _model_pkg = types.ModuleType("model")
 _model_pkg.__path__ = [str(ROOT / "model")]
 _alftemporal_pkg = types.ModuleType("model.ALFTemporal")
@@ -110,6 +129,17 @@ _source_timefilter = _load_module(
     "layers/source_timefilter.py",
 )
 
+for _name, _module in _saved_model_modules.items():
+    if _module is None:
+        sys.modules.pop(_name, None)
+    else:
+        sys.modules[_name] = _module
+for _name, _module in _saved_timm_modules.items():
+    if _module is None:
+        sys.modules.pop(_name, None)
+    else:
+        sys.modules[_name] = _module
+
 
 def _read_yaml(relative_path):
     with (ROOT / relative_path).open("r", encoding="utf-8") as stream:
@@ -121,6 +151,8 @@ def test_final_yaml_surface_preserves_rf_alf_sd_and_adds_lcbt_ablations():
         path.name for path in (ROOT / "configs/ALFNet").glob("*.yaml")
     ) == [
         "rf_alf_sd.yaml",
+        "rf_lcb2_g.yaml",
+        "rf_lcb2_s.yaml",
         "rf_lcb_g.yaml",
         "rf_lcb_s.yaml",
     ]
@@ -134,6 +166,8 @@ def test_final_yaml_surface_preserves_rf_alf_sd_and_adds_lcbt_ablations():
     alfnet = _read_yaml("configs/ALFNet/rf_alf_sd.yaml")
     graph_lcbt = _read_yaml("configs/ALFNet/rf_lcb_g.yaml")
     shared_lcbt = _read_yaml("configs/ALFNet/rf_lcb_s.yaml")
+    graph_lcbt_v2 = _read_yaml("configs/ALFNet/rf_lcb2_g.yaml")
+    shared_lcbt_v2 = _read_yaml("configs/ALFNet/rf_lcb2_s.yaml")
     graph = _read_yaml("configs/ALFGraph/METRLA_alfgraph_sd.yaml")
     temporal = _read_yaml("configs/ALFTemporal/METRLA_alftemporal_t65.yaml")
 
@@ -157,6 +191,10 @@ def test_final_yaml_surface_preserves_rf_alf_sd_and_adds_lcbt_ablations():
     assert shared_lcbt["family"]["experts"]["graph"]["family_overrides"] == {
         "recipe": {"use_grin_input_imputer": False}
     }
+    assert graph_lcbt_v2["lifecycle"]["lifecycle_training_strategy"] == "lcbt_v2"
+    assert graph_lcbt_v2["family"]["recipe"]["input_imputation_scope"] == "graph"
+    assert shared_lcbt_v2["lifecycle"]["lifecycle_training_strategy"] == "lcbt_v2"
+    assert shared_lcbt_v2["family"]["recipe"]["input_imputation_scope"] == "shared"
 
 
 def test_alftemporal_kdtree_layout_covers_every_node():

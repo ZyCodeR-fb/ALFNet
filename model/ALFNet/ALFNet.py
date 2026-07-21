@@ -307,6 +307,9 @@ class Model(nn.Module):
         self.lifecycle_observation_mask_feature = bool(
             getattr(configs, "lifecycle_observation_mask_feature", False)
         )
+        self.lifecycle_training_strategy = str(
+            getattr(configs, "lifecycle_training_strategy", "")
+        )
         full_adj = load_project_adjacency({"data_path": configs.data_path})
         self.full_num_nodes = int(full_adj.shape[0])
         self.known_nodes, _ = resolve_known_unknown_nodes(
@@ -844,9 +847,18 @@ class Model(nn.Module):
 
         aux_losses = {}
         if self.lambda_patch_residual > 0:
-            aux_losses["ALFNet_patch_residual"] = (
-                self.lambda_patch_residual * residual.pow(2).mean()
-            )
+            if self.lifecycle_training_strategy == "lcbt_v2":
+                routing_meta_aux = {
+                    "ALFNet_patch_residual": self.lambda_patch_residual
+                    * residual.pow(2)
+                }
+            else:
+                aux_losses["ALFNet_patch_residual"] = (
+                    self.lambda_patch_residual * residual.pow(2).mean()
+                )
+                routing_meta_aux = None
+        else:
+            routing_meta_aux = None
         alpha = 1.0 - beta
         routing_meta = {
             "alpha": alpha,
@@ -856,6 +868,8 @@ class Model(nn.Module):
             "lambda_role_balanced": self.lambda_role_balanced,
             "lambda_regret": self.lambda_regret,
         }
+        if routing_meta_aux is not None:
+            routing_meta["masked_aux_loss_elements"] = routing_meta_aux
         if self.lambda_patch_delta > 0:
             routing_meta["patch_residual_training"] = {
                 "residual": residual,
@@ -916,11 +930,17 @@ class Model(nn.Module):
             "patch_residual_training",
             None,
         )
+        masked_aux_loss_elements = routing_meta.pop(
+            "masked_aux_loss_elements",
+            None,
+        )
         output = {
             "pred": pred,
             "aux_losses": aux_losses,
             "oracle_routing": routing_meta,
         }
+        if masked_aux_loss_elements is not None:
+            output["masked_aux_loss_elements"] = masked_aux_loss_elements
         if self.forecast_loss_mode != "standard":
             output["forecast_loss_mode"] = self.forecast_loss_mode
             output["forecast_role_balanced_beta"] = (

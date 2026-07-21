@@ -13,6 +13,7 @@ from data_provider.lcbt_protocol import (
     lcbt_manifest_hash,
     resolve_lcbt_boundaries,
 )
+from data_provider.graph_data_loader import _lcbt_schedule_summary
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +36,26 @@ LCBT_CONFIGS = [
 ] + [
     ROOT / "configs" / "ALFNet" / "rf_lcb_g.yaml",
     ROOT / "configs" / "ALFNet" / "rf_lcb_s.yaml",
+]
+LCBT_V2_CONFIGS = [
+    ROOT / "configs" / family / "METRLA_lcbt_v2.yaml"
+    for family in (
+        "MoGERNN",
+        "PatchSTG",
+        "FCLSTM",
+        "GWNET",
+        "HA",
+        "MCPST_FSL",
+        "SLPF",
+        "STBP",
+        "STFiT",
+        "STGCN",
+        "STGODE",
+        "STID",
+    )
+] + [
+    ROOT / "configs" / "ALFNet" / "rf_lcb2_g.yaml",
+    ROOT / "configs" / "ALFNet" / "rf_lcb2_s.yaml",
 ]
 
 
@@ -109,6 +130,11 @@ def test_lcbt_schedule_balances_scenarios_and_all_transition_positions():
     }
     assert phase_ids == set(range(len(LCBT_PHASES)))
     assert all(item["phase_id"] == -1 for item in schedule if item["scenario"] == "steady")
+    summary = _lcbt_schedule_summary(schedule, num_nodes, input_len=12)
+    assert summary["scenario_histogram"] == {"join": 104, "fault": 104, "steady": 52}
+    assert summary["transition_histogram"]["join"] == {
+        str(index): 8 for index in range(13)
+    }
 
 
 def test_effective_mask_combines_natural_and_lifecycle_missingness():
@@ -266,7 +292,11 @@ def _lcbt_smoke_input(torch, args, num_nodes, batch_size=1):
     return x_enc, x_dec, enc_t_mark, dec_t_mark
 
 
-@pytest.mark.parametrize("config_path", LCBT_CONFIGS, ids=lambda path: path.parent.name)
+@pytest.mark.parametrize(
+    "config_path",
+    LCBT_CONFIGS + LCBT_V2_CONFIGS,
+    ids=lambda path: f"{path.parent.name}-{path.stem}",
+)
 def test_all_lcbt_models_build_and_accept_a_finite_tail_batch(config_path):
     (
         torch,
@@ -327,6 +357,8 @@ def test_lcbt_grin_scope_and_final_model_regression_contract():
         "configs/ALFNet/rf_alf_sd.yaml": ("graph", True, False),
         "configs/ALFNet/rf_lcb_g.yaml": ("graph", True, False),
         "configs/ALFNet/rf_lcb_s.yaml": ("shared", False, True),
+        "configs/ALFNet/rf_lcb2_g.yaml": ("graph", True, False),
+        "configs/ALFNet/rf_lcb2_s.yaml": ("shared", False, True),
     }
     for config_path, expected in cases.items():
         args = load_args_from_config(

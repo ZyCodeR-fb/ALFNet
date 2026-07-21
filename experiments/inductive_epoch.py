@@ -4,7 +4,9 @@ import random
 import torch.nn.functional as F
 from data_provider.lcbt_protocol import (
     LCBT_PHASES,
+    accumulate_lifecycle_mae,
     accumulate_phase_mae,
+    finalize_lifecycle_validation_mae,
     finalize_phase_mae,
 )
 from utils.model_output import sum_aux_losses, unpack_model_output
@@ -302,6 +304,7 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
     metrics_role = metrics.copy()
     phase_error_sums = [0.0] * len(LCBT_PHASES)
     phase_counts = [0] * len(LCBT_PHASES)
+    lifecycle_cell_mae = {}
     if mode == "train" and train == True:
         model.train()
         model.zero_grad()
@@ -321,7 +324,9 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
 
     with torch.set_grad_enabled(grad_enabled):
         model.to(args.device)
-        is_lcbt = getattr(args, "lifecycle_training_strategy", "") == "lcbt_v1"
+        lifecycle_strategy = getattr(args, "lifecycle_training_strategy", "")
+        is_lcbt = lifecycle_strategy in {"lcbt_v1", "lcbt_v2"}
+        is_lcbt_v2 = lifecycle_strategy == "lcbt_v2"
         max_bacth_num = (
             len(dataloader)
             if is_lcbt or mode != "train"
@@ -334,7 +339,25 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
             sample_role_weights = None
             phase_ids = None
             changed_node_mask = None
-            if len(batch) == 7:
+            group_ids = None
+            target_cohort_mask = None
+            calendar_ids = None
+            if len(batch) == 9:
+                (
+                    x_enc,
+                    x_dec,
+                    enc_t_mark,
+                    dec_t_mark,
+                    sample_role_weights,
+                    phase_ids,
+                    group_ids,
+                    target_cohort_mask,
+                    calendar_ids,
+                ) = batch
+                phase_ids = phase_ids.long()
+                group_ids = group_ids.long()
+                calendar_ids = calendar_ids.long()
+            elif len(batch) == 7:
                 (
                     x_enc,
                     x_dec,
@@ -377,6 +400,8 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                     sample_role_weights = sample_role_weights[..., batch_known_nodes, :]
                 if changed_node_mask is not None:
                     changed_node_mask = changed_node_mask[..., batch_known_nodes]
+                if target_cohort_mask is not None:
+                    target_cohort_mask = target_cohort_mask[..., batch_known_nodes]
                 # 每次还得给一些节点(25%)赋值为0，保留图结构
                 should_apply_random_mask = (not args.train_for_async_lifecycle) or args.lifecycle_keep_random_mask
                 if should_apply_random_mask:
@@ -395,6 +420,12 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
             if sample_role_weights is not None and sample_role_weights.shape != y_hat.shape:
                 sample_role_weights = None
             y_omi = torch.isnan(y_for_loss)
+            if is_lcbt_v2:
+                if target_cohort_mask is None:
+                    raise RuntimeError("LCBT v2 batch is missing target_cohort_mask")
+                cohort_valid = target_cohort_mask[:, None, :, None] > 0.5
+                cohort_valid = cohort_valid.expand_as(y_for_loss)
+                y_omi = y_omi | (~cohort_valid)
             if (~y_omi).sum() == 0:
                 continue
             loss = criterions[args.loss](y_hat[~y_omi], y_for_loss[~y_omi])
@@ -439,6 +470,16 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                 aux_loss = sum_aux_losses(output_meta.get("aux_losses"), device=y_hat.device)
                 if aux_loss is not None:
                     optimize_loss = optimize_loss + aux_loss
+                masked_aux_elements = output_meta.get("masked_aux_loss_elements")
+                if masked_aux_elements:
+                    for aux_name, aux_elements in masked_aux_elements.items():
+                        if aux_elements.shape != y_hat.shape:
+                            raise ValueError(
+                                f"masked auxiliary loss {aux_name} must match prediction shape"
+                            )
+                        aux_valid = (~y_omi) & torch.isfinite(aux_elements)
+                        if aux_valid.any():
+                            optimize_loss = optimize_loss + aux_elements[aux_valid].mean()
                 oracle_routing = output_meta.get("oracle_routing")
                 if oracle_routing:
                     alpha = oracle_routing["alpha"].clamp(1e-6, 1.0 - 1e-6)
@@ -508,7 +549,7 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
             y_omi = y_omi.detach().cpu()
             inverse_y = inverse_transform(y)
             inverse_y_hat = inverse_transform(y_hat)
-            if mode == "val" and is_lcbt:
+            if mode == "val" and lifecycle_strategy == "lcbt_v1":
                 accumulate_phase_mae(
                     phase_error_sums,
                     phase_counts,
@@ -516,6 +557,16 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                     inverse_y_hat.numpy(),
                     phase_ids.detach().cpu().numpy(),
                     changed_node_mask.detach().cpu().numpy(),
+                )
+            elif mode == "val" and is_lcbt_v2:
+                accumulate_lifecycle_mae(
+                    lifecycle_cell_mae,
+                    inverse_y.numpy(),
+                    inverse_y_hat.numpy(),
+                    group_ids.detach().cpu().numpy(),
+                    phase_ids.detach().cpu().numpy(),
+                    target_cohort_mask.detach().cpu().numpy(),
+                    calendar_ids.detach().cpu().numpy(),
                 )
             total_y_true.append(y)
             total_y_pred.append(y_hat)
@@ -604,12 +655,12 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
         for metric_name in metrics_role.keys():
             metrics_role[metric_name] /= batch_ix + 1
 
-        metrics_phase = (
-            finalize_phase_mae(phase_error_sums, phase_counts)
-            if mode == "val"
-            and getattr(args, "lifecycle_training_strategy", "") == "lcbt_v1"
-            else {}
-        )
+        if mode == "val" and lifecycle_strategy == "lcbt_v1":
+            metrics_phase = finalize_phase_mae(phase_error_sums, phase_counts)
+        elif mode == "val" and is_lcbt_v2:
+            metrics_phase = finalize_lifecycle_validation_mae(lifecycle_cell_mae)
+        else:
+            metrics_phase = {}
 
     else:
         for name, nodes in part_nodes.items():

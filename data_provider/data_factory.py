@@ -13,7 +13,7 @@ def data_provider(args, flag):
         Dataset = AsyncLifecyclePEMS
     elif (
         args.train_for_async_lifecycle
-        and args.lifecycle_training_strategy == "lcbt_v1"
+        and args.lifecycle_training_strategy in {"lcbt_v1", "lcbt_v2"}
         and flag in {"train", "val"}
     ):
         Dataset = LifecycleCoveragePEMS
@@ -32,7 +32,7 @@ def data_provider(args, flag):
         freq = args.freq
     else:
         shuffle_flag = True
-        drop_last = args.lifecycle_training_strategy != "lcbt_v1"
+        drop_last = args.lifecycle_training_strategy not in {"lcbt_v1", "lcbt_v2"}
         batch_size = args.batch_size  # bsz for train and valid
         freq = args.freq
 
@@ -57,6 +57,7 @@ def data_provider(args, flag):
             lifecycle_role_features=args.lifecycle_role_features,
             lifecycle_history_age_feature=args.lifecycle_history_age_feature,
             lifecycle_observation_mask_feature=args.lifecycle_observation_mask_feature,
+            lifecycle_age_mode=args.lifecycle_age_mode,
             ples_pre_steps=args.ples_pre_steps,
             ples_post_steps=args.ples_post_steps,
             ples_temporal_blocks=args.ples_temporal_blocks,
@@ -66,12 +67,21 @@ def data_provider(args, flag):
             ples_seed=args.ples_seed,
             ples_bootstrap_samples=args.ples_bootstrap_samples,
             ples_bootstrap_seed=args.ples_bootstrap_seed,
+            ples_protocol_version=args.ples_protocol_version,
+            lce_protocol_version=args.lce_protocol_version,
+            ples_manifest_root=args.ples_manifest_root,
+            ples_overwrite_manifest=args.ples_overwrite_manifest,
         )
-        if args.lifecycle_training_strategy == "lcbt_v1":
+        if args.lifecycle_training_strategy in {"lcbt_v1", "lcbt_v2"}:
             dataset_kwargs.update(
                 lcbt_manifest_root=args.lcbt_manifest_root,
                 lcbt_scaler_end_ratio=args.lcbt_scaler_end_ratio,
                 lcbt_test_start_ratio=args.lcbt_test_start_ratio,
+                lcbt_protocol_version=(
+                    2 if args.lifecycle_training_strategy == "lcbt_v2" else 1
+                ),
+                lcbt_cohort_fractions=args.lcbt_cohort_fractions,
+                lcbt_cohort_weights=args.lcbt_cohort_weights,
             )
     elif Dataset is LifecycleCoveragePEMS:
         dataset_kwargs.update(
@@ -92,9 +102,16 @@ def data_provider(args, flag):
             lcbt_join_ratio=args.lcbt_join_ratio,
             lcbt_fault_ratio=args.lcbt_fault_ratio,
             lcbt_steady_ratio=args.lcbt_steady_ratio,
+            lcbt_zero_history_ratio=args.lcbt_zero_history_ratio,
             lcbt_cohort_fractions=args.lcbt_cohort_fractions,
             lcbt_cohort_weights=args.lcbt_cohort_weights,
             lcbt_clustered_ratio=args.lcbt_clustered_ratio,
+            lcbt_protocol_version=(
+                2 if args.lifecycle_training_strategy == "lcbt_v2" else 1
+            ),
+            lcbt_unseen_validation_ratio=args.lcbt_unseen_validation_ratio,
+            lcbt_generated_unseen_fraction=args.lcbt_generated_unseen_fraction,
+            lifecycle_age_mode=args.lifecycle_age_mode,
             lcbt_overwrite_manifest=args.lcbt_overwrite_manifest,
         )
     elif Dataset is LifecycleTrainPEMS:

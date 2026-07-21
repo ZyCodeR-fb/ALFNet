@@ -69,7 +69,7 @@ def _add_arguments(parser):
         "--stop_based",
         type=str,
         default="train_mask",
-        choices=["val_total", "val_mask", "val_role", "val_phase", "train_total", "train_mask", "train_role"],
+        choices=["val_total", "val_mask", "val_role", "val_phase", "val_lifecycle", "train_total", "train_mask", "train_role"],
         help="early stopping criteria",
     )
     parser.add_argument("--return_best", action="store_true", help="return best model")
@@ -92,6 +92,8 @@ def _add_arguments(parser):
     parser.add_argument("--ples_seed", type=int, default=2026, help="PLES protocol seed recorded in the manifest")
     parser.add_argument("--ples_bootstrap_samples", type=int, default=2000, help="hierarchical bootstrap samples for PLES effects")
     parser.add_argument("--ples_bootstrap_seed", type=int, default=2026, help="hierarchical bootstrap seed for PLES effects")
+    parser.add_argument("--ples_protocol_version", type=int, default=1, choices=[1, 2])
+    parser.add_argument("--lce_protocol_version", type=int, default=0, choices=[0, 1])
     parser.add_argument("--ples_overwrite_manifest", action="store_true", help="overwrite a mismatched canonical PLES manifest intentionally")
     parser.add_argument("--lifecycle_role_features", action="store_true", help="append lifecycle role one-hot features to async lifecycle inputs")
     parser.add_argument("--lifecycle_history_age_feature", action="store_true", help="append lifecycle history-age feature to async lifecycle inputs")
@@ -99,6 +101,12 @@ def _add_arguments(parser):
         "--lifecycle_observation_mask_feature",
         action="store_true",
         help="append one effective-observation mask channel to lifecycle inputs",
+    )
+    parser.add_argument(
+        "--lifecycle_age_mode",
+        type=str,
+        default="legacy_cumulative",
+        choices=["legacy_cumulative", "state_duration"],
     )
     parser.add_argument(
         "--lifecycle_event_sampling",
@@ -116,7 +124,7 @@ def _add_arguments(parser):
         "--lifecycle_training_strategy",
         type=str,
         default="v1",
-        choices=["v1", "round1", "round2", "round3", "round3_event_only", "round3_weight_only", "round4_dense_event_only", "round4_dense_weighted", "lcbt_v1"],
+        choices=["v1", "round1", "round2", "round3", "round3_event_only", "round3_weight_only", "round4_dense_event_only", "round4_dense_weighted", "lcbt_v1", "lcbt_v2"],
         help="lifecycle-aware training recipe: v1=original heavy local lifecycle simulation, round1=lighter events + keep legacy random mask, round2=round1 without local VS nodes, round3=combined event+weight tuning, round3_event_only=only the event-profile changes from round3, round3_weight_only=only the optimizer weighting changes on top of round2-style events",
     )
     parser.add_argument("--lifecycle_aas_loss_weight", type=float, default=None, help="optional training loss weight override for AAS nodes in lifecycle-aware training")
@@ -133,6 +141,9 @@ def _add_arguments(parser):
     parser.add_argument("--lcbt_join_ratio", type=float, default=0.40)
     parser.add_argument("--lcbt_fault_ratio", type=float, default=0.40)
     parser.add_argument("--lcbt_steady_ratio", type=float, default=0.20)
+    parser.add_argument("--lcbt_zero_history_ratio", type=float, default=0.25)
+    parser.add_argument("--lcbt_unseen_validation_ratio", type=float, default=0.40)
+    parser.add_argument("--lcbt_generated_unseen_fraction", type=float, default=0.25)
     parser.add_argument("--lcbt_cohort_fractions", type=float, nargs="+", default=[0.025, 0.05, 0.10])
     parser.add_argument("--lcbt_cohort_weights", type=float, nargs="+", default=[0.25, 0.50, 0.25])
     parser.add_argument("--lcbt_clustered_ratio", type=float, default=0.50)
@@ -298,7 +309,7 @@ def finalize_args(args):
             raise ValueError("lifecycle-aware training/input augmentation currently supports one same input/target feature among q/o/v")
     if args.train_for_async_lifecycle and args.lifecycle_training_strategy in {"round1", "round2", "round3", "round3_event_only", "round3_weight_only"}:
         args.lifecycle_keep_random_mask = True
-    if args.lifecycle_training_strategy == "lcbt_v1":
+    if args.lifecycle_training_strategy in {"lcbt_v1", "lcbt_v2"}:
         required_lcbt_features = {
             "lifecycle_role_features": args.lifecycle_role_features,
             "lifecycle_history_age_feature": args.lifecycle_history_age_feature,
@@ -309,7 +320,7 @@ def finalize_args(args):
         ]
         if missing_features:
             raise ValueError(
-                "lcbt_v1 requires raw + role(4) + age(1) + mask(1); missing: "
+                f"{args.lifecycle_training_strategy} requires raw + role(4) + age(1) + mask(1); missing: "
                 + ", ".join(missing_features)
             )
         fixed_ratios = {
@@ -317,11 +328,35 @@ def finalize_args(args):
             "lcbt_val_end_ratio": 0.60,
             "lcbt_test_start_ratio": 0.60,
             "lcbt_scaler_end_ratio": 0.50,
-            "lcbt_join_ratio": 0.40,
-            "lcbt_fault_ratio": 0.40,
-            "lcbt_steady_ratio": 0.20,
             "lcbt_clustered_ratio": 0.50,
         }
+        if args.lifecycle_training_strategy == "lcbt_v2":
+            fixed_ratios.update(
+                {
+                    "lcbt_zero_history_ratio": 0.25,
+                    "lcbt_join_ratio": 0.25,
+                    "lcbt_fault_ratio": 0.25,
+                    "lcbt_steady_ratio": 0.25,
+                    "lcbt_unseen_validation_ratio": 0.40,
+                    "lcbt_generated_unseen_fraction": 0.25,
+                }
+            )
+            if args.lifecycle_age_mode != "state_duration":
+                raise ValueError("lcbt_v2 requires lifecycle_age_mode=state_duration")
+            if args.stop_based != "val_lifecycle":
+                raise ValueError("lcbt_v2 requires stop_based=val_lifecycle")
+            if args.lce_protocol_version != 1 or args.ples_protocol_version != 2:
+                raise ValueError(
+                    "lcbt_v2 requires lce_protocol_version=1 and ples_protocol_version=2"
+                )
+        else:
+            fixed_ratios.update(
+                {
+                    "lcbt_join_ratio": 0.40,
+                    "lcbt_fault_ratio": 0.40,
+                    "lcbt_steady_ratio": 0.20,
+                }
+            )
         changed_ratios = [
             f"{name}={getattr(args, name)}"
             for name, expected in fixed_ratios.items()
@@ -329,10 +364,12 @@ def finalize_args(args):
         ]
         if changed_ratios:
             raise ValueError(
-                "lcbt_v1 uses fixed split/scenario/topology ratios; unexpected values: "
+                f"{args.lifecycle_training_strategy} uses fixed split/scenario/topology ratios; unexpected values: "
                 + ", ".join(changed_ratios)
             )
         ratios = [args.lcbt_join_ratio, args.lcbt_fault_ratio, args.lcbt_steady_ratio]
+        if args.lifecycle_training_strategy == "lcbt_v2":
+            ratios.append(args.lcbt_zero_history_ratio)
         if any(value < 0 for value in ratios) or sum(ratios) <= 0:
             raise ValueError("LCBT scenario ratios must be non-negative with a positive sum")
         if len(args.lcbt_cohort_fractions) != len(args.lcbt_cohort_weights):
@@ -357,7 +394,7 @@ def finalize_args(args):
             )
         ):
             raise ValueError(
-                "lcbt_v1 requires cohort fractions [0.025, 0.05, 0.10] "
+                f"{args.lifecycle_training_strategy} requires cohort fractions [0.025, 0.05, 0.10] "
                 "with weights [0.25, 0.50, 0.25]"
             )
         if not 0 <= args.lcbt_clustered_ratio <= 1:
@@ -373,6 +410,7 @@ def finalize_args(args):
         "round4_dense_event_only": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
         "round4_dense_weighted": {"aas": 1.0, "nas": 1.20, "vs": 1.20, "fs": 1.30},
         "lcbt_v1": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
+        "lcbt_v2": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
     }
     default_weights = strategy_weight_defaults[args.lifecycle_training_strategy]
     if args.lifecycle_aas_loss_weight is None:

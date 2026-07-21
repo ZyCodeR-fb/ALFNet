@@ -37,20 +37,42 @@ def _read_summary(value):
         return json.load(handle), path
 
 
-def _read_rows(summary_path):
-    path = summary_path.parent / "paired_event_rows.csv"
+def _read_rows(summary_path, filename="paired_event_rows.csv"):
+    path = summary_path.parent / filename
     rows = []
     with path.open("r", encoding="utf-8", newline="") as handle:
         for raw in csv.DictReader(handle):
             row = dict(raw)
             for key in ("origin_id", "cohort_id", "tau", "count"):
-                row[key] = int(row[key])
+                if row.get(key) not in {None, ""}:
+                    row[key] = int(row[key])
             for key in SUM_FIELDS:
-                row[key] = float(row[key])
+                if row.get(key) not in {None, ""}:
+                    row[key] = float(row[key])
             rows.append(row)
     if not rows:
         raise ValueError(f"PLES paired rows are empty: {path}")
     return rows
+
+
+def _read_result_bundle(value):
+    path = Path(value)
+    if path.is_dir():
+        v2_path = path / "ples_effects_summary.json"
+        if v2_path.exists():
+            summary_path = v2_path
+            version = 2
+        else:
+            summary_path = path / "paired_event_summary.json"
+            version = 1
+    else:
+        summary_path = path
+        version = 2 if path.name == "ples_effects_summary.json" else 1
+    with summary_path.open("r", encoding="utf-8") as handle:
+        summary = json.load(handle)
+    version = int(summary.get("schema_version", version))
+    rows_filename = "ples_paired_rows.csv" if version == 2 else "paired_event_rows.csv"
+    return summary, summary_path, _read_rows(summary_path, rows_filename), version
 
 
 def _index_rows(rows):
@@ -173,6 +195,159 @@ def bootstrap_gains(ours_rows, baseline_rows, samples=2000, seed=2026):
     }
 
 
+def _cell_mape_v2(row, prefix):
+    count = int(row["count"])
+    if count <= 0:
+        raise ValueError("PLES v2 comparison cell has no valid targets")
+    return 100.0 * float(row[f"{prefix}_ape_sum"]) / count
+
+
+def _calendar_balanced_mape_v2(rows, prefix):
+    by_regime = defaultdict(list)
+    for row in rows:
+        by_regime[str(row.get("regime", "all"))].append(_cell_mape_v2(row, prefix))
+    if not by_regime:
+        raise ValueError("PLES v2 comparison has no calendar cells")
+    return float(np.mean([np.mean(values) for values in by_regime.values()]))
+
+
+def _effect_curves_v2(rows):
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[(str(row["track"]), int(row["tau"]), str(row["phase"]))].append(row)
+    curves = []
+    for (track, tau, phase), cell_rows in sorted(
+        grouped.items(), key=lambda item: (item[0][0], item[0][1])
+    ):
+        treated = _calendar_balanced_mape_v2(cell_rows, "treated")
+        control = _calendar_balanced_mape_v2(cell_rows, "control")
+        if track == "join":
+            effect_name = "JoinLift"
+            effect = control - treated
+        elif track == "fault":
+            effect_name = "FaultPenalty"
+            effect = treated - control
+        else:
+            raise ValueError(f"Unsupported PLES v2 track: {track}")
+        curves.append(
+            {
+                "track": track,
+                "tau": tau,
+                "phase": phase,
+                "effect_name": effect_name,
+                "effect_mape": effect,
+            }
+        )
+    return curves
+
+
+def compare_rows_v2(ours_rows, baseline_rows):
+    ours_index = _index_rows(ours_rows)
+    baseline_index = _index_rows(baseline_rows)
+    if set(ours_index) != set(baseline_index):
+        raise ValueError("PLES v2 model exports do not contain the same paired cells")
+    for key in ours_index:
+        if ours_index[key]["count"] != baseline_index[key]["count"]:
+            raise ValueError(f"PLES v2 valid-target counts differ for paired cell {key}")
+
+    ours_curves = {
+        (row["track"], row["tau"], row["phase"]): row
+        for row in _effect_curves_v2(ours_rows)
+    }
+    baseline_curves = {
+        (row["track"], row["tau"], row["phase"]): row
+        for row in _effect_curves_v2(baseline_rows)
+    }
+    if set(ours_curves) != set(baseline_curves):
+        raise ValueError("PLES v2 model curves do not share the same track/tau cells")
+
+    curves = []
+    for key in sorted(ours_curves, key=lambda value: (value[0], value[1])):
+        ours = ours_curves[key]
+        baseline = baseline_curves[key]
+        if ours["effect_name"] == "JoinLift":
+            advantage = ours["effect_mape"] - baseline["effect_mape"]
+        else:
+            advantage = baseline["effect_mape"] - ours["effect_mape"]
+        curves.append(
+            {
+                **ours,
+                "ours_effect_mape": ours["effect_mape"],
+                "baseline_effect_mape": baseline["effect_mape"],
+                "advantage_mape": advantage,
+            }
+        )
+    return curves
+
+
+def _advantages_v2(curves):
+    post = [row for row in curves if int(row["tau"]) >= 0]
+    join = [row for row in post if row["effect_name"] == "JoinLift"]
+    fault = [row for row in post if row["effect_name"] == "FaultPenalty"]
+    if not join or not fault:
+        raise ValueError("PLES v2 comparison requires post-event Join and Fault cells")
+    return {
+        "JoinLiftGain": float(np.mean([row["advantage_mape"] for row in join])),
+        "FaultPenaltyReduction": float(np.mean([row["advantage_mape"] for row in fault])),
+        "PeakFaultPenaltyReduction": float(
+            max(row["baseline_effect_mape"] for row in fault)
+            - max(row["ours_effect_mape"] for row in fault)
+        ),
+    }
+
+
+def bootstrap_advantages_v2(ours_rows, baseline_rows, samples=2000, seed=2026):
+    point = _advantages_v2(compare_rows_v2(ours_rows, baseline_rows))
+    if samples <= 0:
+        return {name: {"point": value, "low": None, "high": None} for name, value in point.items()}
+
+    ours_units = defaultdict(lambda: defaultdict(list))
+    baseline_units = defaultdict(lambda: defaultdict(list))
+    for row in ours_rows:
+        ours_units[int(row["origin_id"])][int(row["cohort_id"])].append(row)
+    for row in baseline_rows:
+        baseline_units[int(row["origin_id"])][int(row["cohort_id"])].append(row)
+    if set(ours_units) != set(baseline_units):
+        raise ValueError("PLES v2 model exports do not share bootstrap origins")
+
+    rng = np.random.default_rng(seed)
+    origin_ids = sorted(ours_units)
+    draws = {name: np.empty(int(samples), dtype=np.float64) for name in point}
+    for sample_index in range(int(samples)):
+        sampled_ours = []
+        sampled_baseline = []
+        for sampled_origin_id, origin_id in enumerate(
+            rng.choice(origin_ids, size=len(origin_ids), replace=True), start=1
+        ):
+            cohort_ids = sorted(ours_units[int(origin_id)])
+            for sampled_cohort_id, cohort_id in enumerate(
+                rng.choice(cohort_ids, size=len(cohort_ids), replace=True), start=1
+            ):
+                replacement_ids = {
+                    "origin_id": sampled_origin_id,
+                    "cohort_id": sampled_cohort_id,
+                }
+                sampled_ours.extend(
+                    {**row, **replacement_ids}
+                    for row in ours_units[int(origin_id)][int(cohort_id)]
+                )
+                sampled_baseline.extend(
+                    {**row, **replacement_ids}
+                    for row in baseline_units[int(origin_id)][int(cohort_id)]
+                )
+        values = _advantages_v2(compare_rows_v2(sampled_ours, sampled_baseline))
+        for name, value in values.items():
+            draws[name][sample_index] = value
+    return {
+        name: {
+            "point": point[name],
+            "low": float(np.percentile(values, 2.5)),
+            "high": float(np.percentile(values, 97.5)),
+        }
+        for name, values in draws.items()
+    }
+
+
 def _write_curves(path, curves):
     with Path(path).open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(curves[0]))
@@ -229,6 +404,46 @@ def plot_comparison(curves, output_path, ours_label, baseline_label, dpi=260):
     plt.close(fig)
 
 
+def plot_comparison_v2(curves, output_path, ours_label, baseline_label, dpi=260):
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(13.0, 4.8))
+    panels = (
+        ("join", "Sensor joining", "JoinLift (MAPE points)", True),
+        ("fault", "Sensor fault", "FaultPenalty (MAPE points)", False),
+    )
+    for axis, (track, title, ylabel, higher_is_better) in zip(axes, panels):
+        rows = sorted((row for row in curves if row["track"] == track), key=lambda row: row["tau"])
+        tau = np.asarray([row["tau"] for row in rows])
+        ours = np.asarray([row["ours_effect_mape"] for row in rows])
+        baseline = np.asarray([row["baseline_effect_mape"] for row in rows])
+        y_min = float(min(0.0, ours.min(), baseline.min()))
+        y_max = float(max(0.0, ours.max(), baseline.max()))
+        axis.axhline(0.0, color="#555555", linewidth=0.9)
+        axis.axvline(0.0, color="#222222", linestyle="--", linewidth=0.9)
+        axis.plot(tau, baseline, color="#8A8A8A", linewidth=2.0, label=baseline_label)
+        axis.plot(tau, ours, color="#176C5B", linewidth=2.4, label=ours_label)
+        better = ours >= baseline if higher_is_better else ours <= baseline
+        axis.fill_between(tau, ours, baseline, where=better, color="#70AE99", alpha=0.22)
+        for start, end, phase in _phase_segments(rows):
+            axis.axvspan(start, end + 1, color=PHASE_COLORS.get(phase, "#EEEEEE"), alpha=0.18)
+        axis.set_ylim(y_min, y_max if y_max > y_min else y_min + 1.0)
+        axis.set_title(title, fontsize=13, weight="bold")
+        axis.set_xlabel("Event-relative time (steps)")
+        axis.set_ylabel(ylabel)
+        axis.grid(axis="y", color="#DDDDDD", linewidth=0.7)
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+    axes[1].legend(frameon=False, loc="best")
+    fig.suptitle("PLES v2 Paired Lifecycle Effects", fontsize=16, weight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Compare two models under one frozen PLES manifest.")
     parser.add_argument("--ours", required=True, help="PLES result directory or paired_event_summary.json")
@@ -240,46 +455,77 @@ def main():
     parser.add_argument("--bootstrap-seed", type=int, default=2026)
     args = parser.parse_args()
 
-    ours_summary, ours_path = _read_summary(args.ours)
-    baseline_summary, baseline_path = _read_summary(args.baseline)
+    ours_summary, ours_path, ours_rows, ours_version = _read_result_bundle(args.ours)
+    baseline_summary, baseline_path, baseline_rows, baseline_version = _read_result_bundle(args.baseline)
+    if ours_version != baseline_version:
+        raise ValueError("PLES comparison requires both models to use the same protocol version")
     if ours_summary["protocol_hash"] != baseline_summary["protocol_hash"]:
         raise ValueError("PLES comparison requires identical protocol_manifest.json hashes")
-    ours_rows = _read_rows(ours_path)
-    baseline_rows = _read_rows(baseline_path)
-    curves = compare_rows(ours_rows, baseline_rows)
-    intervals = bootstrap_gains(
-        ours_rows,
-        baseline_rows,
-        samples=args.bootstrap_samples,
-        seed=args.bootstrap_seed,
-    )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if ours_version == 2:
+        curves = compare_rows_v2(ours_rows, baseline_rows)
+        intervals = bootstrap_advantages_v2(
+            ours_rows,
+            baseline_rows,
+            samples=args.bootstrap_samples,
+            seed=args.bootstrap_seed,
+        )
+        summary = {
+            "schema_version": 2,
+            "protocol": "PLES v2 paired model comparison",
+            "protocol_hash": ours_summary["protocol_hash"],
+            "definitions": {
+                "JoinLiftGain": "JoinLift_ours - JoinLift_baseline; higher is better",
+                "FaultPenaltyReduction": "FaultPenalty_baseline - FaultPenalty_ours; higher is better",
+                "PeakFaultPenaltyReduction": "PeakFaultPenalty_baseline - PeakFaultPenalty_ours; higher is better",
+            },
+            "ours": args.ours_label,
+            "baseline": args.baseline_label,
+            "advantages": intervals,
+        }
+        plot_comparison_v2(
+            curves,
+            output_dir / "paired_model_comparison.png",
+            args.ours_label,
+            args.baseline_label,
+        )
+        print_keys = tuple(intervals)
+    else:
+        curves = compare_rows(ours_rows, baseline_rows)
+        intervals = bootstrap_gains(
+            ours_rows,
+            baseline_rows,
+            samples=args.bootstrap_samples,
+            seed=args.bootstrap_seed,
+        )
+        summary = {
+            "protocol": "Paired Lifecycle Event Study",
+            "protocol_hash": ours_summary["protocol_hash"],
+            "definition": "AttenuationGain = ACE_baseline - ACE_ours; positive means ours is better",
+            "ours": args.ours_label,
+            "baseline": args.baseline_label,
+            "attenuation_gain": intervals,
+        }
+        plot_comparison(
+            curves,
+            output_dir / "paired_model_comparison.png",
+            args.ours_label,
+            args.baseline_label,
+        )
+        print_keys = ("Join", "Fault", "LifeMacro")
     _write_curves(output_dir / "paired_model_comparison.csv", curves)
-    summary = {
-        "protocol": "Paired Lifecycle Event Study",
-        "protocol_hash": ours_summary["protocol_hash"],
-        "definition": "AttenuationGain = ACE_baseline - ACE_ours; positive means ours is better",
-        "ours": args.ours_label,
-        "baseline": args.baseline_label,
-        "attenuation_gain": intervals,
-    }
     with (output_dir / "paired_model_comparison_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, ensure_ascii=False, indent=2)
-    plot_comparison(
-        curves,
-        output_dir / "paired_model_comparison.png",
-        args.ours_label,
-        args.baseline_label,
-    )
-    for key in ("Join", "Fault", "LifeMacro"):
+    for key in print_keys:
         interval = intervals[key]
+        label = key if ours_version == 2 else f"{key} AttenuationGain"
         if interval["low"] is None or interval["high"] is None:
-            print(f"{key} AttenuationGain={interval['point']:.4f} | 95% CI=NA")
+            print(f"{label}={interval['point']:.4f} | 95% CI=NA")
         else:
             print(
-                f"{key} AttenuationGain={interval['point']:.4f} | "
+                f"{label}={interval['point']:.4f} | "
                 f"95% CI=[{interval['low']:.4f}, {interval['high']:.4f}]"
             )
 

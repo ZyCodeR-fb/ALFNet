@@ -1,6 +1,6 @@
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -9,6 +9,11 @@ LCBT_PROTOCOL_NAME = "Lifecycle Coverage-Balanced Training"
 LCBT_PROTOCOL_VERSION = 1
 LCBT_PHASES = ("Cold", "Warm", "Ready", "Onset", "Decay", "Outage")
 LCBT_SCENARIOS = ("join", "fault", "steady")
+LCBT_V2_PROTOCOL_NAME = "Lifecycle Coverage-Balanced Training v2"
+LCBT_V2_PROTOCOL_VERSION = 2
+LCBT_V2_PHASES = LCBT_PHASES
+LCBT_V2_GROUPS = ("zero_history", "steady", "join", "fault")
+LCBT_V2_REPORT_GROUPS = ("Unseen", "Steady", "Join", "Fault")
 CALENDAR_REGIMES = ("AM", "PM", "OffPeak", "Weekend")
 
 
@@ -93,7 +98,10 @@ def _as_datetime(value):
         return value
     if isinstance(value, np.datetime64):
         micros = value.astype("datetime64[us]").astype(np.int64)
-        return datetime.utcfromtimestamp(float(micros) / 1_000_000.0)
+        return datetime.fromtimestamp(
+            float(micros) / 1_000_000.0,
+            tz=timezone.utc,
+        ).replace(tzinfo=None)
     return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
 
@@ -167,7 +175,12 @@ def _allocate_counts(total, weights):
     return counts
 
 
-def _scenario_assignments(calendar_regimes, ratios, rng):
+def _scenario_assignments(
+    calendar_regimes,
+    ratios,
+    rng,
+    scenario_names=LCBT_SCENARIOS,
+):
     calendar_regimes = np.asarray(calendar_regimes, dtype=object)
     num_samples = len(calendar_regimes)
     desired = _allocate_counts(num_samples, ratios)
@@ -200,7 +213,7 @@ def _scenario_assignments(calendar_regimes, ratios, rng):
     assignments = np.empty(num_samples, dtype=object)
     for row, indices in enumerate(regime_indices):
         labels = []
-        for scenario, count in zip(LCBT_SCENARIOS, allocation[row]):
+        for scenario, count in zip(scenario_names, allocation[row]):
             labels.extend([scenario] * int(count))
         labels = np.asarray(labels, dtype=object)
         assignments[indices] = labels[rng.permutation(len(labels))]
@@ -239,6 +252,22 @@ def _phase_id(scenario, transition_steps, input_len):
             return 3
         return 5 if transition_steps == input_len else 4
     raise ValueError(f"unsupported LCBT scenario: {scenario}")
+
+
+def _phase_id_v2(scenario, evidence_steps, input_len):
+    if scenario in ("zero_history", "steady"):
+        return -1
+    if not 1 <= int(evidence_steps) <= int(input_len):
+        raise ValueError("LCBT v2 event evidence must be in [1, input_len]")
+    if scenario == "join":
+        if evidence_steps == 1:
+            return 0
+        return 2 if evidence_steps == input_len else 1
+    if scenario == "fault":
+        if evidence_steps == 1:
+            return 3
+        return 5 if evidence_steps == input_len else 4
+    raise ValueError(f"unsupported LCBT v2 scenario: {scenario}")
 
 
 def _weighted_degree_strata(adjacency):
@@ -383,6 +412,328 @@ def build_lcbt_schedule(
     return schedule
 
 
+def _balanced_event_evidence(size, input_len, rng):
+    """Balance onset, transition, and settled stages without weighting by duration."""
+    if input_len < 2:
+        raise ValueError("LCBT v2 requires input_len >= 2")
+    stage_counts = _allocate_counts(int(size), (1.0, 1.0, 1.0))
+    values = [1] * int(stage_counts[0])
+    middle_values = list(range(2, input_len))
+    if middle_values:
+        values.extend(
+            int(value)
+            for value in _balanced_values(
+                int(stage_counts[1]),
+                middle_values,
+                np.ones(len(middle_values), dtype=np.float64),
+                rng,
+            )
+        )
+    else:
+        values.extend([1] * int(stage_counts[1]))
+    values.extend([int(input_len)] * int(stage_counts[2]))
+    values = np.asarray(values, dtype=np.int64)
+    return values[rng.permutation(len(values))]
+
+
+def build_lcbt_v2_schedule(
+    num_samples,
+    input_len,
+    adjacency,
+    calendar_regimes,
+    seed,
+    epoch,
+    scenario_ratios=(0.25, 0.25, 0.25, 0.25),
+    cohort_fractions=(0.025, 0.05, 0.10),
+    cohort_weights=(0.25, 0.50, 0.25),
+    clustered_ratio=0.50,
+    scenario_node_pools=None,
+):
+    """Build the frozen LCBT v2 four-group, six-phase training schedule."""
+    num_samples = int(num_samples)
+    input_len = int(input_len)
+    adjacency = np.asarray(adjacency)
+    calendar_regimes = [str(value) for value in calendar_regimes]
+    if num_samples <= 0 or input_len <= 2:
+        raise ValueError("LCBT v2 requires num_samples > 0 and input_len > 2")
+    if adjacency.ndim != 2 or adjacency.shape[0] != adjacency.shape[1]:
+        raise ValueError("adjacency must be square")
+    if len(calendar_regimes) != num_samples:
+        raise ValueError("calendar_regimes must align with num_samples")
+    if len(scenario_ratios) != len(LCBT_V2_GROUPS):
+        raise ValueError("LCBT v2 requires four scenario ratios")
+    if not 0.0 <= float(clustered_ratio) <= 1.0:
+        raise ValueError("clustered_ratio must be in [0, 1]")
+    if scenario_node_pools is not None:
+        scenario_node_pools = {
+            str(name): np.asarray(sorted({int(node) for node in nodes}), dtype=np.int64)
+            for name, nodes in scenario_node_pools.items()
+        }
+        missing_pools = [name for name in LCBT_V2_GROUPS if name not in scenario_node_pools]
+        if missing_pools:
+            raise ValueError(
+                "LCBT v2 scenario_node_pools missing: " + ", ".join(missing_pools)
+            )
+        if any(len(nodes) == 0 for nodes in scenario_node_pools.values()):
+            raise ValueError("LCBT v2 scenario node pools must be non-empty")
+
+    rng = np.random.default_rng(int(seed) + int(epoch) * 1_000_003)
+    assignments = _scenario_assignments(
+        calendar_regimes,
+        scenario_ratios,
+        rng,
+        scenario_names=LCBT_V2_GROUPS,
+    )
+    evidence_steps = np.zeros(num_samples, dtype=np.int64)
+    for scenario in ("join", "fault"):
+        middle_indices = []
+        for regime in sorted(set(calendar_regimes)):
+            indices = np.flatnonzero(
+                (assignments == scenario)
+                & (np.asarray(calendar_regimes, dtype=object) == regime)
+            )
+            shuffled = indices[rng.permutation(len(indices))]
+            stage_counts = _allocate_counts(len(shuffled), (1.0, 1.0, 1.0))
+            initial_end = int(stage_counts[0])
+            middle_end = initial_end + int(stage_counts[1])
+            evidence_steps[shuffled[:initial_end]] = 1
+            middle_indices.extend(int(index) for index in shuffled[initial_end:middle_end])
+            evidence_steps[shuffled[middle_end:]] = input_len
+        if middle_indices:
+            middle_values = _balanced_values(
+                len(middle_indices),
+                list(range(2, input_len)),
+                np.ones(input_len - 2, dtype=np.float64),
+                rng,
+            )
+            for index, value in zip(middle_indices, middle_values):
+                evidence_steps[index] = int(value)
+
+    fractions = _balanced_values(
+        num_samples,
+        cohort_fractions,
+        cohort_weights,
+        rng,
+    )
+    topology_modes = _balanced_values(
+        num_samples,
+        ("clustered", "scattered"),
+        (float(clustered_ratio), 1.0 - float(clustered_ratio)),
+        rng,
+    )
+    exposure = np.zeros(adjacency.shape[0], dtype=np.int64)
+
+    schedule = []
+    for sample_index in range(num_samples):
+        scenario = str(assignments[sample_index])
+        cohort_fraction = float(fractions[sample_index])
+        topology_mode = str(topology_modes[sample_index])
+        pool = (
+            scenario_node_pools[scenario]
+            if scenario_node_pools is not None
+            else np.arange(adjacency.shape[0], dtype=np.int64)
+        )
+        cohort_size = min(
+            len(pool),
+            max(1, int(round(adjacency.shape[0] * cohort_fraction))),
+        )
+        pool_adjacency = adjacency[np.ix_(pool, pool)]
+        weights, strata = _weighted_degree_strata(pool_adjacency)
+        pool_exposure = exposure[pool].copy()
+        if topology_mode == "clustered":
+            selected_local = _select_clustered_nodes(
+                weights,
+                strata,
+                pool_exposure,
+                rng,
+                cohort_size,
+                seed_stratum=sample_index,
+            )
+        else:
+            selected_local = _select_scattered_nodes(
+                strata,
+                pool_exposure,
+                rng,
+                cohort_size,
+            )
+        changed_nodes = sorted(int(pool[index]) for index in selected_local)
+        exposure[np.asarray(changed_nodes, dtype=np.int64)] += 1
+
+        evidence = int(evidence_steps[sample_index])
+        schedule.append(
+            {
+                "scenario": scenario,
+                "evidence_steps": evidence,
+                "phase_id": _phase_id_v2(scenario, evidence, input_len),
+                "changed_nodes": changed_nodes,
+                "cohort_fraction": cohort_fraction,
+                "topology_mode": topology_mode,
+                "calendar_regime": calendar_regimes[sample_index],
+            }
+        )
+    return schedule
+
+
+def split_unseen_nodes(
+    master_unseen_nodes,
+    adjacency,
+    validation_ratio=0.40,
+    seed=2026,
+):
+    """Freeze disjoint validation/test unseen pools within degree strata."""
+    nodes = np.asarray(sorted({int(node) for node in master_unseen_nodes}), dtype=np.int64)
+    adjacency = np.asarray(adjacency)
+    if adjacency.ndim != 2 or adjacency.shape[0] != adjacency.shape[1]:
+        raise ValueError("adjacency must be square")
+    if len(nodes) < 2:
+        raise ValueError("at least two master unseen nodes are required")
+    if np.any((nodes < 0) | (nodes >= adjacency.shape[0])):
+        raise ValueError("master unseen nodes fall outside the adjacency")
+    if not 0.0 < float(validation_ratio) < 1.0:
+        raise ValueError("validation_ratio must be in (0, 1)")
+
+    weights = np.nan_to_num(np.abs(adjacency.astype(np.float64)), nan=0.0)
+    np.fill_diagonal(weights, 0.0)
+    degree = weights.sum(axis=0) + weights.sum(axis=1)
+    ordered_nodes = nodes[np.lexsort((nodes, degree[nodes]))]
+    strata = [np.asarray(part, dtype=np.int64) for part in np.array_split(ordered_nodes, 3)]
+    validation_count = int(round(len(nodes) * float(validation_ratio)))
+    validation_count = min(len(nodes) - 1, max(1, validation_count))
+    validation_counts = _allocate_counts(
+        validation_count,
+        [len(stratum) for stratum in strata],
+    )
+    rng = np.random.default_rng(int(seed))
+    validation_nodes = []
+    test_nodes = []
+    for stratum, count in zip(strata, validation_counts):
+        shuffled = stratum[rng.permutation(len(stratum))]
+        validation_nodes.extend(int(node) for node in shuffled[: int(count)])
+        test_nodes.extend(int(node) for node in shuffled[int(count) :])
+    validation_nodes = np.asarray(sorted(validation_nodes), dtype=np.int64)
+    test_nodes = np.asarray(sorted(test_nodes), dtype=np.int64)
+    metadata = {
+        "validation_ratio": float(validation_ratio),
+        "degree_stratum_sizes": [int(len(stratum)) for stratum in strata],
+        "validation_stratum_counts": [int(value) for value in validation_counts],
+        "test_stratum_counts": [
+            int(len(stratum) - count)
+            for stratum, count in zip(strata, validation_counts)
+        ],
+    }
+    return validation_nodes, test_nodes, metadata
+
+
+def select_master_unseen_nodes(adjacency, fraction=0.25, seed=2026):
+    """Create a deterministic degree-stratified master unseen pool."""
+    adjacency = np.asarray(adjacency)
+    if adjacency.ndim != 2 or adjacency.shape[0] != adjacency.shape[1]:
+        raise ValueError("adjacency must be square")
+    if not 0.0 < float(fraction) < 1.0:
+        raise ValueError("fraction must be in (0, 1)")
+    num_nodes = int(adjacency.shape[0])
+    target = min(num_nodes - 1, max(2, int(round(num_nodes * float(fraction)))))
+    weights = np.nan_to_num(np.abs(adjacency.astype(np.float64)), nan=0.0)
+    np.fill_diagonal(weights, 0.0)
+    degree = weights.sum(axis=0) + weights.sum(axis=1)
+    order = np.lexsort((np.arange(num_nodes), degree))
+    strata = [np.asarray(part, dtype=np.int64) for part in np.array_split(order, 3)]
+    counts = _allocate_counts(target, [len(stratum) for stratum in strata])
+    rng = np.random.default_rng(int(seed))
+    selected = []
+    for stratum, count in zip(strata, counts):
+        shuffled = stratum[rng.permutation(len(stratum))]
+        selected.extend(int(node) for node in shuffled[: int(count)])
+    return np.asarray(sorted(selected), dtype=np.int64)
+
+
+def _finite_mean(values):
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    values = values[np.isfinite(values)]
+    return float(values.mean()) if len(values) else float("nan")
+
+
+def finalize_lifecycle_mae(cell_mae):
+    """Equal-average cells into two anchors, two trajectories, and LifeAvg."""
+    phase_mae = {
+        name: _finite_mean(cell_mae.get(name, []))
+        for name in ("Unseen", "Steady") + LCBT_V2_PHASES
+    }
+    join_mae = _finite_mean([phase_mae[name] for name in LCBT_V2_PHASES[:3]])
+    fault_mae = _finite_mean([phase_mae[name] for name in LCBT_V2_PHASES[3:]])
+    group_mae = {
+        "unseen_mae": phase_mae["Unseen"],
+        "steady_mae": phase_mae["Steady"],
+        "join_mae": join_mae,
+        "fault_mae": fault_mae,
+    }
+    complete = np.asarray(list(group_mae.values()), dtype=np.float64)
+    group_mae["mae"] = (
+        float(complete.mean()) if np.all(np.isfinite(complete)) else float("nan")
+    )
+    group_mae["worst_group_mae"] = (
+        float(complete.max()) if np.all(np.isfinite(complete)) else float("nan")
+    )
+    group_mae.update({f"{name}_MAE": value for name, value in phase_mae.items()})
+    return group_mae
+
+
+def accumulate_lifecycle_mae(
+    cell_state,
+    y_true,
+    y_pred,
+    group_ids,
+    phase_ids,
+    target_cohort_mask,
+    calendar_ids,
+):
+    """Accumulate one original-scale MAE per replay cell, not per tensor element."""
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    group_ids = np.asarray(group_ids).reshape(-1).astype(np.int64)
+    phase_ids = np.asarray(phase_ids).reshape(-1).astype(np.int64)
+    calendar_ids = np.asarray(calendar_ids).reshape(-1).astype(np.int64)
+    target_cohort_mask = np.asarray(target_cohort_mask).astype(bool)
+    if y_true.shape != y_pred.shape or y_true.ndim != 4:
+        raise ValueError("lifecycle MAE expects matching [batch,time,node,feature] arrays")
+    if target_cohort_mask.shape != (y_true.shape[0], y_true.shape[2]):
+        raise ValueError("target_cohort_mask must have shape [batch,node]")
+
+    valid = np.isfinite(y_true) & np.isfinite(y_pred)
+    errors = np.abs(y_pred - y_true)
+    for sample_index in range(y_true.shape[0]):
+        selected = valid[sample_index] & target_cohort_mask[sample_index][None, :, None]
+        if not np.any(selected):
+            continue
+        group_id = int(group_ids[sample_index])
+        if group_id == 0:
+            label = "Unseen"
+        elif group_id == 1:
+            label = "Steady"
+        elif group_id in (2, 3):
+            phase_id = int(phase_ids[sample_index])
+            if not 0 <= phase_id < len(LCBT_V2_PHASES):
+                raise ValueError("event replay cell is missing a valid phase_id")
+            label = LCBT_V2_PHASES[phase_id]
+        else:
+            raise ValueError(f"unsupported lifecycle validation group_id: {group_id}")
+        calendar_id = int(calendar_ids[sample_index])
+        cell_state.setdefault(label, {}).setdefault(calendar_id, []).append(
+            float(errors[sample_index][selected].mean())
+        )
+
+
+def finalize_lifecycle_validation_mae(cell_state):
+    """Equal-average replay cells within calendar strata, then semantic groups."""
+    calendar_balanced = {}
+    for label in ("Unseen", "Steady") + LCBT_V2_PHASES:
+        calendar_balanced[label] = [
+            _finite_mean(values)
+            for _, values in sorted(cell_state.get(label, {}).items())
+        ]
+    return finalize_lifecycle_mae(calendar_balanced)
+
+
 def compose_effective_lifecycle_features(
     raw_seq,
     lifecycle_mask,
@@ -390,6 +741,7 @@ def compose_effective_lifecycle_features(
     append_role,
     append_age,
     append_observation_mask,
+    state_age=None,
 ):
     raw_seq = np.asarray(raw_seq)
     lifecycle_mask = np.asarray(lifecycle_mask, dtype=bool)
@@ -408,8 +760,13 @@ def compose_effective_lifecycle_features(
     if append_role:
         features.append(np.eye(4, dtype=np.float32)[role_ids])
     if append_age:
-        history_age = np.cumsum(effective_mask.astype(np.float32), axis=0)
-        history_age /= float(raw_seq.shape[0])
+        if state_age is None:
+            history_age = np.cumsum(effective_mask.astype(np.float32), axis=0)
+            history_age /= float(raw_seq.shape[0])
+        else:
+            history_age = np.asarray(state_age, dtype=np.float32)
+            if history_age.shape != raw_seq.shape[:2]:
+                raise ValueError("state_age must align with raw_seq")
         features.append(history_age[..., None])
     if append_observation_mask:
         features.append(effective_mask.astype(np.float32)[..., None])

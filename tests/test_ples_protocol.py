@@ -349,6 +349,60 @@ def test_paired_model_comparison_reports_positive_attenuation_gain():
     assert intervals["LifeMacro"]["low"] == intervals["LifeMacro"]["high"]
 
 
+def test_paired_model_comparison_v2_uses_directional_effect_names():
+    comparison = _load_ples_comparison()
+    ours = [
+        {**row, "regime": "AM" if row["origin_id"] == 1 else "PM"}
+        for row in _paired_rows_for_summary()
+    ]
+    baseline = []
+    for row in ours:
+        treated_delta = 0.2 if row["track"] == "join" else 0.3
+        baseline.append(
+            {
+                **row,
+                "treated_ape_sum": row["treated_ape_sum"] + treated_delta,
+                "treated_ae_sum": row["treated_ae_sum"] + treated_delta * 10,
+                "treated_se_sum": row["treated_se_sum"] + treated_delta * 10,
+            }
+        )
+
+    curves = comparison.compare_rows_v2(ours, baseline)
+    intervals = comparison.bootstrap_advantages_v2(ours, baseline, samples=20, seed=9)
+
+    assert {row["effect_name"] for row in curves} == {"JoinLift", "FaultPenalty"}
+    assert all(row["advantage_mape"] > 0 for row in curves)
+    assert intervals["JoinLiftGain"]["point"] > 0
+    assert intervals["FaultPenaltyReduction"]["point"] > 0
+    assert "ACE" not in str(curves)
+
+
+def test_paired_model_comparison_reads_v2_output_names():
+    import csv
+    import json
+
+    comparison = _load_ples_comparison()
+    result_dir = ROOT / ".pytest_cache" / "ples_v2_read_bundle"
+    result_dir.mkdir(parents=True, exist_ok=True)
+    with (result_dir / "ples_effects_summary.json").open("w", encoding="utf-8") as handle:
+        json.dump({"schema_version": 2, "protocol_hash": "same-protocol"}, handle)
+    rows = [
+        {**row, "regime": "AM"}
+        for row in _paired_rows_for_summary()
+    ]
+    with (result_dir / "ples_paired_rows.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    summary, summary_path, loaded_rows, version = comparison._read_result_bundle(result_dir)
+
+    assert version == 2
+    assert summary["protocol_hash"] == "same-protocol"
+    assert summary_path.name == "ples_effects_summary.json"
+    assert loaded_rows[0]["regime"] == "AM"
+
+
 class _LastValueModel(torch.nn.Module):
     def __init__(self, pred_len):
         super().__init__()
