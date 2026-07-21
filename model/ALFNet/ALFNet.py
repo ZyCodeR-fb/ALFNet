@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from args import load_args_from_config
+from layers.source_grin import GRINInputImputer
 from lib.utils import load_project_adjacency, resolve_known_unknown_nodes
 from utils.model_output import unpack_model_output
 
@@ -187,6 +188,16 @@ def _resolve_model_module_name(model_name):
     return model_name
 
 
+def _deep_merge_dict(base, updates):
+    merged = dict(base or {})
+    for key, value in (updates or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def _load_expert_from_spec(spec, device, expert_name):
     model_name = spec["model"]
     config_path = spec["config_path"]
@@ -194,9 +205,12 @@ def _load_expert_from_spec(spec, device, expert_name):
         raise FileNotFoundError(
             f"ALFNet {expert_name} expert config not found: {config_path}"
         )
-    expert_args = load_args_from_config(
-        config_path,
-        overrides={"device": device},
+    scalar_overrides = dict(spec.get("overrides", {}) or {})
+    scalar_overrides["device"] = device
+    expert_args = load_args_from_config(config_path, overrides=scalar_overrides)
+    expert_args.model_family_cfg = _deep_merge_dict(
+        getattr(expert_args, "model_family_cfg", {}) or {},
+        spec.get("family_overrides", {}) or {},
     )
     expert_args.model = model_name
     module_name = _resolve_model_module_name(model_name)
@@ -289,6 +303,10 @@ class Model(nn.Module):
         self.role_start = self.raw_enc_in
         self.role_end = self.role_start + ROLE_COUNT
         self.age_idx = self.role_end
+        self.observation_mask_idx = self.age_idx + 1
+        self.lifecycle_observation_mask_feature = bool(
+            getattr(configs, "lifecycle_observation_mask_feature", False)
+        )
         full_adj = load_project_adjacency({"data_path": configs.data_path})
         self.full_num_nodes = int(full_adj.shape[0])
         self.known_nodes, _ = resolve_known_unknown_nodes(
@@ -303,6 +321,28 @@ class Model(nn.Module):
 
         recipe_cfg = self.cfg.get("recipe", {})
         model_cfg = self.cfg.get("model", {})
+        self.input_imputation_scope = str(
+            recipe_cfg.get("input_imputation_scope", "graph")
+        ).lower()
+        if self.input_imputation_scope not in {"graph", "shared"}:
+            raise ValueError(
+                "ALFNet input_imputation_scope must be 'graph' or 'shared'."
+            )
+        self.shared_input_imputer = None
+        if self.input_imputation_scope == "shared":
+            if not bool(
+                getattr(configs, "lifecycle_observation_mask_feature", False)
+            ):
+                raise ValueError(
+                    "Shared GRIN requires lifecycle_observation_mask_feature=true."
+                )
+            graph_recipe_cfg = (
+                getattr(self.graph_args, "model_family_cfg", {}) or {}
+            ).get("recipe", {})
+            self.shared_input_imputer = GRINInputImputer(
+                configs,
+                graph_recipe_cfg,
+            )
         if str(recipe_cfg.get("fusion_mode", "")).lower() not in {
             "graph_patch_residual",
             "patch_residual",
@@ -614,6 +654,12 @@ class Model(nn.Module):
             param for param in self.graph_expert.parameters()
             if param.requires_grad
         ]
+        if self.shared_input_imputer is not None:
+            graph_params.extend(
+                param
+                for param in self.shared_input_imputer.parameters()
+                if param.requires_grad
+            )
         patch_params = [
             param for param in self.patch_expert.parameters()
             if param.requires_grad
@@ -644,9 +690,17 @@ class Model(nn.Module):
         history_age_seq = x_enc[..., self.age_idx:self.age_idx + 1]
         last_role = role_seq[:, -1]
         last_age = history_age_seq[:, -1]
-        visibility_ratio = (
-            role_seq[..., ROLE_AAS] + role_seq[..., ROLE_NAS]
-        ).mean(dim=1).unsqueeze(-1)
+        if (
+            self.lifecycle_observation_mask_feature
+            and x_enc.size(-1) > self.observation_mask_idx
+        ):
+            visibility_ratio = x_enc[
+                ..., self.observation_mask_idx:self.observation_mask_idx + 1
+            ].mean(dim=1)
+        else:
+            visibility_ratio = (
+                role_seq[..., ROLE_AAS] + role_seq[..., ROLE_NAS]
+            ).mean(dim=1).unsqueeze(-1)
         return role_seq, last_role, last_age, visibility_ratio
 
     def _resolve_current_node_ids(self, current_num_nodes):
@@ -682,12 +736,20 @@ class Model(nn.Module):
         dec_t_mark,
         epoch,
     ):
-        raw_x_enc = x_enc[..., :self.raw_enc_in]
+        expert_input = x_enc
+        if self.shared_input_imputer is not None:
+            expert_input = self.shared_input_imputer(
+                adj,
+                x_enc,
+                x_t_mark,
+                pos_mark,
+            )
+        raw_x_enc = expert_input[..., :self.raw_enc_in]
         expert_x_dec = (
             None if x_dec is None else x_dec[..., :self.output_dim]
         )
         current_node_ids = self._resolve_current_node_ids(raw_x_enc.size(2))
-        graph_x_enc = self._format_graph_expert_input(raw_x_enc, x_enc)
+        graph_x_enc = self._format_graph_expert_input(raw_x_enc, expert_input)
         if hasattr(self.graph_expert, "set_current_node_ids"):
             self.graph_expert.set_current_node_ids(current_node_ids)
         graph_output = self.graph_expert(

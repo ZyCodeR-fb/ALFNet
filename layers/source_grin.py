@@ -345,10 +345,29 @@ class GRINInputImputer(nn.Module):
         self.role_start = self.raw_enc_in
         self.role_end = self.role_start + 4
         self.age_idx = self.role_end
+        self.use_observation_mask = bool(
+            getattr(configs, "lifecycle_observation_mask_feature", False)
+        )
+        self.observation_mask_idx = (
+            self.age_idx + 1 if self.use_observation_mask else None
+        )
+        if (
+            self.observation_mask_idx is not None
+            and self.total_enc_in <= self.observation_mask_idx
+        ):
+            raise ValueError(
+                "Explicit lifecycle observation mask is enabled, but the "
+                f"configured input has only {self.total_enc_in} channels."
+            )
         self.use_role_mask = bool(recipe_cfg.get("grin_use_role_mask", True))
         self.use_extra_features = bool(recipe_cfg.get("grin_use_extra_features", True))
         self.cached_support = bool(recipe_cfg.get("grin_cached_support", False))
-        extra_dim = self.total_enc_in - self.raw_enc_in if self.use_extra_features else 0
+        self.extra_feature_indices = [
+            index
+            for index in range(self.raw_enc_in, self.total_enc_in)
+            if index != self.observation_mask_idx
+        ]
+        extra_dim = len(self.extra_feature_indices) if self.use_extra_features else 0
         hidden_dim = int(recipe_cfg.get("grin_hidden_dim", configs.d_model))
         ff_dim = int(recipe_cfg.get("grin_ff_dim", hidden_dim))
         self.bigril = BiGRIL(
@@ -368,11 +387,31 @@ class GRINInputImputer(nn.Module):
             merge=str(recipe_cfg.get("grin_merge", "mlp")),
         )
 
-    def _observed_mask(self, raw_x, extra_x):
+    def _observed_mask(self, raw_x, extra_x, x_enc=None):
+        if self.observation_mask_idx is not None:
+            if x_enc is None:
+                raise ValueError(
+                    "Explicit observation-mask mode requires the original input tensor."
+                )
+            return x_enc[
+                ...,
+                self.observation_mask_idx:self.observation_mask_idx + 1,
+            ] > 0.5
         if self.use_role_mask and extra_x is not None and self.total_enc_in >= self.role_end:
             role_seq = extra_x[..., :4]
             return ((role_seq[..., 0:1] + role_seq[..., 1:2]) > 0.5)
         return torch.abs(raw_x).sum(dim=-1, keepdim=True) > 0
+
+    def without_observation_mask(self, x_enc):
+        if self.observation_mask_idx is None:
+            return x_enc
+        return torch.cat(
+            [
+                x_enc[..., :self.observation_mask_idx],
+                x_enc[..., self.observation_mask_idx + 1:],
+            ],
+            dim=-1,
+        )
 
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None):
         if x_enc.size(-1) != self.total_enc_in:
@@ -382,8 +421,10 @@ class GRINInputImputer(nn.Module):
                 f"but dataloader produced {x_enc.size(-1)}."
             )
         raw_x = x_enc[..., :self.raw_enc_in]
-        extra_x = x_enc[..., self.raw_enc_in:] if self.total_enc_in > self.raw_enc_in else None
-        observed = self._observed_mask(raw_x, extra_x).expand_as(raw_x)
+        extra_x = None
+        if self.extra_feature_indices:
+            extra_x = x_enc[..., self.extra_feature_indices]
+        observed = self._observed_mask(raw_x, extra_x, x_enc=x_enc).expand_as(raw_x)
         x = raw_x.permute(0, 3, 2, 1).contiguous()
         mask = observed.permute(0, 3, 2, 1).contiguous()
         u = None
@@ -398,6 +439,6 @@ class GRINInputImputer(nn.Module):
         )
         imputed = imputed.permute(0, 3, 2, 1).contiguous()
         filled_raw = torch.where(observed, raw_x, imputed)
-        if extra_x is None:
+        if self.total_enc_in <= self.raw_enc_in:
             return filled_raw
-        return torch.cat([filled_raw, extra_x], dim=-1)
+        return torch.cat([filled_raw, x_enc[..., self.raw_enc_in:]], dim=-1)

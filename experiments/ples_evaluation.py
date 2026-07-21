@@ -423,6 +423,12 @@ def async_lifecycle_inference(model, data_loader, args, criterions=None):
         "schema_version": 1,
         "protocol": manifest["protocol"],
         "protocol_hash": manifest["protocol_hash"],
+        "training_protocol_hash": getattr(
+            dataset,
+            "training_protocol_hash",
+            None,
+        ),
+        "ples_protocol_hash": manifest["protocol_hash"],
         "model": args.model,
         "model_variant": getattr(args, "model_variant", "default"),
         "exp_id": args.exp_id,
@@ -461,6 +467,11 @@ def async_lifecycle_inference(model, data_loader, args, criterions=None):
             f"PLES: dataset={manifest['dataset']['name']} | origins={manifest['resolved']['origin_count']} | "
             f"cohorts={manifest['resolved']['cohort_count']} | cohort_size={manifest['resolved']['cohort_size']} | "
             f"protocol_hash={manifest['protocol_hash'][:12]}"
+        ),
+        (
+            "ProtocolHashes: "
+            f"training={result['training_protocol_hash'] or 'legacy'} | "
+            f"ples={result['ples_protocol_hash']}"
         ),
         trace_line,
     ]

@@ -34,12 +34,23 @@ class ODEFunc(nn.Module):
     def forward(self, t, x):
         # alpha = torch.sigmoid(self.alpha).unsqueeze(-1).unsqueeze(-1).unsqueeze(0)
         alpha = self.alpha
-        if self.training:
-            xa = torch.einsum("ij, kjlm->kilm", self.adj[0].to(x.device), x)
-        elif self.adj[1].shape[0] == x.shape[1]:
-            xa = torch.einsum("ij, kjlm->kilm", self.adj[1].to(x.device), x)
-        else:
-            xa = torch.einsum("ij, kjlm->kilm", self.adj[2].to(x.device), x)
+        graph_index = next(
+            (
+                index
+                for index, graph in enumerate(self.adj)
+                if graph.shape[0] == x.shape[1]
+            ),
+            None,
+        )
+        if graph_index is None:
+            raise ValueError(
+                f"No STGODE adjacency matches {x.shape[1]} input nodes."
+            )
+        xa = torch.einsum(
+            "ij, kjlm->kilm",
+            self.adj[graph_index].to(x.device),
+            x,
+        )
 
         # ensure the eigenvalues to be less than 1
         d = torch.clamp(self.d, min=0, max=1)

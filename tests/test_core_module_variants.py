@@ -116,9 +116,13 @@ def _read_yaml(relative_path):
         return yaml.safe_load(stream)
 
 
-def test_final_yaml_surface_contains_only_rf_alf_sd_chain():
-    assert [path.name for path in (ROOT / "configs/ALFNet").glob("*.yaml")] == [
-        "rf_alf_sd.yaml"
+def test_final_yaml_surface_preserves_rf_alf_sd_and_adds_lcbt_ablations():
+    assert sorted(
+        path.name for path in (ROOT / "configs/ALFNet").glob("*.yaml")
+    ) == [
+        "rf_alf_sd.yaml",
+        "rf_lcb_g.yaml",
+        "rf_lcb_s.yaml",
     ]
     assert [path.name for path in (ROOT / "configs/ALFGraph").glob("*.yaml")] == [
         "METRLA_alfgraph_sd.yaml"
@@ -128,6 +132,8 @@ def test_final_yaml_surface_contains_only_rf_alf_sd_chain():
     ]
 
     alfnet = _read_yaml("configs/ALFNet/rf_alf_sd.yaml")
+    graph_lcbt = _read_yaml("configs/ALFNet/rf_lcb_g.yaml")
+    shared_lcbt = _read_yaml("configs/ALFNet/rf_lcb_s.yaml")
     graph = _read_yaml("configs/ALFGraph/METRLA_alfgraph_sd.yaml")
     temporal = _read_yaml("configs/ALFTemporal/METRLA_alftemporal_t65.yaml")
 
@@ -142,6 +148,15 @@ def test_final_yaml_surface_contains_only_rf_alf_sd_chain():
     assert temporal["family"]["model"]["attention_type"] == "crossformer_tsa"
     assert temporal["family"]["model"]["use_timefilter_patch_mixer"] is True
     assert temporal["family"]["model"]["timefilter_top_p"] == 0.65
+    assert "lifecycle_observation_mask_feature" not in alfnet["lifecycle"]
+    assert graph_lcbt["family"]["recipe"]["input_imputation_scope"] == "graph"
+    assert graph_lcbt["family"]["experts"]["graph"]["overrides"] == {
+        "lifecycle_observation_mask_feature": True
+    }
+    assert shared_lcbt["family"]["recipe"]["input_imputation_scope"] == "shared"
+    assert shared_lcbt["family"]["experts"]["graph"]["family_overrides"] == {
+        "recipe": {"use_grin_input_imputer": False}
+    }
 
 
 def test_alftemporal_kdtree_layout_covers_every_node():
@@ -223,6 +238,73 @@ def test_grin_input_imputer_preserves_lifecycle_shape():
 
     assert out.shape == x.shape
     assert torch.isfinite(out).all()
+
+
+def test_grin_input_imputer_uses_explicit_mask_without_exogenous_duplication():
+    cfg = types.SimpleNamespace(
+        enc_in=7,
+        raw_enc_in=1,
+        d_model=8,
+        lifecycle_observation_mask_feature=True,
+    )
+    recipe = {
+        "grin_hidden_dim": 8,
+        "grin_ff_dim": 8,
+        "grin_kernel_size": 1,
+        "grin_decoder_order": 1,
+        "grin_use_extra_features": True,
+        "grin_use_role_mask": True,
+    }
+    imputer = _source_grin.GRINInputImputer(cfg, recipe)
+    x = torch.randn(2, 4, 5, 7)
+    x[..., 1:5] = 0.0
+    x[..., 1] = 1.0
+    x[..., 6] = 1.0
+    x[:, :, 0, 6] = 0.0
+
+    explicit_mask = imputer._observed_mask(
+        x[..., :1],
+        x[..., 1:6],
+        x_enc=x,
+    )
+    out = imputer(torch.eye(5), x)
+
+    assert imputer.bigril.fwd_rnn.u_size == 5
+    assert explicit_mask[:, :, 0].sum() == 0
+    assert explicit_mask[:, :, 1:].all()
+    assert out.shape == x.shape
+    assert imputer.without_observation_mask(out).shape[-1] == 6
+    assert torch.isfinite(out).all()
+
+
+def test_alfgraph_can_disable_internal_grin_for_shared_scope():
+    cfg = types.SimpleNamespace(
+        pred_len=3,
+        look_back=0,
+        c_out=1,
+        enc_in=6,
+        raw_enc_in=1,
+        d_model=8,
+        e_layers=1,
+        k_hop=1,
+        lifecycle_observation_mask_feature=False,
+        model_family_cfg={
+            "recipe": {
+                "use_grin_input_imputer": False,
+                "decoder_output_mode": "residual_delta",
+                "decoder_residual_scale": 0.3,
+                "cell_type": "dcrnn",
+            }
+        },
+    )
+
+    model = _alfgraph.Model(cfg)
+
+    assert model.data_pre is None
+    assert not any(
+        isinstance(module, _source_grin.GRINInputImputer)
+        for module in model.modules()
+    )
 
 
 def test_crossformer_timefilter_block_preserves_patch_shape():

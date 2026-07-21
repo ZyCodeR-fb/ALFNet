@@ -350,6 +350,11 @@ def _pretrained_snapshot_payload(pretrained, args):
                 "lifecycle_keep_random_mask": args.lifecycle_keep_random_mask,
                 "lifecycle_role_features": args.lifecycle_role_features,
                 "lifecycle_history_age_feature": args.lifecycle_history_age_feature,
+                "lifecycle_observation_mask_feature": getattr(
+                    args,
+                    "lifecycle_observation_mask_feature",
+                    False,
+                ),
             },
             "model_class": pretrained.__class__.__name__,
             "model_module": pretrained.__class__.__module__,
@@ -435,8 +440,17 @@ if __name__ == "__main__":
     train_loader = data_provider(args, "train")
     args.slide_step = slide_step
     val_loader = data_provider(args, "val")
-    test_loader = data_provider(args, "test")
-    data_loaders = dict(zip(["train", "val", "test"], [train_loader, val_loader, test_loader]))
+    is_lcbt = args.lifecycle_training_strategy == "lcbt_v1"
+    if is_lcbt:
+        data_loaders = {"train": train_loader, "val": val_loader}
+        test_loader = None
+    else:
+        test_loader = data_provider(args, "test")
+        data_loaders = {
+            "train": train_loader,
+            "val": val_loader,
+            "test": test_loader,
+        }
     optimizers = {"adamw": torch.optim.AdamW, "adam": torch.optim.Adam, "sgd": torch.optim.SGD}
     optimizer_params = model.get_optimizer_param_groups(args.lr) if hasattr(model, "get_optimizer_param_groups") else model.parameters()
     optimizer = optimizers[args.optimizer](optimizer_params, lr=args.lr, weight_decay=args.weight_decay)
@@ -471,7 +485,8 @@ if __name__ == "__main__":
     print_train(args)
     print(f"├── train data dim: {len(train_loader.dataset)}")  # type: ignore
     print(f"├── val   data dim: {len(val_loader.dataset)}")  # type: ignore
-    print(f"└── test  data dim: {len(test_loader.dataset)}")  # type: ignore
+    if test_loader is not None:
+        print(f"└── test  data dim: {len(test_loader.dataset)}")  # type: ignore
     pretrained = train_model(
         model=model,
         optimizer=optimizer,
@@ -484,7 +499,8 @@ if __name__ == "__main__":
     if args.save_model:
         save_pretrained_snapshot(pretrained, args)
 
-    path = f"{args.best_prediction_path}best_total_y.pkl"
-    y_pred, y, AAS, VS, FS, NAS = load_prediction(path, "val")
-    report_error(y_pred, y, AAS, VS, FS, NAS, f"{args.model}-{args.dloader_name}", "./reports.csv")
+    if not is_lcbt:
+        path = f"{args.best_prediction_path}best_total_y.pkl"
+        y_pred, y, AAS, VS, FS, NAS = load_prediction(path, "val")
+        report_error(y_pred, y, AAS, VS, FS, NAS, f"{args.model}-{args.dloader_name}", "./reports.csv")
     print("-> Done!")

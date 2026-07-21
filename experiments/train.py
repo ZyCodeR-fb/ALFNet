@@ -67,6 +67,8 @@ def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch
             )
             if len(mode_metrics) > 4:
                 metrics.update({f"{mode}_role  ": mode_metrics[4]})
+            if len(mode_metrics) > 5 and mode_metrics[5]:
+                metrics.update({f"{mode}_phase": mode_metrics[5]})
         total_y[mode] = total_y_mode
 
     if train:
@@ -76,6 +78,8 @@ def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch
                 metric_name = "val_total "
             elif args.stop_based == "val_role":
                 metric_name = "val_role  "
+            elif args.stop_based == "val_phase":
+                metric_name = "val_phase"
             else:
                 metric_name = "val_mask  "
         elif "train" in args.stop_based:
@@ -86,10 +90,30 @@ def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch
                 metric_name = "train_role  "
             else:
                 metric_name = "train_mask  "
-        save_checkpoint(model, optimizer, args, epoch, metric_mode, metrics[metric_name][args.loss], total_y, metric_name)
-        save_checkpoint(model, optimizer, args, epoch, "test", metrics["test_never_known_nodes "][args.loss], total_y, "test_never_known_nodes")
+        metric_key = "mae" if args.stop_based == "val_phase" else args.loss
+        save_checkpoint(
+            model,
+            optimizer,
+            args,
+            epoch,
+            metric_mode,
+            metrics[metric_name][metric_key],
+            total_y,
+            metric_name,
+        )
+        if "test" in data_loaders:
+            save_checkpoint(
+                model,
+                optimizer,
+                args,
+                epoch,
+                "test",
+                metrics["test_never_known_nodes "][args.loss],
+                total_y,
+                "test_never_known_nodes",
+            )
         if args.scheduler == "plateau":
-            scheduler.step(metrics[metric_name][args.loss])
+            scheduler.step(metrics[metric_name][metric_key])
         elif args.scheduler == "cosine" or args.scheduler == "step":
             scheduler.step()
 
@@ -130,6 +154,16 @@ def save_checkpoint(model, optimizer, args, epoch, mode, now_metric, total_y, me
                         "lifecycle_fs_loss_weight": args.lifecycle_fs_loss_weight,
                         "lifecycle_role_features": args.lifecycle_role_features,
                         "lifecycle_history_age_feature": args.lifecycle_history_age_feature,
+                        "lifecycle_observation_mask_feature": getattr(
+                            args,
+                            "lifecycle_observation_mask_feature",
+                            False,
+                        ),
+                        "training_protocol_hash": getattr(
+                            args,
+                            "training_protocol_hash",
+                            None,
+                        ),
                         "max_epoch": args.max_epoch,
                         "patience": args.patience,
                         "stop_based": args.stop_based,
@@ -137,7 +171,8 @@ def save_checkpoint(model, optimizer, args, epoch, mode, now_metric, total_y, me
                 },
                 checkpoint_path,
             )
-            args.best_total_y.update({f"{mode}": total_y["test"]})
+            if "test" in total_y:
+                args.best_total_y.update({f"{mode}": total_y["test"]})
             print(f"-> New best {metric_name} loss at epoch {epoch}! ({metric_name} loss: {now_metric:.4f})")
     except Exception as e:
         print(e)
@@ -148,6 +183,7 @@ def _finite_or_none(value):
 
 
 def _write_training_summary(args, finished_epoch, stop_reason):
+    has_test_checkpoint = int(args.best_test_metric_epoch) >= 0
     summary = {
         "finished_epoch": int(finished_epoch),
         "stop_reason": stop_reason,
@@ -156,10 +192,19 @@ def _write_training_summary(args, finished_epoch, stop_reason):
         "stop_based": args.stop_based,
         "best_train_metric_epoch": int(args.best_train_metric_epoch),
         "best_val_metric_epoch": int(args.best_val_metric_epoch),
-        "best_test_metric_epoch": int(args.best_test_metric_epoch),
+        "best_test_metric_epoch": (
+            int(args.best_test_metric_epoch) if has_test_checkpoint else None
+        ),
         "best_train_metric": _finite_or_none(args.best_train_metric),
         "best_val_metric": _finite_or_none(args.best_val_metric),
-        "best_test_metric": _finite_or_none(args.best_test_metric),
+        "best_test_metric": (
+            _finite_or_none(args.best_test_metric) if has_test_checkpoint else None
+        ),
+        "training_protocol_hash": getattr(
+            args,
+            "training_protocol_hash",
+            None,
+        ),
     }
     summary_path = os.path.join(args.best_checkpoint_path, "training_summary.json")
     with open(summary_path, "w", encoding="utf-8") as handle:
@@ -201,9 +246,17 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
     args.best_test_metric = 1e10
     args.best_test_metric_epoch = -1
     args.best_total_y = {}  # save best epoch test results
+    args.training_protocol_hash = getattr(
+        data_loaders["train"].dataset,
+        "training_protocol_hash",
+        None,
+    )
     print("-> Start training...")
     wait_count = 0
     stopped_early = False
+    use_legacy_early_stop_grace = (
+        args.lifecycle_training_strategy != "lcbt_v1"
+    )
     for epoch in range(1, args.max_epoch + 1):
         print(f"-> Epoch {epoch} started...")
         train_dataset = data_loaders["train"].dataset
@@ -214,13 +267,17 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
 
         # Reset early stopping count if epoch improved
         if "val" in args.stop_based:
-            if args.best_val_metric_epoch == epoch or epoch < 20:
+            if args.best_val_metric_epoch == epoch or (
+                use_legacy_early_stop_grace and epoch < 20
+            ):
                 wait_count = 0
             else:
                 wait_count += 1
                 print(f"-> Early stopping count: {wait_count}/{args.patience}")
         else:
-            if args.best_train_metric_epoch == epoch or epoch < 20:
+            if args.best_train_metric_epoch == epoch or (
+                use_legacy_early_stop_grace and epoch < 20
+            ):
                 wait_count = 0
             else:
                 wait_count += 1
@@ -257,7 +314,8 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
         print(f"-> Saved best train model checkpoint at epoch {args.best_train_metric_epoch}!")
     elif "val" in args.stop_based:
         print(f"-> Saved best val model checkpoint at epoch {args.best_val_metric_epoch}!")
-    print(f"-> Saved best test model checkpoint at epoch {args.best_test_metric_epoch}!")
+    if "test" in data_loaders:
+        print(f"-> Saved best test model checkpoint at epoch {args.best_test_metric_epoch}!")
     print(f"   - Saved to: {args.best_checkpoint_path}")
     _write_training_summary(args, finished_epoch, stop_reason)
 
@@ -266,16 +324,17 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
     if "train" in args.stop_based and args.best_train_metric_epoch < 0:
         raise RuntimeError("Training finished without any finite training checkpoint. The training loss likely became NaN or Inf.")
 
-    print("-> save predictions and metrics...")
-    with open(args.best_prediction_path + "best_total_y.pkl", "wb") as f:
-        (
-            args.best_total_y["always_known_nodes"],
-            args.best_total_y["never_known_nodes"],
-            args.best_total_y["new_add_nodes"],
-            args.best_total_y["failed_nodes"],
-        ) = data_loaders["test"].dataset.get_know_unknow_nodes()
-        pickle.dump(args.best_total_y, f)
-    read_out(data_loaders, args.best_checkpoint_path, criterions, args.exp_id, args)
+    if "test" in data_loaders:
+        print("-> save predictions and metrics...")
+        with open(args.best_prediction_path + "best_total_y.pkl", "wb") as f:
+            (
+                args.best_total_y["always_known_nodes"],
+                args.best_total_y["never_known_nodes"],
+                args.best_total_y["new_add_nodes"],
+                args.best_total_y["failed_nodes"],
+            ) = data_loaders["test"].dataset.get_know_unknow_nodes()
+            pickle.dump(args.best_total_y, f)
+        read_out(data_loaders, args.best_checkpoint_path, criterions, args.exp_id, args)
     check_point = _resolve_return_checkpoint_path(args)
     best_model_dict = torch.load(check_point, weights_only=False)
     epoch = best_model_dict["epoch"]

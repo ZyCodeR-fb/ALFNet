@@ -2,6 +2,11 @@ import torch
 from utils.logtool import detail_metrics
 import random
 import torch.nn.functional as F
+from data_provider.lcbt_protocol import (
+    LCBT_PHASES,
+    accumulate_phase_mae,
+    finalize_phase_mae,
+)
 from utils.model_output import sum_aux_losses, unpack_model_output
 
 ROLE_CHANNEL_COUNT = 4
@@ -295,6 +300,8 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
     metrics3 = metrics.copy()
     metrics4 = metrics.copy()
     metrics_role = metrics.copy()
+    phase_error_sums = [0.0] * len(LCBT_PHASES)
+    phase_counts = [0] * len(LCBT_PHASES)
     if mode == "train" and train == True:
         model.train()
         model.zero_grad()
@@ -314,13 +321,31 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
 
     with torch.set_grad_enabled(grad_enabled):
         model.to(args.device)
-        max_bacth_num = min(600, len(dataloader)) if mode == "train" else len(dataloader)
+        is_lcbt = getattr(args, "lifecycle_training_strategy", "") == "lcbt_v1"
+        max_bacth_num = (
+            len(dataloader)
+            if is_lcbt or mode != "train"
+            else min(600, len(dataloader))
+        )
         for batch_ix, batch in enumerate(dataloader):
             if batch_ix >= max_bacth_num:
                 break
             batch = [x.float().to(args.device) for x in batch]
             sample_role_weights = None
-            if len(batch) == 5:
+            phase_ids = None
+            changed_node_mask = None
+            if len(batch) == 7:
+                (
+                    x_enc,
+                    x_dec,
+                    enc_t_mark,
+                    dec_t_mark,
+                    sample_role_weights,
+                    phase_ids,
+                    changed_node_mask,
+                ) = batch
+                phase_ids = phase_ids.long()
+            elif len(batch) == 5:
                 x_enc, x_dec, enc_t_mark, dec_t_mark, sample_role_weights = batch
             else:
                 x_enc, x_dec, enc_t_mark, dec_t_mark = batch
@@ -350,6 +375,8 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                 y = y[..., batch_known_nodes, :]
                 if sample_role_weights is not None:
                     sample_role_weights = sample_role_weights[..., batch_known_nodes, :]
+                if changed_node_mask is not None:
+                    changed_node_mask = changed_node_mask[..., batch_known_nodes]
                 # 每次还得给一些节点(25%)赋值为0，保留图结构
                 should_apply_random_mask = (not args.train_for_async_lifecycle) or args.lifecycle_keep_random_mask
                 if should_apply_random_mask:
@@ -481,6 +508,15 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
             y_omi = y_omi.detach().cpu()
             inverse_y = inverse_transform(y)
             inverse_y_hat = inverse_transform(y_hat)
+            if mode == "val" and is_lcbt:
+                accumulate_phase_mae(
+                    phase_error_sums,
+                    phase_counts,
+                    inverse_y.numpy(),
+                    inverse_y_hat.numpy(),
+                    phase_ids.detach().cpu().numpy(),
+                    changed_node_mask.detach().cpu().numpy(),
+                )
             total_y_true.append(y)
             total_y_pred.append(y_hat)
             total_y_true_trans.append(inverse_y)
@@ -568,6 +604,13 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
         for metric_name in metrics_role.keys():
             metrics_role[metric_name] /= batch_ix + 1
 
+        metrics_phase = (
+            finalize_phase_mae(phase_error_sums, phase_counts)
+            if mode == "val"
+            and getattr(args, "lifecycle_training_strategy", "") == "lcbt_v1"
+            else {}
+        )
+
     else:
         for name, nodes in part_nodes.items():
             if len(nodes) == 0:
@@ -638,4 +681,13 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                     grad_enabled,
                     batch_ix,
                 )
-    return model, (metrics, metrics2, metrics3, metrics4, metrics_role), total_y
+    if mode == "test":
+        metrics_phase = {}
+    return model, (
+        metrics,
+        metrics2,
+        metrics3,
+        metrics4,
+        metrics_role,
+        metrics_phase,
+    ), total_y

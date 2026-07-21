@@ -25,7 +25,11 @@ class Model(nn.Module):
 
     def __init__(self, configs):
         super().__init__()
+        self.raw_enc_in = getattr(configs, "raw_enc_in", configs.enc_in)
         self.cfg = build_stfit_like_cfg(configs, STFIT_FULL_DEFAULTS)
+        self.cfg["model"]["in_channels"] = self.raw_enc_in
+        self.cfg["input_size"] = self.raw_enc_in
+        self.cfg["vae"]["input_dim"] = self.raw_enc_in
         self.pred_len = configs.pred_len
         self.output_dim = configs.c_out
         self.backbone = STGCN_n(self.cfg)
@@ -44,7 +48,9 @@ class Model(nn.Module):
                 param.requires_grad_("vae" not in name)
 
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, x_dec=None, dec_t_mark=None, epoch=0):
-        history_data = x_enc.permute(0, 2, 3, 1).contiguous()
+        history_data = x_enc[..., :self.raw_enc_in].permute(0, 2, 3, 1).contiguous()
+        if self.training and self.cfg.get("aug_node", False):
+            self.backbone.train_num_nodes = history_data.shape[1]
         if x_dec is None:
             future_data = torch.zeros(
                 history_data.shape[0],

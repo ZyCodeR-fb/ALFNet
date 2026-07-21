@@ -1,10 +1,22 @@
-from data_provider.graph_data_loader import AsyncLifecyclePEMS, DynamicPEMS, LifecycleTrainPEMS, StaticPEMS
+from data_provider.graph_data_loader import (
+    AsyncLifecyclePEMS,
+    DynamicPEMS,
+    LifecycleCoveragePEMS,
+    LifecycleTrainPEMS,
+    StaticPEMS,
+)
 from torch.utils.data import DataLoader
 
 
 def data_provider(args, flag):
     if args.test_for_async_lifecycle and flag == "test":
         Dataset = AsyncLifecyclePEMS
+    elif (
+        args.train_for_async_lifecycle
+        and args.lifecycle_training_strategy == "lcbt_v1"
+        and flag in {"train", "val"}
+    ):
+        Dataset = LifecycleCoveragePEMS
     elif args.train_for_async_lifecycle and flag in {"train", "val", "test"}:
         Dataset = LifecycleTrainPEMS
     elif args.test_for_changed:
@@ -20,7 +32,7 @@ def data_provider(args, flag):
         freq = args.freq
     else:
         shuffle_flag = True
-        drop_last = True
+        drop_last = args.lifecycle_training_strategy != "lcbt_v1"
         batch_size = args.batch_size  # bsz for train and valid
         freq = args.freq
 
@@ -44,6 +56,7 @@ def data_provider(args, flag):
         dataset_kwargs.update(
             lifecycle_role_features=args.lifecycle_role_features,
             lifecycle_history_age_feature=args.lifecycle_history_age_feature,
+            lifecycle_observation_mask_feature=args.lifecycle_observation_mask_feature,
             ples_pre_steps=args.ples_pre_steps,
             ples_post_steps=args.ples_post_steps,
             ples_temporal_blocks=args.ples_temporal_blocks,
@@ -53,6 +66,36 @@ def data_provider(args, flag):
             ples_seed=args.ples_seed,
             ples_bootstrap_samples=args.ples_bootstrap_samples,
             ples_bootstrap_seed=args.ples_bootstrap_seed,
+        )
+        if args.lifecycle_training_strategy == "lcbt_v1":
+            dataset_kwargs.update(
+                lcbt_manifest_root=args.lcbt_manifest_root,
+                lcbt_scaler_end_ratio=args.lcbt_scaler_end_ratio,
+                lcbt_test_start_ratio=args.lcbt_test_start_ratio,
+            )
+    elif Dataset is LifecycleCoveragePEMS:
+        dataset_kwargs.update(
+            lifecycle_role_features=args.lifecycle_role_features,
+            lifecycle_history_age_feature=args.lifecycle_history_age_feature,
+            lifecycle_observation_mask_feature=args.lifecycle_observation_mask_feature,
+            lifecycle_aas_loss_weight=args.lifecycle_aas_loss_weight,
+            lifecycle_nas_loss_weight=args.lifecycle_nas_loss_weight,
+            lifecycle_vs_loss_weight=args.lifecycle_vs_loss_weight,
+            lifecycle_fs_loss_weight=args.lifecycle_fs_loss_weight,
+            lcbt_manifest_root=args.lcbt_manifest_root,
+            lcbt_protocol_seed=args.lcbt_protocol_seed,
+            lcbt_validation_seed=args.lcbt_validation_seed,
+            lcbt_train_end_ratio=args.lcbt_train_end_ratio,
+            lcbt_val_end_ratio=args.lcbt_val_end_ratio,
+            lcbt_test_start_ratio=args.lcbt_test_start_ratio,
+            lcbt_scaler_end_ratio=args.lcbt_scaler_end_ratio,
+            lcbt_join_ratio=args.lcbt_join_ratio,
+            lcbt_fault_ratio=args.lcbt_fault_ratio,
+            lcbt_steady_ratio=args.lcbt_steady_ratio,
+            lcbt_cohort_fractions=args.lcbt_cohort_fractions,
+            lcbt_cohort_weights=args.lcbt_cohort_weights,
+            lcbt_clustered_ratio=args.lcbt_clustered_ratio,
+            lcbt_overwrite_manifest=args.lcbt_overwrite_manifest,
         )
     elif Dataset is LifecycleTrainPEMS:
         dataset_kwargs.update(

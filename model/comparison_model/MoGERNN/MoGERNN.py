@@ -171,15 +171,21 @@ class Model(nn.Module):
     def __init__(self, configs):
         super(Model, self).__init__()
         self.out_len = configs.pred_len if configs.pred_len > 0 else configs.look_back
+        self.raw_enc_in = getattr(configs, "raw_enc_in", configs.enc_in)
         self.data_pre = DataPreparation(configs)
-        self.seq2seq = Seq2Seq(configs.enc_in, configs.d_model, configs.e_layers, self.out_len, configs.k_hop)
+        self.seq2seq = Seq2Seq(self.raw_enc_in, configs.d_model, configs.e_layers, self.out_len, configs.k_hop)
 
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, *args):
         x_dec = args[0]
         # 输入的adj应该转一下
         A_q = calculate_random_walk_matrix(adj)
         A_h = calculate_random_walk_matrix(adj.T)
-        x_enc = self.data_pre(adj, x_enc, x_t_mark, pos_mark)
+        x_enc = self.data_pre(
+            adj,
+            x_enc[..., :self.raw_enc_in],
+            x_t_mark,
+            pos_mark,
+        )
         epoch = args[-1]
         teacher_forcing_ratio = 1 - (epoch / 40)
         dec_out = self.seq2seq(x_enc, x_dec, A_q, A_h, teacher_forcing_ratio)

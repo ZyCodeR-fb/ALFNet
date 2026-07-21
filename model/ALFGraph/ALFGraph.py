@@ -203,14 +203,23 @@ class Model(nn.Module):
         recipe_cfg = (getattr(configs, "model_family_cfg", {}) or {}).get(
             "recipe", {}
         )
-        if not bool(recipe_cfg.get("use_grin_input_imputer", False)):
-            raise ValueError(
-                "ALFGraph requires recipe.use_grin_input_imputer=true after final-model cleanup."
-            )
+        self.use_grin_input_imputer = bool(
+            recipe_cfg.get("use_grin_input_imputer", False)
+        )
 
         # Keep these names stable so existing rf_alf_sd checkpoints load unchanged.
-        self.data_pre = GRINInputImputer(configs, recipe_cfg)
+        self.data_pre = (
+            GRINInputImputer(configs, recipe_cfg)
+            if self.use_grin_input_imputer
+            else None
+        )
         self.raw_enc_in = getattr(configs, "raw_enc_in", configs.enc_in)
+        self.lifecycle_observation_mask_feature = bool(
+            getattr(configs, "lifecycle_observation_mask_feature", False)
+        )
+        backbone_enc_in = int(configs.enc_in) - int(
+            self.lifecycle_observation_mask_feature
+        )
         self.current_node_ids = None
         cell_type = recipe_cfg.get(
             "cell_type", recipe_cfg.get("mogernn_cell_type", "dcrnn")
@@ -222,7 +231,7 @@ class Model(nn.Module):
             "decoder_cell_type", recipe_cfg.get("mogernn_decoder_cell_type", None)
         )
         self.seq2seq = Seq2Seq(
-            configs.enc_in,
+            backbone_enc_in,
             configs.c_out,
             configs.d_model,
             configs.e_layers,
@@ -245,7 +254,9 @@ class Model(nn.Module):
         x_dec = args[0]
         A_q = calculate_random_walk_matrix(adj)
         A_h = calculate_random_walk_matrix(adj.T)
-        x_enc = self.data_pre(adj, x_enc, x_t_mark, pos_mark)
+        if self.data_pre is not None:
+            x_enc = self.data_pre(adj, x_enc, x_t_mark, pos_mark)
+            x_enc = self.data_pre.without_observation_mask(x_enc)
         epoch = args[-1]
         teacher_forcing_ratio = 1 - (epoch / 40)
         initial_input = x_enc[:, -1, :, :self.output_dim]

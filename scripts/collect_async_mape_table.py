@@ -7,6 +7,21 @@ from pathlib import Path
 MAIN_METRICS = ("Join", "Fault", "LifeMacro")
 PHASE_METRICS = ("Cold", "Warm", "Ready", "Onset", "Decay", "Outage")
 ERROR_METRICS = ("MAPE", "MAE", "RMSE")
+PAPER_MODEL_ORDER = (
+    "MoGERNN",
+    "PatchSTG",
+    "MCPST-FSL",
+    "STGODE",
+    "STID",
+    "STGCN",
+    "STBP",
+    "SLPF",
+    "STFiT",
+    "FCLSTM",
+    "GWNET",
+    "HA",
+    "ALFNet (ours)",
+)
 
 
 def _parse_label_rules(values):
@@ -43,6 +58,10 @@ def _method_name(path, payload, label_rules):
     variant = str(payload.get("model_variant") or "default").strip()
     if model == "ALFNet" and variant == "rf_alf_sd":
         return "ALFNet (ours)"
+    if model == "MCPST_FSL":
+        return "MCPST-FSL"
+    if model in PAPER_MODEL_ORDER:
+        return model
     if model:
         return model if variant == "default" else f"{model} [{variant}]"
     return path.parent.parent.name
@@ -97,7 +116,8 @@ def _collect_rows(args):
             min(values, key=lambda row: row["Main"]["LifeMacro"]["MAPE"])
             for values in grouped.values()
         ]
-    rows.sort(key=lambda row: (row["Main"]["LifeMacro"]["MAPE"], row["Models"]))
+    paper_rank = {name: index for index, name in enumerate(PAPER_MODEL_ORDER)}
+    rows.sort(key=lambda row: (paper_rank.get(row["Models"], len(paper_rank)), row["Models"]))
     return rows
 
 
@@ -112,10 +132,63 @@ def _table_lines(rows, groups):
         "| " + " | ".join(["---"] * len(headers)) + " |",
     ]
     source_key = "Main" if groups == MAIN_METRICS else "Phases"
+    best = {
+        (group, metric): min(row[source_key][group][metric] for row in rows)
+        for group in groups
+        for metric in ERROR_METRICS
+    }
     for row in rows:
         values = [row["Models"]]
-        values.extend(_format(row[source_key][group][metric]) for group in groups for metric in ERROR_METRICS)
+        for group in groups:
+            for metric in ERROR_METRICS:
+                value = row[source_key][group][metric]
+                formatted = _format(value)
+                if abs(value - best[(group, metric)]) < 1e-12:
+                    formatted = f"**{formatted}**"
+                values.append(formatted)
         lines.append("| " + " | ".join(values) + " |")
+    return lines
+
+
+def _result_summary_lines(rows):
+    ours = next((row for row in rows if row["Models"] == "ALFNet (ours)"), None)
+    if ours is None:
+        return []
+    cells = [
+        ("Main", group, metric)
+        for group in MAIN_METRICS
+        for metric in ERROR_METRICS
+    ] + [
+        ("Phases", group, metric)
+        for group in PHASE_METRICS
+        for metric in ERROR_METRICS
+    ]
+    non_wins = []
+    for source, group, metric in cells:
+        best_row = min(rows, key=lambda row: row[source][group][metric])
+        ours_value = ours[source][group][metric]
+        best_value = best_row[source][group][metric]
+        if ours_value > best_value + 1e-12:
+            non_wins.append(
+                f"{group} {metric}: ALFNet={_format(ours_value)}, "
+                f"best={best_row['Models']} {_format(best_value)}"
+            )
+    win_count = len(cells) - len(non_wins)
+    lines = [
+        "## Result Summary",
+        "",
+        f"- ALFNet is best in **{win_count}/{len(cells)}** main/phase metric cells (point estimates).",
+    ]
+    if non_wins:
+        lines.append(f"- Non-winning cells: {'; '.join(non_wins)}.")
+    else:
+        lines.append("- ALFNet is best in every reported main/phase metric cell.")
+    lines.extend(
+        [
+            "- Statistical claims about lifecycle-shock attenuation should use the paired hierarchical-bootstrap intervals.",
+            "",
+        ]
+    )
     return lines
 
 
@@ -127,6 +200,7 @@ def _write_markdown(rows, path):
         "",
         f"Protocol manifest: `{protocol_hash}`",
         "",
+        *_result_summary_lines(rows),
         "## Main Table",
         "",
         *_table_lines(rows, MAIN_METRICS),

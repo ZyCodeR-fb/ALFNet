@@ -1,8 +1,21 @@
+import json
 from pathlib import Path
 
 import numpy as np
 from torch.utils.data import Dataset
 import warnings
+from data_provider.lcbt_protocol import (
+    LCBT_PHASES,
+    LCBT_PROTOCOL_NAME,
+    LCBT_PROTOCOL_VERSION,
+    array_hash,
+    build_lcbt_schedule,
+    calendar_regime,
+    compose_effective_lifecycle_features,
+    lcbt_manifest_hash,
+    resolve_lcbt_boundaries,
+    stable_hash,
+)
 from data_provider.ples_protocol import build_protocol_manifest
 from utils.timefeatures import time_features
 
@@ -721,6 +734,461 @@ class LifecycleTrainPEMS(StaticPEMS):
         return seq_x, seq_y, x_t_mark, y_t_mark, target_role_weights
 
 
+def _lcbt_window_regimes(timestamps, segment_start, segment_end, input_len, pred_len):
+    segment_length = int(segment_end) - int(segment_start)
+    num_samples = (segment_length - int(input_len) - int(pred_len)) + 1
+    if num_samples <= 0:
+        raise ValueError("LCBT segment is too short for the requested input/prediction lengths")
+    if timestamps is None:
+        return ["OffPeak"] * num_samples
+    return [
+        calendar_regime(timestamps[int(segment_start) + index + int(input_len) - 1])
+        for index in range(num_samples)
+    ]
+
+
+def _lcbt_schedule_summary(schedule, num_nodes, input_len):
+    scenario_histogram = {name: 0 for name in ("join", "fault", "steady")}
+    phase_histogram = {phase: 0 for phase in LCBT_PHASES}
+    transition_histogram = {
+        "join": {str(index): 0 for index in range(int(input_len) + 1)},
+        "fault": {str(index): 0 for index in range(int(input_len) + 1)},
+    }
+    topology_histogram = {"clustered": 0, "scattered": 0, "none": 0}
+    cohort_histogram = {}
+    calendar_crosstab = {}
+    calendar_phase_crosstab = {}
+    exposure = np.zeros(int(num_nodes), dtype=np.int64)
+    for item in schedule:
+        scenario = item["scenario"]
+        scenario_histogram[scenario] += 1
+        topology_histogram[item["topology_mode"]] += 1
+        regime = item["calendar_regime"]
+        calendar_crosstab.setdefault(regime, {name: 0 for name in ("join", "fault", "steady")})
+        calendar_phase_crosstab.setdefault(
+            regime,
+            {phase: 0 for phase in LCBT_PHASES},
+        )
+        calendar_crosstab[regime][scenario] += 1
+        if scenario != "steady":
+            transition_histogram[scenario][str(item["transition_steps"])] += 1
+            phase_name = LCBT_PHASES[item["phase_id"]]
+            phase_histogram[phase_name] += 1
+            calendar_phase_crosstab[regime][phase_name] += 1
+            fraction_key = f"{float(item['cohort_fraction']):.6f}"
+            cohort_histogram[fraction_key] = cohort_histogram.get(fraction_key, 0) + 1
+            exposure[np.asarray(item["changed_nodes"], dtype=np.int64)] += 1
+    return {
+        "num_samples": len(schedule),
+        "scenario_histogram": scenario_histogram,
+        "phase_histogram": phase_histogram,
+        "transition_histogram": transition_histogram,
+        "topology_histogram": topology_histogram,
+        "cohort_fraction_histogram": cohort_histogram,
+        "calendar_crosstab": calendar_crosstab,
+        "calendar_phase_crosstab": calendar_phase_crosstab,
+        "node_exposure": {
+            "minimum": int(exposure.min()) if len(exposure) else 0,
+            "mean": float(exposure.mean()) if len(exposure) else 0.0,
+            "maximum": int(exposure.max()) if len(exposure) else 0,
+            "counts": exposure.astype(int).tolist(),
+        },
+    }
+
+
+class LifecycleCoveragePEMS(Dataset):
+    """LCBT v1 train/validation dataset with strict chronological splits."""
+
+    def __init__(
+        self,
+        data_path: str,
+        size: list[int],
+        flag: str,
+        scale: bool,
+        freq: str,
+        target_features: str,
+        input_features: str,
+        dloader_name: str,
+        splits: list,
+        step: int = 1,
+        inverse=False,
+        unknown_nodes_path="",
+        unknown_nodes_list=None,
+        unknown_nodes_num=0,
+        lifecycle_role_features=True,
+        lifecycle_history_age_feature=True,
+        lifecycle_observation_mask_feature=True,
+        lifecycle_aas_loss_weight=1.0,
+        lifecycle_nas_loss_weight=1.0,
+        lifecycle_vs_loss_weight=1.0,
+        lifecycle_fs_loss_weight=1.0,
+        lcbt_manifest_root="./protocol_manifests",
+        lcbt_protocol_seed=2026,
+        lcbt_validation_seed=12026,
+        lcbt_train_end_ratio=0.50,
+        lcbt_val_end_ratio=0.60,
+        lcbt_test_start_ratio=0.60,
+        lcbt_scaler_end_ratio=0.50,
+        lcbt_join_ratio=0.40,
+        lcbt_fault_ratio=0.40,
+        lcbt_steady_ratio=0.20,
+        lcbt_cohort_fractions=(0.025, 0.05, 0.10),
+        lcbt_cohort_weights=(0.25, 0.50, 0.25),
+        lcbt_clustered_ratio=0.50,
+        lcbt_overwrite_manifest=False,
+    ):
+        if flag not in {"train", "val"}:
+            raise ValueError("LifecycleCoveragePEMS only supports train/val splits")
+        self.flag = flag
+        self.data_path = data_path
+        self.input_len, self.look_back, self.pred_len = [int(value) for value in size]
+        if self.look_back > self.input_len:
+            raise ValueError("look_back should be smaller than input_len")
+        self.scale = bool(scale)
+        self.inverse = inverse
+        self.freq = freq
+        self.dloader_name = dloader_name
+        self.step = 1
+        self.unknown_nodes_path = unknown_nodes_path
+        self.unknown_nodes = list(unknown_nodes_list or [])
+        self.unknown_nodes_num = int(unknown_nodes_num)
+        self.lifecycle_role_features = bool(lifecycle_role_features)
+        self.lifecycle_history_age_feature = bool(lifecycle_history_age_feature)
+        self.lifecycle_observation_mask_feature = bool(lifecycle_observation_mask_feature)
+        self.input_features = input_features
+        self.target_features = target_features
+        self.role_loss_weights = {
+            ROLE_AAS: float(lifecycle_aas_loss_weight),
+            ROLE_NAS: float(lifecycle_nas_loss_weight),
+            ROLE_VS: float(lifecycle_vs_loss_weight),
+            ROLE_FS: float(lifecycle_fs_loss_weight),
+        }
+        self.manifest_root = Path(lcbt_manifest_root)
+        self.protocol_seed = int(lcbt_protocol_seed)
+        self.validation_seed = int(lcbt_validation_seed)
+        self.overwrite_manifest = bool(lcbt_overwrite_manifest)
+        self.split_ratios = {
+            "train_end_ratio": float(lcbt_train_end_ratio),
+            "val_end_ratio": float(lcbt_val_end_ratio),
+            "test_start_ratio": float(lcbt_test_start_ratio),
+            "scaler_end_ratio": float(lcbt_scaler_end_ratio),
+        }
+        self.scenario_ratios = (
+            float(lcbt_join_ratio),
+            float(lcbt_fault_ratio),
+            float(lcbt_steady_ratio),
+        )
+        self.cohort_fractions = tuple(float(value) for value in lcbt_cohort_fractions)
+        self.cohort_weights = tuple(float(value) for value in lcbt_cohort_weights)
+        self.clustered_ratio = float(lcbt_clustered_ratio)
+        self.current_epoch = 0
+        self._read_data(input_features, target_features)
+        self.protocol_manifest = self._ensure_protocol_manifest()
+        self.training_protocol_hash = self.protocol_manifest["protocol_hash"]
+        self._refresh_schedule()
+
+    def _read_data(self, input_features, target_features):
+        feature_map = {
+            "q": [0],
+            "o": [1],
+            "v": [2],
+            "qv": [0, 2],
+            "qov": [0, 1, 2],
+        }
+        self.in_feas = feature_map[input_features]
+        self.tar_feas = feature_map[target_features]
+        payload = _unwrap_raw_data(np.load(self.data_path, allow_pickle=True))
+        raw_source = np.asarray(payload["data"])
+        self.raw_data_shape = [int(value) for value in raw_source.shape]
+        self.raw_data_hash = array_hash(raw_source)
+        raw_values = raw_source.astype(np.float32, copy=True)
+        raw_values[raw_values <= 0] = np.nan
+        self.full_timestamps = payload.get("time_stamp")
+        self.timestamp_hash = (
+            array_hash(np.asarray(self.full_timestamps))
+            if self.full_timestamps is not None
+            else None
+        )
+        self.full_num_nodes = int(raw_values.shape[1])
+        self.full_adjacency = np.asarray(payload["adj"])
+        self.adjacency_hash = array_hash(self.full_adjacency)
+
+        if self.unknown_nodes_path:
+            self.unknown_nodes = np.load(self.unknown_nodes_path).astype(int).tolist()
+        elif self.unknown_nodes:
+            self.unknown_nodes = [int(node) for node in self.unknown_nodes]
+        else:
+            rng = np.random.default_rng(0)
+            self.unknown_nodes = sorted(
+                rng.choice(self.full_num_nodes, size=self.unknown_nodes_num, replace=False).astype(int).tolist()
+            )
+        self.known_nodes = np.setdiff1d(
+            np.arange(self.full_num_nodes, dtype=np.int64),
+            np.asarray(self.unknown_nodes, dtype=np.int64),
+        ).astype(int).tolist()
+        self.boundaries = resolve_lcbt_boundaries(
+            len(raw_values),
+            train_end_ratio=self.split_ratios["train_end_ratio"],
+            val_end_ratio=self.split_ratios["val_end_ratio"],
+            test_start_ratio=self.split_ratios["test_start_ratio"],
+            scaler_end_ratio=self.split_ratios["scaler_end_ratio"],
+        )
+
+        scaler_data = raw_values[
+            self.boundaries["scaler_start"]:self.boundaries["scaler_end"],
+            self.known_nodes,
+        ]
+        self.mean_ = np.nanmean(scaler_data, axis=(0, 1), keepdims=True)
+        self.std_ = np.nanstd(scaler_data, axis=(0, 1), keepdims=True)
+        self.std_[self.std_ == 0] = 1.0
+        if not self.scale:
+            self.mean_ = np.zeros_like(self.mean_)
+            self.std_ = np.ones_like(self.std_)
+
+        if self.flag == "train":
+            self.segment_start = self.boundaries["train_start"]
+            self.segment_end = self.boundaries["train_end"]
+        else:
+            self.segment_start = self.boundaries["val_start"]
+            self.segment_end = self.boundaries["val_end"]
+        segment = raw_values[self.segment_start:self.segment_end, self.known_nodes]
+        segment = (segment - self.mean_) / self.std_
+        self.data = segment[..., self.in_feas]
+        self.data_y = segment[..., self.tar_feas]
+        self.num_nodes = int(self.data.shape[1])
+
+        raw_time_mark = payload.get("time_stamp")
+        self.time_mark = None
+        if raw_time_mark is not None:
+            transformed = time_features(raw_time_mark, freq=self.freq)
+            self.time_mark = transformed[self.segment_start:self.segment_end]
+        self.pos_mark = payload.get("pos_stamp")
+        if self.pos_mark is not None:
+            self.pos_mark = np.asarray(self.pos_mark)[self.known_nodes]
+            denominator = np.max(self.pos_mark, keepdims=True) - np.min(self.pos_mark, keepdims=True)
+            denominator[denominator == 0] = 1.0
+            self.pos_mark = (self.pos_mark - np.min(self.pos_mark, keepdims=True)) / denominator - 0.5
+        self.adj = self.full_adjacency[np.ix_(self.known_nodes, self.known_nodes)]
+        self.calendar_regimes = _lcbt_window_regimes(
+            self.full_timestamps,
+            self.segment_start,
+            self.segment_end,
+            self.input_len,
+            self.pred_len,
+        )
+
+    def _build_schedule(self, flag, seed, epoch):
+        if flag == "train":
+            start, end = self.boundaries["train_start"], self.boundaries["train_end"]
+        else:
+            start, end = self.boundaries["val_start"], self.boundaries["val_end"]
+        regimes = _lcbt_window_regimes(
+            self.full_timestamps,
+            start,
+            end,
+            self.input_len,
+            self.pred_len,
+        )
+        return build_lcbt_schedule(
+            len(regimes),
+            self.input_len,
+            self.adj,
+            regimes,
+            seed=seed,
+            epoch=epoch,
+            scenario_ratios=self.scenario_ratios,
+            cohort_fractions=self.cohort_fractions,
+            cohort_weights=self.cohort_weights,
+            clustered_ratio=self.clustered_ratio,
+        )
+
+    def _manifest_payload(self):
+        train_schedule = self._build_schedule("train", self.protocol_seed, 0)
+        val_schedule = self._build_schedule("val", self.validation_seed, 0)
+        payload = {
+            "schema_version": 1,
+            "protocol_name": LCBT_PROTOCOL_NAME,
+            "protocol_version": LCBT_PROTOCOL_VERSION,
+            "dataset": self.dloader_name,
+            "data_path": str(Path(self.data_path).resolve()),
+            "data_shape": self.raw_data_shape,
+            "data_hash": self.raw_data_hash,
+            "timestamp_hash": self.timestamp_hash,
+            "adjacency_hash": self.adjacency_hash,
+            "known_nodes_hash": stable_hash(self.known_nodes),
+            "unknown_nodes_hash": stable_hash(sorted(self.unknown_nodes)),
+            "boundaries": self.boundaries,
+            "scaler": {
+                "fit_start": self.boundaries["scaler_start"],
+                "fit_end": self.boundaries["scaler_end"],
+                "mean_hash": array_hash(self.mean_),
+                "std_hash": array_hash(self.std_),
+            },
+            "input_semantics": {
+                "input_features": self.input_features,
+                "target_features": self.target_features,
+                "scale": self.scale,
+                "effective_mask": "natural_finite_and_lifecycle_visible",
+                "role_features": self.lifecycle_role_features,
+                "history_age_feature": self.lifecycle_history_age_feature,
+                "observation_mask_feature": self.lifecycle_observation_mask_feature,
+                "phase_labels_are_model_inputs": False,
+            },
+            "role_loss_weights": {
+                "steady_observed": self.role_loss_weights[ROLE_AAS],
+                "post_join": self.role_loss_weights[ROLE_NAS],
+                "pre_join": self.role_loss_weights[ROLE_VS],
+                "post_fault": self.role_loss_weights[ROLE_FS],
+            },
+            "input_len": self.input_len,
+            "pred_len": self.pred_len,
+            "window_step": 1,
+            "seeds": {
+                "training": self.protocol_seed,
+                "validation": self.validation_seed,
+            },
+            "scenario_ratios": {
+                "join": self.scenario_ratios[0],
+                "fault": self.scenario_ratios[1],
+                "steady": self.scenario_ratios[2],
+            },
+            "cohort_fractions": list(self.cohort_fractions),
+            "cohort_weights": list(self.cohort_weights),
+            "clustered_ratio": self.clustered_ratio,
+            "reference_training_schedule": _lcbt_schedule_summary(
+                train_schedule,
+                self.num_nodes,
+                self.input_len,
+            ),
+            "validation_schedule": _lcbt_schedule_summary(
+                val_schedule,
+                self.num_nodes,
+                self.input_len,
+            ),
+        }
+        payload["protocol_hash"] = lcbt_manifest_hash(payload)
+        return payload
+
+    def _ensure_protocol_manifest(self):
+        manifest = self._manifest_payload()
+        manifest_path = self.manifest_root / self.dloader_name / "lcbt_v1" / "protocol_manifest.json"
+        if manifest_path.exists():
+            with manifest_path.open("r", encoding="utf-8") as handle:
+                existing = json.load(handle)
+            if existing.get("protocol_hash") != manifest["protocol_hash"] and not self.overwrite_manifest:
+                raise ValueError(
+                    f"LCBT manifest mismatch at {manifest_path}. "
+                    "Use lcbt_overwrite_manifest=true only for an intentional protocol replacement."
+                )
+            if existing.get("protocol_hash") == manifest["protocol_hash"]:
+                return existing
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        with manifest_path.open("w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, ensure_ascii=False, indent=2)
+        return manifest
+
+    def _refresh_schedule(self):
+        if self.flag == "train":
+            self.schedule = build_lcbt_schedule(
+                len(self),
+                self.input_len,
+                self.adj,
+                self.calendar_regimes,
+                seed=self.protocol_seed,
+                epoch=self.current_epoch,
+                scenario_ratios=self.scenario_ratios,
+                cohort_fractions=self.cohort_fractions,
+                cohort_weights=self.cohort_weights,
+                clustered_ratio=self.clustered_ratio,
+            )
+        else:
+            self.schedule = build_lcbt_schedule(
+                len(self),
+                self.input_len,
+                self.adj,
+                self.calendar_regimes,
+                seed=self.validation_seed,
+                epoch=0,
+                scenario_ratios=self.scenario_ratios,
+                cohort_fractions=self.cohort_fractions,
+                cohort_weights=self.cohort_weights,
+                clustered_ratio=self.clustered_ratio,
+            )
+
+    def set_epoch(self, epoch):
+        if self.flag == "train":
+            self.current_epoch = int(epoch)
+            self._refresh_schedule()
+
+    def _lifecycle_state(self, item):
+        role_ids = np.full((self.input_len, self.num_nodes), ROLE_AAS, dtype=np.int64)
+        lifecycle_mask = np.ones((self.input_len, self.num_nodes), dtype=bool)
+        changed_nodes = item["changed_nodes"]
+        transition_steps = int(item["transition_steps"])
+        cutoff = self.input_len - transition_steps
+        if item["scenario"] == "join" and changed_nodes:
+            role_ids[:cutoff, changed_nodes] = ROLE_VS
+            role_ids[cutoff:, changed_nodes] = ROLE_NAS
+            lifecycle_mask[:cutoff, changed_nodes] = False
+        elif item["scenario"] == "fault" and changed_nodes:
+            role_ids[cutoff:, changed_nodes] = ROLE_FS
+            lifecycle_mask[cutoff:, changed_nodes] = False
+        return role_ids, lifecycle_mask
+
+    def __getitem__(self, index):
+        input_begin = int(index)
+        input_end = input_begin + self.input_len
+        output_begin = input_end - self.look_back
+        output_end = input_end + self.pred_len
+        raw_x = self.data[input_begin:input_end].copy()
+        seq_y = self.data_y[output_begin:output_end]
+        item = self.schedule[int(index)]
+        role_ids, lifecycle_mask = self._lifecycle_state(item)
+        seq_x, _ = compose_effective_lifecycle_features(
+            raw_x,
+            lifecycle_mask,
+            role_ids,
+            append_role=self.lifecycle_role_features,
+            append_age=self.lifecycle_history_age_feature,
+            append_observation_mask=self.lifecycle_observation_mask_feature,
+        )
+        target_weights = np.ones_like(seq_y, dtype=np.float32)
+        if item["scenario"] == "join" and item["changed_nodes"]:
+            target_weights[:, item["changed_nodes"], :] = self.role_loss_weights[ROLE_NAS]
+        elif item["scenario"] == "fault" and item["changed_nodes"]:
+            target_weights[:, item["changed_nodes"], :] = self.role_loss_weights[ROLE_FS]
+        changed_mask = np.zeros(self.num_nodes, dtype=np.float32)
+        changed_mask[item["changed_nodes"]] = 1.0
+        x_t_mark, y_t_mark = np.zeros_like(seq_x), np.zeros_like(seq_y)
+        if self.time_mark is not None:
+            x_t_mark = self.time_mark[input_begin:input_end]
+            y_t_mark = self.time_mark[output_begin:output_end]
+        return (
+            seq_x,
+            seq_y,
+            x_t_mark,
+            y_t_mark,
+            target_weights,
+            np.int64(item["phase_id"]),
+            changed_mask,
+        )
+
+    def __len__(self):
+        return (len(self.data) - self.input_len - self.pred_len) + 1
+
+    def inverse_transform(self, y):
+        return y * self.std_[..., self.tar_feas] + self.mean_[..., self.tar_feas]
+
+    def get_adj_and_pos_mark(self):
+        return self.adj, self.pos_mark
+
+    def get_know_unknow_nodes(self):
+        return list(range(self.num_nodes)), [], [], []
+
+    def get_protocol_manifest(self):
+        return self.protocol_manifest
+
+
 class AsyncLifecyclePEMS(Dataset):
     """Dataset-adaptive paired lifecycle event study test provider."""
 
@@ -742,6 +1210,10 @@ class AsyncLifecyclePEMS(Dataset):
         unknown_nodes_num=0,
         lifecycle_role_features: bool = False,
         lifecycle_history_age_feature: bool = False,
+        lifecycle_observation_mask_feature: bool = False,
+        lcbt_manifest_root: str = "./protocol_manifests",
+        lcbt_scaler_end_ratio=None,
+        lcbt_test_start_ratio=None,
         ples_pre_steps: int = 12,
         ples_post_steps: int = 36,
         ples_temporal_blocks: int = 4,
@@ -785,6 +1257,11 @@ class AsyncLifecyclePEMS(Dataset):
         self.train_ratio, self.valid_ratio = splits
         self.lifecycle_role_features = lifecycle_role_features
         self.lifecycle_history_age_feature = lifecycle_history_age_feature
+        self.lifecycle_observation_mask_feature = lifecycle_observation_mask_feature
+        self.lcbt_manifest_root = lcbt_manifest_root
+        self.lcbt_scaler_end_ratio = lcbt_scaler_end_ratio
+        self.lcbt_test_start_ratio = lcbt_test_start_ratio
+        self.training_protocol_hash = None
         self.ples_options = {
             "pre_steps": int(ples_pre_steps),
             "post_steps": int(ples_post_steps),
@@ -813,7 +1290,9 @@ class AsyncLifecyclePEMS(Dataset):
             self.pos_mark = (self.pos_mark - np.min(self.pos_mark, keepdims=True)) / denominator - 0.5
 
         self.adj = raw_data["adj"]
-        raw_series = raw_data["data"].astype(np.float32)
+        raw_source = np.asarray(raw_data["data"])
+        raw_series_hash = array_hash(raw_source)
+        raw_series = raw_source.astype(np.float32)
         self.full_num_nodes = raw_series.shape[1]
         self.num_nodes = raw_series.shape[1]
         raw_series[raw_series <= 0] = np.nan
@@ -835,11 +1314,38 @@ class AsyncLifecyclePEMS(Dataset):
         self.initial_aas_nodes = self.train_known_nodes.copy()
         self.initial_vs_nodes = self.train_unknown_nodes.copy()
 
-        train_cutoff = int(float(self.train_ratio) * len(raw_series))
-        train_data = raw_series[:train_cutoff][:, self.train_known_nodes]
-        test_data = raw_series[train_cutoff:]
-        self.time_mark = full_time_mark[train_cutoff:]
-        self.time_stamp_raw = np.asarray(self.time_stamp_raw)[train_cutoff:]
+        if self.lcbt_scaler_end_ratio is None or self.lcbt_test_start_ratio is None:
+            scaler_cutoff = int(float(self.train_ratio) * len(raw_series))
+            test_cutoff = scaler_cutoff
+        else:
+            scaler_cutoff = int(float(self.lcbt_scaler_end_ratio) * len(raw_series))
+            test_cutoff = int(float(self.lcbt_test_start_ratio) * len(raw_series))
+            manifest_path = (
+                Path(self.lcbt_manifest_root)
+                / self.dloader_name
+                / "lcbt_v1"
+                / "protocol_manifest.json"
+            )
+            if not manifest_path.exists():
+                raise FileNotFoundError(
+                    f"LCBT training manifest not found: {manifest_path}. "
+                    "Build the train/validation loaders before running test_async."
+                )
+            with manifest_path.open("r", encoding="utf-8") as handle:
+                training_manifest = json.load(handle)
+            expected = training_manifest.get("boundaries", {})
+            if expected.get("scaler_end") != scaler_cutoff or expected.get("test_start") != test_cutoff:
+                raise ValueError("LCBT train manifest split boundaries do not match async-test settings")
+            if training_manifest.get("data_hash") != raw_series_hash:
+                raise ValueError("LCBT train manifest data fingerprint does not match async-test data")
+            if training_manifest.get("adjacency_hash") != array_hash(self.adj):
+                raise ValueError("LCBT train manifest adjacency fingerprint does not match async-test graph")
+            self.training_protocol_hash = training_manifest.get("protocol_hash")
+
+        train_data = raw_series[:scaler_cutoff][:, self.train_known_nodes]
+        test_data = raw_series[test_cutoff:]
+        self.time_mark = full_time_mark[test_cutoff:]
+        self.time_stamp_raw = np.asarray(self.time_stamp_raw)[test_cutoff:]
 
         if self.scale:
             self.mean_ = np.nanmean(train_data, axis=(0, 1), keepdims=True)
@@ -881,6 +1387,25 @@ class AsyncLifecyclePEMS(Dataset):
             )
         return self.time_mark[input_begin:input_end], self.time_mark[output_begin:output_end]
 
+    def _compose_input(self, raw_x, visibility, role_ids):
+        if getattr(self, "lifecycle_observation_mask_feature", False):
+            seq_x, _ = compose_effective_lifecycle_features(
+                raw_x,
+                visibility,
+                role_ids,
+                append_role=self.lifecycle_role_features,
+                append_age=self.lifecycle_history_age_feature,
+                append_observation_mask=True,
+            )
+            return seq_x
+        return _compose_lifecycle_input_features(
+            raw_x,
+            visibility,
+            role_ids,
+            self.lifecycle_role_features,
+            self.lifecycle_history_age_feature,
+        )
+
     def build_ples_sample(self, origin, cohort, track, arm, tau):
         if track not in {"join", "fault"}:
             raise ValueError(f"Unsupported PLES track: {track}")
@@ -909,13 +1434,7 @@ class AsyncLifecyclePEMS(Dataset):
                 visibility[np.ix_(post_rows, nodes)] = False
                 role_ids[np.ix_(post_rows, nodes)] = ROLE_FS
 
-        seq_x = _compose_lifecycle_input_features(
-            raw_x,
-            visibility,
-            role_ids,
-            self.lifecycle_role_features,
-            self.lifecycle_history_age_feature,
-        )
+        seq_x = self._compose_input(raw_x, visibility, role_ids)
         x_t_mark, y_t_mark = self._time_marks(input_begin, input_end, output_begin, output_end)
         return seq_x, seq_y, x_t_mark, y_t_mark
 
@@ -935,13 +1454,7 @@ class AsyncLifecyclePEMS(Dataset):
         output_end = input_end + self.pred_len
         raw_x = self.data[input_begin:input_end].copy()
         visibility, role_ids = self._base_visibility_and_roles()
-        seq_x = _compose_lifecycle_input_features(
-            raw_x,
-            visibility,
-            role_ids,
-            self.lifecycle_role_features,
-            self.lifecycle_history_age_feature,
-        )
+        seq_x = self._compose_input(raw_x, visibility, role_ids)
         seq_y = self.data_y[output_begin:output_end]
         x_t_mark, y_t_mark = self._time_marks(input_begin, input_end, output_begin, output_end)
         return seq_x, seq_y, x_t_mark, y_t_mark
