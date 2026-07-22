@@ -10,8 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _load_collector():
     spec = importlib.util.spec_from_file_location(
-        "collect_lifecycle_v2_results",
-        ROOT / "scripts" / "collect_lifecycle_v2_results.py",
+        "collect_lifecycle_results",
+        ROOT / "scripts" / "collect_lifecycle_results.py",
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -34,8 +34,8 @@ def _write_run(
         "protocol_hash": protocol_hash,
         "training_protocol_hash": "training-v2",
         "required_training_protocol_hash": "training-v2",
-        "formal_lcbt_v2": formal,
-        "lce_protocol_hash": "lce-v1",
+        "formal_protocol_match": formal,
+        "lce_protocol_hash": "lce-v2",
         "ples_protocol_hash": "ples-v2",
         "model": model,
         "model_variant": variant,
@@ -57,8 +57,8 @@ def _write_run(
         for index, name in enumerate(("Cold", "Warm", "Ready", "Onset", "Decay", "Outage"))
     }
     for filename, table, metrics in (
-        ("lce_main_summary.json", "LCE v1 main", main),
-        ("lce_phase_summary.json", "LCE v1 phases", phases),
+        ("lce_main_summary.json", "LCE v2 main", main),
+        ("lce_phase_summary.json", "LCE v2 phases", phases),
     ):
         with (run_dir / filename).open("w", encoding="utf-8") as handle:
             json.dump({**common, "table": table, "metrics": metrics}, handle)
@@ -69,7 +69,7 @@ def test_lce_collector_reports_three_seed_mean_std_and_checks_hashes():
     collector = _load_collector()
     root = ROOT / ".pytest_cache" / "lce_v2_collection"
     run_dirs = []
-    for model, variant in (("ALFNet", "rf_l2s"), ("MoGERNN", "mg_l2")):
+    for model, variant in (("ALFNet", "rf_l3s"), ("MoGERNN", "mg_l3")):
         for seed, offset in ((32, -1.0), (42, 0.0), (52, 1.0)):
             run_dirs.append(_write_run(root / variant, model, variant, seed, offset))
 
@@ -85,7 +85,7 @@ def test_lce_collector_reports_three_seed_mean_std_and_checks_hashes():
     assert alf_life["MAPE_mean"] == pytest.approx(11.5)
     assert alf_life["MAPE_std"] == pytest.approx(1.0)
 
-    bad = _write_run(root / "bad", "ALFNet", "rf_l2s", 52, protocol_hash="changed")
+    bad = _write_run(root / "bad", "ALFNet", "rf_l3s", 52, protocol_hash="changed")
     with pytest.raises(ValueError, match="protocol hash"):
         collector.aggregate_results([run_dirs[0], run_dirs[1], bad], expected_seeds=(32, 42, 52))
 
@@ -93,8 +93,8 @@ def test_lce_collector_reports_three_seed_mean_std_and_checks_hashes():
 def test_lce_collector_rejects_missing_or_duplicate_seeds():
     collector = _load_collector()
     root = ROOT / ".pytest_cache" / "lce_v2_collection_seed_check"
-    seed32 = _write_run(root, "ALFNet", "rf_l2s", 32)
-    seed42 = _write_run(root, "ALFNet", "rf_l2s", 42)
+    seed32 = _write_run(root, "ALFNet", "rf_l3s", 32)
+    seed42 = _write_run(root, "ALFNet", "rf_l3s", 42)
 
     with pytest.raises(ValueError, match="expected seeds"):
         collector.aggregate_results([seed32, seed42], expected_seeds=(32, 42, 52))

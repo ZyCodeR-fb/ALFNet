@@ -1,6 +1,6 @@
 runtime:
-  model: STGCN
-  model_variant: sc_l2
+  model: HA
+  model_variant: ha_l3
   model_recipe: baseline
   mode: train
 dataset:
@@ -20,19 +20,19 @@ training:
   max_epoch: 100
   patience: 10
   stop_based: val_lifecycle
-  batch_size: 16
+  batch_size: 64
   num_workers: 8
   loss: mse
   optimizer: adam
   scheduler: None
   scheduler_patience: 1
-  lr: 0.002
-  weight_decay: 0.0001
+  lr: 0.001
+  weight_decay: 0.0
   d_model: 64
 async_test:
   ples_manifest_root: ./protocol_manifests
   ples_protocol_version: 2
-  lce_protocol_version: 1
+  lce_protocol_version: 2
   ples_pre_steps: 12
   ples_post_steps: 36
   ples_seed: 2026
@@ -40,26 +40,15 @@ async_test:
   ples_bootstrap_seed: 2026
 family:
   model:
-    hidden_channels: 64
-    kernel_size: 3
-    K: 3
-    normalization: sym
-    bias: true
-  recipe:
-    graph_learning: false
-    dynamic_graph: false
-    dynamic_mix: false
-    aug_node: false
-    sim_loss: false
-    fst_loss: false
-    is_vae: false
+    channel: null
+    reverse: false
 lifecycle:
   train_for_async_lifecycle: true
   lifecycle_role_features: true
   lifecycle_history_age_feature: true
   lifecycle_age_mode: state_duration
   lifecycle_observation_mask_feature: true
-  lifecycle_training_strategy: lcbt_v2
+  lifecycle_training_strategy: lcbt_v3
   lcbt_manifest_root: ./protocol_manifests
   lcbt_protocol_seed: 2026
   lcbt_validation_seed: 12026

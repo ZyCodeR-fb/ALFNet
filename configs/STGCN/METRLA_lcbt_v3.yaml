@@ -1,6 +1,6 @@
 runtime:
-  model: STGODE
-  model_variant: so_l2
+  model: STGCN
+  model_variant: sc_l3
   model_recipe: baseline
   mode: train
 dataset:
@@ -32,7 +32,7 @@ training:
 async_test:
   ples_manifest_root: ./protocol_manifests
   ples_protocol_version: 2
-  lce_protocol_version: 1
+  lce_protocol_version: 2
   ples_pre_steps: 12
   ples_post_steps: 36
   ples_seed: 2026
@@ -40,18 +40,26 @@ async_test:
   ples_bootstrap_seed: 2026
 family:
   model:
-    window_size: 24
-    horizon: 12
-  assets:
-    semantic_matrix_path: ./data/METR-LA/stgode/dtw_matrix_normalized.pkl
-    spatial_matrix_path: ./data/METR-LA/stgode/sp_matrix_normalized.pkl
+    hidden_channels: 64
+    kernel_size: 3
+    K: 3
+    normalization: sym
+    bias: true
+  recipe:
+    graph_learning: false
+    dynamic_graph: false
+    dynamic_mix: false
+    aug_node: false
+    sim_loss: false
+    fst_loss: false
+    is_vae: false
 lifecycle:
   train_for_async_lifecycle: true
   lifecycle_role_features: true
   lifecycle_history_age_feature: true
   lifecycle_age_mode: state_duration
   lifecycle_observation_mask_feature: true
-  lifecycle_training_strategy: lcbt_v2
+  lifecycle_training_strategy: lcbt_v3
   lcbt_manifest_root: ./protocol_manifests
   lcbt_protocol_seed: 2026
   lcbt_validation_seed: 12026

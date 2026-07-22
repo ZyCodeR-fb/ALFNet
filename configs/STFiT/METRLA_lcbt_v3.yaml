@@ -1,9 +1,8 @@
 runtime:
-  model: SLPF
-  model_variant: sl_l2
-  model_recipe: forecast_only
+  model: STFiT
+  model_variant: sf_l3
+  model_recipe: stfit_full
   mode: train
-  t_mark: true
 dataset:
   dloader_name: METRLA
   data_path: ./data/METR-LA/raw_data.pkl
@@ -27,13 +26,13 @@ training:
   optimizer: adam
   scheduler: None
   scheduler_patience: 1
-  lr: 0.001
+  lr: 0.002
   weight_decay: 0.0001
   d_model: 64
 async_test:
   ples_manifest_root: ./protocol_manifests
   ples_protocol_version: 2
-  lce_protocol_version: 1
+  lce_protocol_version: 2
   ples_pre_steps: 12
   ples_post_steps: 36
   ples_seed: 2026
@@ -41,15 +40,31 @@ async_test:
   ples_bootstrap_seed: 2026
 family:
   model:
-    embed_dim: 64
-    num_layer: 3
+    hidden_channels: 64
+    kernel_size: 3
+    K: 3
+    normalization: sym
+    bias: true
+  recipe:
+    graph_learning: true
+    dynamic_graph: true
+    dynamic_mix: true
+    aug_node: true
+    sim_loss: true
+    fst_loss: true
+    is_vae: false
+    anchor_lambda: 0.5
+    sparse_threshold: 0.9
+    gumbel_softmax: true
+    gumbel_tau: 1.0
+    vae_loss_weight: 2.0
 lifecycle:
   train_for_async_lifecycle: true
   lifecycle_role_features: true
   lifecycle_history_age_feature: true
   lifecycle_age_mode: state_duration
   lifecycle_observation_mask_feature: true
-  lifecycle_training_strategy: lcbt_v2
+  lifecycle_training_strategy: lcbt_v3
   lcbt_manifest_root: ./protocol_manifests
   lcbt_protocol_seed: 2026
   lcbt_validation_seed: 12026

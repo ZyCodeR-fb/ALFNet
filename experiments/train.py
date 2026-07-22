@@ -1,4 +1,4 @@
-"""LCBT v2 training and lifecycle-aware checkpoint selection."""
+"""LCBT training and lifecycle-aware checkpoint selection."""
 
 import json
 import math
@@ -65,7 +65,7 @@ def _save_checkpoint(model, optimizer, args, epoch, lifecycle_metrics):
                 "enc_in": args.enc_in,
                 "raw_enc_in": args.raw_enc_in,
                 "c_out": args.c_out,
-                "lifecycle_training_strategy": "lcbt_v2",
+                "lifecycle_training_strategy": args.lifecycle_training_strategy,
                 "lifecycle_role_features": args.lifecycle_role_features,
                 "lifecycle_history_age_feature": args.lifecycle_history_age_feature,
                 "lifecycle_observation_mask_feature": args.lifecycle_observation_mask_feature,
@@ -103,7 +103,7 @@ def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch
             epoch=epoch,
         )
         metrics[mode] = mode_metrics
-        print(f"├── {mode} finished, took {time.time() - start:.2f}s")
+        print(f"-> {mode} finished, took {time.time() - start:.2f}s")
 
     improved = _save_checkpoint(
         model,
@@ -151,7 +151,7 @@ def _print_metrics(metrics):
         for group_name, values in groups.items():
             if not values:
                 continue
-            description = f"├── {mode}_{group_name}: "
+            description = f"-> {mode}_{group_name}: "
             description += " | ".join(
                 f"{name}={value:.4f}" for name, value in values.items()
             )
@@ -159,8 +159,11 @@ def _print_metrics(metrics):
 
 
 def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wandb=None):
-    if args.lifecycle_training_strategy != "lcbt_v2" or args.stop_based != "val_lifecycle":
-        raise ValueError("The streamlined trainer requires LCBT v2 and val_lifecycle")
+    if (
+        args.lifecycle_training_strategy != "lcbt_v3"
+        or args.stop_based != "val_lifecycle"
+    ):
+        raise ValueError("The streamlined trainer requires LCBT and val_lifecycle")
     if set(data_loaders) != {"train", "val"}:
         raise ValueError("Training must receive only train and validation loaders")
 
@@ -179,7 +182,7 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
         "training_protocol_hash",
         None,
     )
-    print("-> Start LCBT v2 training...")
+    print(f"-> Start {args.lifecycle_training_strategy} training...")
 
     wait_count = 0
     stopped_early = False
@@ -213,7 +216,7 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
                         flat[f"{mode}/{group_name}/{name}"] = value
             flat["lr"] = optimizer.param_groups[0]["lr"]
             wandb.log(flat, step=epoch)
-        print(f"├── Epoch {epoch} finished, took {time.time() - start:.2f}s")
+        print(f"-> Epoch {epoch} finished, took {time.time() - start:.2f}s")
         if wait_count >= args.patience:
             print(f"Early stopping at epoch {epoch}!")
             stopped_early = True

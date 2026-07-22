@@ -7,7 +7,7 @@ import numpy as np
 
 
 LCE_PROTOCOL_NAME = "Lifecycle Coverage Evaluation"
-LCE_PROTOCOL_VERSION = 1
+LCE_PROTOCOL_VERSION = 2
 PLES_V2_PROTOCOL_NAME = "Paired Lifecycle Event Study v2"
 PLES_V2_PROTOCOL_VERSION = 2
 TRACK_PHASES = {
@@ -260,7 +260,7 @@ def build_lifecycle_cohorts_v2(
     return cohorts
 
 
-def build_protocol_manifest_v2(
+def build_protocol_manifest(
     dataset_name,
     timestamps,
     adjacency,
@@ -281,6 +281,7 @@ def build_protocol_manifest_v2(
     seed=2026,
     bootstrap_samples=2000,
     bootstrap_seed=2026,
+    lce_protocol_version=2,
 ):
     adjacency = np.asarray(adjacency)
     num_nodes = int(adjacency.shape[0])
@@ -342,8 +343,10 @@ def build_protocol_manifest_v2(
         "target_features": target_features,
     }
     dataset_record["fingerprint"] = _stable_hash(dataset_record)
+    if int(lce_protocol_version) != 2:
+        raise ValueError("the maintained absolute evaluation protocol is LCE v2")
     lce = {
-        "protocol": f"{LCE_PROTOCOL_NAME} v{LCE_PROTOCOL_VERSION}",
+        "protocol": f"{LCE_PROTOCOL_NAME} v2",
         "event_clock": "input_end=event_time+tau+1",
         "anchors": ["Unseen", "Steady"],
         "phase_names": list(PHASE_ORDER),
@@ -351,18 +354,20 @@ def build_protocol_manifest_v2(
         "aggregation": {
             "cell": "origin_x_cohort_x_tau",
             "strata": "equal calendar-stratum mean",
-            "Join": "mean(Cold,Warm,Ready)",
-            "Fault": "mean(Onset,Decay,Outage)",
+            "Join": "equal mean over k=1..input_len",
+            "Fault": "equal mean over k=1..input_len",
             "LifeAvg": "mean(Unseen,Steady,Join,Fault)",
         },
         "phase_rule": {
             "Cold": "join tau=0; one post-join input point",
             "Warm": "join 1<=tau<input_len-1",
-            "Ready": "join tau>=input_len-1",
+            "Ready": "join tau=input_len-1",
             "Onset": "fault tau=0; one failed input point",
             "Decay": "fault 1<=tau<input_len-1",
-            "Outage": "fault tau>=input_len-1",
+            "Outage": "fault tau=input_len-1",
         },
+        "absolute_tau_range": [0, int(input_len) - 1],
+        "long_post_event_usage": "PLES only",
     }
     ples = {
         "protocol": PLES_V2_PROTOCOL_NAME,
@@ -378,7 +383,7 @@ def build_protocol_manifest_v2(
     }
     manifest = {
         "schema_version": 2,
-        "protocol": "LCBT v2 + LCE v1 + PLES v2",
+        "protocol": "LCBT v3 + LCE v2 + PLES v2",
         "dataset": dataset_record,
         "nodes": {
             "known": known_nodes,
@@ -455,41 +460,53 @@ def _calendar_balanced_metrics_v2(rows, prefix):
     return _mean_metrics_v2(regime_metrics)
 
 
-def _phase_balanced_metrics_v2(rows, prefix, phases):
-    phase_metrics = []
-    for phase in phases:
-        metrics = _calendar_balanced_metrics_v2(
-            [row for row in rows if row.get("phase") == phase],
-            prefix,
-        )
-        if metrics is None:
-            raise ValueError(f"LCE phase has no valid cells: {phase}")
-        phase_metrics.append(metrics)
-    return _mean_metrics_v2(phase_metrics)
+def _tau_balanced_metrics_v2(rows, prefix):
+    by_tau = defaultdict(list)
+    for row in rows:
+        by_tau[int(row["tau"])].append(row)
+    tau_metrics = [
+        _calendar_balanced_metrics_v2(by_tau[tau], prefix)
+        for tau in sorted(by_tau)
+    ]
+    return _mean_metrics_v2([metrics for metrics in tau_metrics if metrics is not None])
 
 
-def summarize_lce_rows_v2(rows):
+def summarize_lce_rows(rows, input_len):
     """Summarize absolute accuracy with cell, calendar, phase, then group equality."""
-    post_rows = [row for row in rows if int(row["tau"]) >= 0]
+    if int(input_len) <= 2:
+        raise ValueError("LCE v2 requires input_len > 2")
+    post_rows = [row for row in rows if 0 <= int(row["tau"]) < int(input_len)]
     phase_metrics = {}
     for phase in PHASE_ORDER:
-        metrics = _calendar_balanced_metrics_v2(
-            [row for row in post_rows if row.get("phase") == phase],
-            "treated",
-        )
+        phase_rows = [row for row in post_rows if row.get("phase") == phase]
+        metrics = _tau_balanced_metrics_v2(phase_rows, "treated")
         if metrics is None:
             raise ValueError(f"LCE phase has no valid cells: {phase}")
         phase_metrics[phase] = metrics
 
     join_rows = [row for row in post_rows if row.get("track") == "join"]
     fault_rows = [row for row in post_rows if row.get("track") == "fault"]
-    unseen = _phase_balanced_metrics_v2(join_rows, "control", TRACK_PHASES["join"])
-    steady = _phase_balanced_metrics_v2(fault_rows, "control", TRACK_PHASES["fault"])
-    join = _mean_metrics_v2([phase_metrics[phase] for phase in TRACK_PHASES["join"]])
-    fault = _mean_metrics_v2([phase_metrics[phase] for phase in TRACK_PHASES["fault"]])
+    unseen = _tau_balanced_metrics_v2(join_rows, "control")
+    steady = _tau_balanced_metrics_v2(fault_rows, "control")
+    join = _tau_balanced_metrics_v2(join_rows, "treated")
+    fault = _tau_balanced_metrics_v2(fault_rows, "treated")
     life_avg = _mean_metrics_v2([unseen, steady, join, fault])
+    trajectory_metrics = {"Join": [], "Fault": []}
+    for label, track in (("Join", "join"), ("Fault", "fault")):
+        track_rows = [row for row in post_rows if row.get("track") == track]
+        for tau in range(int(input_len)):
+            metrics = _calendar_balanced_metrics_v2(
+                [row for row in track_rows if int(row["tau"]) == tau],
+                "treated",
+            )
+            if metrics is None:
+                raise ValueError(f"LCE v2 {track} is missing tau={tau}")
+            trajectory_metrics[label].append(
+                {"k": tau + 1, "visibility": (tau + 1) / float(input_len), **metrics}
+            )
     return {
         "phase_metrics": phase_metrics,
+        "trajectory_metrics": trajectory_metrics,
         "main_metrics": {
             "Unseen": unseen,
             "Steady": steady,

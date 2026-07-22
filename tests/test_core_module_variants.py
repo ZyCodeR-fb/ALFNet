@@ -38,25 +38,35 @@ def _read_yaml(relative_path):
 
 def test_streamlined_yaml_surface_has_one_alfnet_mainline():
     assert [path.name for path in (ROOT / "configs/ALFNet").glob("*.yaml")] == [
-        "rf_l2s.yaml"
+        "rf_l3s.yaml"
     ]
-    config = _read_yaml("configs/ALFNet/rf_l2s.yaml")
+    config = _read_yaml("configs/ALFNet/rf_l3s.yaml")
     assert config["runtime"]["model"] == "ALFNet"
-    assert config["runtime"]["model_variant"] == "rf_l2s"
-    assert config["lifecycle"]["lifecycle_training_strategy"] == "lcbt_v2"
-    assert config["async_test"]["lce_protocol_version"] == 1
+    assert config["runtime"]["model_variant"] == "rf_l3s"
+    assert config["lifecycle"]["lifecycle_training_strategy"] == "lcbt_v3"
+    assert config["async_test"]["lce_protocol_version"] == 2
     assert config["async_test"]["ples_protocol_version"] == 2
     assert set(config["family"]["experts"]) == {"graph", "patch"}
 
     for model in COMPARISON_MODELS:
-        assert [
+        config_paths = [
             path.name for path in (ROOT / "configs" / model).glob("*.yaml")
-        ] == ["METRLA_lcbt_v2.yaml"]
+        ]
+        assert config_paths == ["METRLA_lcbt_v3.yaml"]
+        args = load_args_from_config(
+            str(ROOT / "configs" / model / config_paths[0]),
+            overrides={"device": "cpu"},
+        )
+        assert args.model == model
+        assert args.lifecycle_training_strategy == "lcbt_v3"
+        assert args.stop_based == "val_lifecycle"
+        assert args.lce_protocol_version == 2
+        assert args.ples_protocol_version == 2
 
 
 def test_alfnet_contains_one_shared_grin_and_no_graph_local_grin():
     args = load_args_from_config(
-        str(ROOT / "configs/ALFNet/rf_l2s.yaml"),
+        str(ROOT / "configs/ALFNet/rf_l3s.yaml"),
         overrides={"device": "cpu"},
     )
     model = ALFNet(args)

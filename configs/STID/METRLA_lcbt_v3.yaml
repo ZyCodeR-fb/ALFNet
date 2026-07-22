@@ -1,9 +1,8 @@
 runtime:
-  model: PatchSTG
-  model_variant: ps_l2
+  model: STID
+  model_variant: si_l3
   model_recipe: baseline
   mode: train
-  t_mark: true
 dataset:
   dloader_name: METRLA
   data_path: ./data/METR-LA/raw_data.pkl
@@ -15,6 +14,7 @@ dataset:
   input_features: v
   target_features: v
   freq: min
+  t_mark: true
 training:
   device: cuda:0
   seed: 32
@@ -27,13 +27,13 @@ training:
   optimizer: adam
   scheduler: None
   scheduler_patience: 1
-  lr: 0.002
+  lr: 0.001
   weight_decay: 0.0001
   d_model: 64
 async_test:
   ples_manifest_root: ./protocol_manifests
   ples_protocol_version: 2
-  lce_protocol_version: 1
+  lce_protocol_version: 2
   ples_pre_steps: 12
   ples_post_steps: 36
   ples_seed: 2026
@@ -41,25 +41,23 @@ async_test:
   ples_bootstrap_seed: 2026
 family:
   model:
-    layers: 5
-    tem_patchsize: 12
-    tem_patchnum: 1
-    recur_times: 5
-    spa_patchsize: 8
-    factors: 1
-    input_dims: 64
-    node_dims: 32
-    tod_dims: 32
-    dow_dims: 32
-    tod: 288
-    dow: 7
+    node_dim: 32
+    embed_dim: 32
+    num_layer: 3
+    temp_dim_tid: 32
+    temp_dim_diw: 32
+    time_of_day_size: 1440
+    day_of_week_size: 7
+    if_T_i_D: true
+    if_D_i_W: false
+    if_node: true
 lifecycle:
   train_for_async_lifecycle: true
   lifecycle_role_features: true
   lifecycle_history_age_feature: true
   lifecycle_age_mode: state_duration
   lifecycle_observation_mask_feature: true
-  lifecycle_training_strategy: lcbt_v2
+  lifecycle_training_strategy: lcbt_v3
   lcbt_manifest_root: ./protocol_manifests
   lcbt_protocol_seed: 2026
   lcbt_validation_seed: 12026

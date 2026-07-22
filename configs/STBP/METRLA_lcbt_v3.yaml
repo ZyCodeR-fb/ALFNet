@@ -1,6 +1,6 @@
 runtime:
-  model: HA
-  model_variant: ha_l2
+  model: STBP
+  model_variant: sb_l3
   model_recipe: baseline
   mode: train
 dataset:
@@ -20,35 +20,37 @@ training:
   max_epoch: 100
   patience: 10
   stop_based: val_lifecycle
-  batch_size: 64
+  batch_size: 16
   num_workers: 8
   loss: mse
   optimizer: adam
   scheduler: None
   scheduler_patience: 1
   lr: 0.001
-  weight_decay: 0.0
+  weight_decay: 0.0001
   d_model: 64
 async_test:
   ples_manifest_root: ./protocol_manifests
   ples_protocol_version: 2
-  lce_protocol_version: 1
+  lce_protocol_version: 2
   ples_pre_steps: 12
   ples_post_steps: 36
   ples_seed: 2026
   ples_bootstrap_samples: 2000
   ples_bootstrap_seed: 2026
 family:
+  dropout: 0.0
   model:
-    channel: null
-    reverse: false
+    in_channel: 12
+    out_channel: 12
+    hidden_channel: 192
 lifecycle:
   train_for_async_lifecycle: true
   lifecycle_role_features: true
   lifecycle_history_age_feature: true
   lifecycle_age_mode: state_duration
   lifecycle_observation_mask_feature: true
-  lifecycle_training_strategy: lcbt_v2
+  lifecycle_training_strategy: lcbt_v3
   lcbt_manifest_root: ./protocol_manifests
   lcbt_protocol_seed: 2026
   lcbt_validation_seed: 12026

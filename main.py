@@ -168,7 +168,7 @@ def _validate_checkpoint_shape_compatibility(checkpoint, args):
 
 def _load_model_state(model, loaded, args, validator):
     if not isinstance(loaded, dict) or "state_dict" not in loaded:
-        raise TypeError("Checkpoint must be a state_dict payload produced by the LCBT v2 trainer")
+        raise TypeError("Checkpoint must be a state_dict payload produced by the LCBT v3 trainer")
     validator(loaded, args)
     model.load_state_dict(loaded["state_dict"])
     return model
@@ -183,7 +183,7 @@ def _load_checkpoint_from_dir(args, checkpoint_dir):
     checkpoint_file = _select_checkpoint_file(checkpoint_dir)
     if checkpoint_file is None:
         raise FileNotFoundError(
-            f"No LCBT v2 validation checkpoint found at "
+            f"No LCBT v3 validation checkpoint found at "
             f"{os.path.join(checkpoint_dir, 'best_val_checkpoint.pth')}"
         )
 
@@ -279,7 +279,7 @@ if __name__ == "__main__":
             f"{manifest['resolved']['origin_count']} origins | "
             f"{manifest['resolved']['cohort_count']} cohorts"
         )
-        print(f"├── async test data dim: {len(test_loader.dataset)}")  # type: ignore
+        print(f"-> async test data dim: {len(test_loader.dataset)}")  # type: ignore
         model.to(args.device).float()
         async_lifecycle_inference(model, test_loader, args, criterions)
         exit()

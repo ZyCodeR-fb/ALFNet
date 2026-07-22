@@ -17,7 +17,7 @@ HASH_FIELDS = (
 )
 PROVENANCE_FIELDS = (
     "required_training_protocol_hash",
-    "formal_lcbt_v2",
+    "formal_protocol_match",
 )
 
 
@@ -42,7 +42,7 @@ def _load_run(result_dir):
     ):
         if main.get(field) != phases.get(field):
             raise ValueError(f"LCE main/phase metadata mismatch for {field}: {result_dir}")
-    if main.get("formal_lcbt_v2") is not True:
+    if main.get("formal_protocol_match") is not True:
         raise ValueError(
             f"LCE aggregation rejects diagnostic or legacy checkpoints: {result_dir}"
         )
@@ -86,7 +86,7 @@ def _validate_common_protocol(runs):
 def aggregate_results(result_dirs, expected_seeds=(32, 42, 52)):
     runs = [_load_run(path) for path in result_dirs]
     if not runs:
-        raise ValueError("No LCE v1 result directories were provided")
+        raise ValueError("No LCE v2 result directories were provided")
     _validate_common_protocol(runs)
     expected = sorted(int(seed) for seed in expected_seeds)
 
@@ -134,7 +134,7 @@ def aggregate_results(result_dirs, expected_seeds=(32, 42, 52)):
 
     return {
         "schema_version": 2,
-        "table": "LCE v1 three-seed mean and sample standard deviation",
+        "table": "LCE v2 three-seed mean and sample standard deviation",
         "dataset": runs[0]["dataset"],
         **runs[0]["hashes"],
         "seeds": expected,
@@ -180,8 +180,8 @@ def write_outputs(summary, output_dir):
     with (output_dir / "lce_three_seed_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, ensure_ascii=False, indent=2)
     for stem, rows, label_key, title in (
-        ("lce_main_mean_std", summary["main_rows"], "group", "LCE v1 Main Results"),
-        ("lce_phase_mean_std", summary["phase_rows"], "phase", "LCE v1 Phase Results"),
+        ("lce_main_mean_std", summary["main_rows"], "group", "LCE v2 Main Results"),
+        ("lce_phase_mean_std", summary["phase_rows"], "phase", "LCE v2 Phase Results"),
     ):
         _write_csv(output_dir / f"{stem}.csv", rows)
         _write_markdown(output_dir / f"{stem}.md", rows, label_key, title)
@@ -206,7 +206,7 @@ def discover_result_dirs(paths):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Aggregate LCE v1 results across frozen training seeds.")
+    parser = argparse.ArgumentParser(description="Aggregate LCE v2 results across frozen training seeds.")
     parser.add_argument("results", nargs="+", help="Result directories or roots to scan recursively")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--expected-seeds", nargs="+", type=int, default=[32, 42, 52])

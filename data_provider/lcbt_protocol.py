@@ -5,11 +5,10 @@ from datetime import datetime, timezone
 import numpy as np
 
 
-LCBT_V2_PROTOCOL_NAME = "Lifecycle Coverage-Balanced Training v2"
-LCBT_V2_PROTOCOL_VERSION = 2
-LCBT_V2_PHASES = ("Cold", "Warm", "Ready", "Onset", "Decay", "Outage")
-LCBT_V2_GROUPS = ("zero_history", "steady", "join", "fault")
-LCBT_V2_REPORT_GROUPS = ("Unseen", "Steady", "Join", "Fault")
+LCBT_PROTOCOL_NAME = "Lifecycle Coverage-Balanced Training v3"
+LCBT_PROTOCOL_VERSION = 3
+LCBT_PHASES = ("Cold", "Warm", "Ready", "Onset", "Decay", "Outage")
+LCBT_GROUPS = ("zero_history", "steady", "join", "fault")
 CALENDAR_REGIMES = ("AM", "PM", "OffPeak", "Weekend")
 
 
@@ -128,7 +127,7 @@ def _scenario_assignments(
     calendar_regimes,
     ratios,
     rng,
-    scenario_names=LCBT_V2_GROUPS,
+    scenario_names=LCBT_GROUPS,
 ):
     calendar_regimes = np.asarray(calendar_regimes, dtype=object)
     num_samples = len(calendar_regimes)
@@ -168,14 +167,11 @@ def _scenario_assignments(
         assignments[indices] = labels[rng.permutation(len(labels))]
     return assignments
 
-
-
-
-def _phase_id_v2(scenario, evidence_steps, input_len):
+def _phase_id(scenario, evidence_steps, input_len):
     if scenario in ("zero_history", "steady"):
         return -1
     if not 1 <= int(evidence_steps) <= int(input_len):
-        raise ValueError("LCBT v2 event evidence must be in [1, input_len]")
+        raise ValueError("LCBT event evidence must be in [1, input_len]")
     if scenario == "join":
         if evidence_steps == 1:
             return 0
@@ -184,7 +180,7 @@ def _phase_id_v2(scenario, evidence_steps, input_len):
         if evidence_steps == 1:
             return 3
         return 5 if evidence_steps == input_len else 4
-    raise ValueError(f"unsupported LCBT v2 scenario: {scenario}")
+    raise ValueError(f"unsupported LCBT scenario: {scenario}")
 
 
 def _weighted_degree_strata(adjacency):
@@ -239,10 +235,7 @@ def _balanced_values(size, values, weights, rng):
     output = np.asarray(output, dtype=object)
     return output[rng.permutation(len(output))].tolist()
 
-
-
-
-def build_lcbt_v2_schedule(
+def build_lcbt_schedule(
     num_samples,
     input_len,
     adjacency,
@@ -255,19 +248,19 @@ def build_lcbt_v2_schedule(
     clustered_ratio=0.50,
     scenario_node_pools=None,
 ):
-    """Build the frozen LCBT v2 four-group, six-phase training schedule."""
+    """Build the frozen LCBT v3 schedule with uniform evidence k=1..L."""
     num_samples = int(num_samples)
     input_len = int(input_len)
     adjacency = np.asarray(adjacency)
     calendar_regimes = [str(value) for value in calendar_regimes]
     if num_samples <= 0 or input_len <= 2:
-        raise ValueError("LCBT v2 requires num_samples > 0 and input_len > 2")
+        raise ValueError("LCBT requires num_samples > 0 and input_len > 2")
     if adjacency.ndim != 2 or adjacency.shape[0] != adjacency.shape[1]:
         raise ValueError("adjacency must be square")
     if len(calendar_regimes) != num_samples:
         raise ValueError("calendar_regimes must align with num_samples")
-    if len(scenario_ratios) != len(LCBT_V2_GROUPS):
-        raise ValueError("LCBT v2 requires four scenario ratios")
+    if len(scenario_ratios) != len(LCBT_GROUPS):
+        raise ValueError("LCBT requires four scenario ratios")
     if not 0.0 <= float(clustered_ratio) <= 1.0:
         raise ValueError("clustered_ratio must be in [0, 1]")
     if scenario_node_pools is not None:
@@ -275,58 +268,71 @@ def build_lcbt_v2_schedule(
             str(name): np.asarray(sorted({int(node) for node in nodes}), dtype=np.int64)
             for name, nodes in scenario_node_pools.items()
         }
-        missing_pools = [name for name in LCBT_V2_GROUPS if name not in scenario_node_pools]
+        missing_pools = [name for name in LCBT_GROUPS if name not in scenario_node_pools]
         if missing_pools:
             raise ValueError(
-                "LCBT v2 scenario_node_pools missing: " + ", ".join(missing_pools)
+                "LCBT scenario_node_pools missing: " + ", ".join(missing_pools)
             )
         if any(len(nodes) == 0 for nodes in scenario_node_pools.values()):
-            raise ValueError("LCBT v2 scenario node pools must be non-empty")
+            raise ValueError("LCBT scenario node pools must be non-empty")
 
     rng = np.random.default_rng(int(seed) + int(epoch) * 1_000_003)
     assignments = _scenario_assignments(
         calendar_regimes,
         scenario_ratios,
         rng,
-        scenario_names=LCBT_V2_GROUPS,
+        scenario_names=LCBT_GROUPS,
     )
     evidence_steps = np.zeros(num_samples, dtype=np.int64)
     for scenario in ("join", "fault"):
-        middle_indices = []
         for regime in sorted(set(calendar_regimes)):
             indices = np.flatnonzero(
                 (assignments == scenario)
                 & (np.asarray(calendar_regimes, dtype=object) == regime)
             )
             shuffled = indices[rng.permutation(len(indices))]
-            stage_counts = _allocate_counts(len(shuffled), (1.0, 1.0, 1.0))
-            initial_end = int(stage_counts[0])
-            middle_end = initial_end + int(stage_counts[1])
-            evidence_steps[shuffled[:initial_end]] = 1
-            middle_indices.extend(int(index) for index in shuffled[initial_end:middle_end])
-            evidence_steps[shuffled[middle_end:]] = input_len
-        if middle_indices:
-            middle_values = _balanced_values(
-                len(middle_indices),
-                list(range(2, input_len)),
-                np.ones(input_len - 2, dtype=np.float64),
+            values = _balanced_values(
+                len(shuffled),
+                list(range(1, input_len + 1)),
+                np.ones(input_len, dtype=np.float64),
                 rng,
             )
-            for index, value in zip(middle_indices, middle_values):
-                evidence_steps[index] = int(value)
+            evidence_steps[shuffled] = np.asarray(values, dtype=np.int64)
 
-    fractions = _balanced_values(
-        num_samples,
-        cohort_fractions,
-        cohort_weights,
-        rng,
-    )
-    topology_modes = _balanced_values(
-        num_samples,
-        ("clustered", "scattered"),
-        (float(clustered_ratio), 1.0 - float(clustered_ratio)),
-        rng,
-    )
+    fractions = np.empty(num_samples, dtype=np.float64)
+    topology_modes = np.empty(num_samples, dtype=object)
+    calendar_array = np.asarray(calendar_regimes, dtype=object)
+    for scenario in LCBT_GROUPS:
+        for regime in sorted(set(calendar_regimes)):
+            scenario_indices = np.flatnonzero(
+                (assignments == scenario) & (calendar_array == regime)
+            )
+            evidence_values = (
+                range(1, input_len + 1)
+                if scenario in {"join", "fault"}
+                else (0,)
+            )
+            for evidence in evidence_values:
+                indices = scenario_indices[
+                    evidence_steps[scenario_indices] == int(evidence)
+                ]
+                if not len(indices):
+                    continue
+                fractions[indices] = np.asarray(
+                    _balanced_values(
+                        len(indices), cohort_fractions, cohort_weights, rng
+                    ),
+                    dtype=np.float64,
+                )
+                topology_modes[indices] = np.asarray(
+                    _balanced_values(
+                        len(indices),
+                        ("clustered", "scattered"),
+                        (float(clustered_ratio), 1.0 - float(clustered_ratio)),
+                        rng,
+                    ),
+                    dtype=object,
+                )
     exposure = np.zeros(adjacency.shape[0], dtype=np.int64)
 
     schedule = []
@@ -370,7 +376,7 @@ def build_lcbt_v2_schedule(
             {
                 "scenario": scenario,
                 "evidence_steps": evidence,
-                "phase_id": _phase_id_v2(scenario, evidence, input_len),
+                "phase_id": _phase_id(scenario, evidence, input_len),
                 "changed_nodes": changed_nodes,
                 "cohort_fraction": cohort_fraction,
                 "topology_mode": topology_mode,
@@ -459,19 +465,35 @@ def _finite_mean(values):
     return float(values.mean()) if len(values) else float("nan")
 
 
-def finalize_lifecycle_mae(cell_mae):
-    """Equal-average cells into two anchors, two trajectories, and LifeAvg."""
-    phase_mae = {
-        name: _finite_mean(cell_mae.get(name, []))
-        for name in ("Unseen", "Steady") + LCBT_V2_PHASES
-    }
-    join_mae = _finite_mean([phase_mae[name] for name in LCBT_V2_PHASES[:3]])
-    fault_mae = _finite_mean([phase_mae[name] for name in LCBT_V2_PHASES[3:]])
+def _calendar_balanced_state_mean(cell_state, label):
+    calendar_values = cell_state.get(label, {})
+    return _finite_mean(
+        [_finite_mean(values) for _, values in sorted(calendar_values.items())]
+    )
+
+
+def finalize_lifecycle_validation_mae(cell_state, input_len):
+    """Equal-average calendar cells, evidence lengths, then four semantic groups."""
+    input_len = int(input_len)
+    if input_len <= 2:
+        raise ValueError("LCBT v3 validation requires input_len > 2")
+    unseen = _calendar_balanced_state_mean(cell_state, "Unseen")
+    steady = _calendar_balanced_state_mean(cell_state, "Steady")
+    join_by_k = [
+        _calendar_balanced_state_mean(cell_state, f"Join@{k}")
+        for k in range(1, input_len + 1)
+    ]
+    fault_by_k = [
+        _calendar_balanced_state_mean(cell_state, f"Fault@{k}")
+        for k in range(1, input_len + 1)
+    ]
+    join = _finite_mean(join_by_k)
+    fault = _finite_mean(fault_by_k)
     group_mae = {
-        "unseen_mae": phase_mae["Unseen"],
-        "steady_mae": phase_mae["Steady"],
-        "join_mae": join_mae,
-        "fault_mae": fault_mae,
+        "unseen_mae": unseen,
+        "steady_mae": steady,
+        "join_mae": join,
+        "fault_mae": fault,
     }
     complete = np.asarray(list(group_mae.values()), dtype=np.float64)
     group_mae["mae"] = (
@@ -480,7 +502,22 @@ def finalize_lifecycle_mae(cell_mae):
     group_mae["worst_group_mae"] = (
         float(complete.max()) if np.all(np.isfinite(complete)) else float("nan")
     )
-    group_mae.update({f"{name}_MAE": value for name, value in phase_mae.items()})
+    group_mae.update(
+        {
+            "Unseen_MAE": unseen,
+            "Steady_MAE": steady,
+            "Cold_MAE": join_by_k[0],
+            "Warm_MAE": _finite_mean(join_by_k[1:-1]),
+            "Ready_MAE": join_by_k[-1],
+            "Onset_MAE": fault_by_k[0],
+            "Decay_MAE": _finite_mean(fault_by_k[1:-1]),
+            "Outage_MAE": fault_by_k[-1],
+        }
+    )
+    for k, value in enumerate(join_by_k, start=1):
+        group_mae[f"Join_k{k}_MAE"] = value
+    for k, value in enumerate(fault_by_k, start=1):
+        group_mae[f"Fault_k{k}_MAE"] = value
     return group_mae
 
 
@@ -492,6 +529,7 @@ def accumulate_lifecycle_mae(
     phase_ids,
     target_cohort_mask,
     calendar_ids,
+    evidence_steps,
 ):
     """Accumulate one original-scale MAE per replay cell, not per tensor element."""
     y_true = np.asarray(y_true)
@@ -499,6 +537,7 @@ def accumulate_lifecycle_mae(
     group_ids = np.asarray(group_ids).reshape(-1).astype(np.int64)
     phase_ids = np.asarray(phase_ids).reshape(-1).astype(np.int64)
     calendar_ids = np.asarray(calendar_ids).reshape(-1).astype(np.int64)
+    evidence_steps = np.asarray(evidence_steps).reshape(-1).astype(np.int64)
     target_cohort_mask = np.asarray(target_cohort_mask).astype(bool)
     if y_true.shape != y_pred.shape or y_true.ndim != 4:
         raise ValueError("lifecycle MAE expects matching [batch,time,node,feature] arrays")
@@ -517,27 +556,16 @@ def accumulate_lifecycle_mae(
         elif group_id == 1:
             label = "Steady"
         elif group_id in (2, 3):
-            phase_id = int(phase_ids[sample_index])
-            if not 0 <= phase_id < len(LCBT_V2_PHASES):
-                raise ValueError("event replay cell is missing a valid phase_id")
-            label = LCBT_V2_PHASES[phase_id]
+            evidence = int(evidence_steps[sample_index])
+            if evidence <= 0:
+                raise ValueError("event replay cell is missing valid evidence_steps")
+            label = f"{'Join' if group_id == 2 else 'Fault'}@{evidence}"
         else:
             raise ValueError(f"unsupported lifecycle validation group_id: {group_id}")
         calendar_id = int(calendar_ids[sample_index])
         cell_state.setdefault(label, {}).setdefault(calendar_id, []).append(
             float(errors[sample_index][selected].mean())
         )
-
-
-def finalize_lifecycle_validation_mae(cell_state):
-    """Equal-average replay cells within calendar strata, then semantic groups."""
-    calendar_balanced = {}
-    for label in ("Unseen", "Steady") + LCBT_V2_PHASES:
-        calendar_balanced[label] = [
-            _finite_mean(values)
-            for _, values in sorted(cell_state.get(label, {}).items())
-        ]
-    return finalize_lifecycle_mae(calendar_balanced)
 
 
 def compose_effective_lifecycle_features(

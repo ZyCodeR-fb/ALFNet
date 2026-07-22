@@ -1,7 +1,6 @@
 import csv
 import json
 import os
-import re
 
 import numpy as np
 import torch
@@ -11,7 +10,7 @@ from data_provider.ples_protocol import (
     PLES_V2_EFFECT_NAMES,
     bootstrap_paired_effects_v2,
     phase_for_tau_v2,
-    summarize_lce_rows_v2,
+    summarize_lce_rows,
     summarize_paired_rows_v2,
 )
 from utils.model_output import unpack_model_output
@@ -29,15 +28,6 @@ def _jsonable(value):
     if torch.is_tensor(value):
         return value.detach().cpu().tolist()
     return value
-
-
-def _safe_token(value):
-    token = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value)).strip("_").lower()
-    return token or "dataset"
-
-
-
-
 def _paired_error_sums(treated, control, target, nodes):
     if not nodes:
         return None
@@ -180,21 +170,21 @@ def _format_training_trace(training_trace):
 
 
 
-def _write_manifest_v2(dataset, args, output_dir):
+def _write_manifest(dataset, args, output_dir):
     manifest = dataset.get_protocol_manifest()
     root = os.path.abspath(getattr(args, "ples_manifest_root", "./protocol_manifests"))
     canonical_path = os.path.join(
         root,
         str(manifest["dataset"]["name"]),
-        "lifecycle_v2",
+        "lifecycle_v3",
         "protocol_manifest.json",
     )
     if not os.path.exists(canonical_path):
-        raise FileNotFoundError(f"Lifecycle v2 manifest not found: {canonical_path}")
+        raise FileNotFoundError(f"Lifecycle v3 manifest not found: {canonical_path}")
     with open(canonical_path, "r", encoding="utf-8") as handle:
         existing = json.load(handle)
     if existing.get("protocol_hash") != manifest.get("protocol_hash"):
-        raise ValueError(f"Lifecycle v2 manifest mismatch at {canonical_path}")
+        raise ValueError(f"Lifecycle v3 manifest mismatch at {canonical_path}")
     result_path = os.path.join(output_dir, "protocol_manifest.json")
     with open(result_path, "w", encoding="utf-8") as handle:
         json.dump(_jsonable(manifest), handle, ensure_ascii=False, indent=2)
@@ -221,18 +211,18 @@ def _write_metric_table(output_dir, stem, metrics, row_order, row_label):
 
 
 
-def _async_lifecycle_inference_v2(model, dataset, args):
+def _async_lifecycle_inference(model, dataset, args):
     manifest = dataset.get_protocol_manifest()
-    if int(getattr(args, "lce_protocol_version", 0)) != 1:
-        raise ValueError("PLES v2 requires lce_protocol_version=1")
+    if int(getattr(args, "lce_protocol_version", 0)) != 2:
+        raise ValueError("The maintained evaluation protocol requires LCE v2")
     protocol_token = manifest["protocol_hash"][:10]
     output_dir = os.path.join(
         args.best_prediction_path,
         args.exp_id,
-        f"lifecycle-v2-{protocol_token}",
+        f"lifecycle-v3-{protocol_token}",
     )
     os.makedirs(output_dir, exist_ok=True)
-    canonical_manifest_path, result_manifest_path = _write_manifest_v2(
+    canonical_manifest_path, result_manifest_path = _write_manifest(
         dataset,
         args,
         output_dir,
@@ -250,7 +240,7 @@ def _async_lifecycle_inference_v2(model, dataset, args):
     post_steps = int(manifest["requested"]["post_steps"])
     pre_prediction_max_abs = 0.0
     model.eval()
-    print("-> Start LCE v1 + PLES v2 inference...")
+    print("-> Start LCE v2 + PLES v2 inference...")
     for origin_index, origin in enumerate(manifest["origins"], start=1):
         for tau in range(-pre_steps, post_steps + 1):
             control_sample = dataset.build_ples_sample(
@@ -362,7 +352,7 @@ def _async_lifecycle_inference_v2(model, dataset, args):
             "PLES v2 pre-event treatment/control predictions differ: "
             f"max_abs={pre_prediction_max_abs:.6g}"
         )
-    lce_summary = summarize_lce_rows_v2(rows)
+    lce_summary = summarize_lce_rows(rows, input_len=args.input_len)
     ples_summary = summarize_paired_rows_v2(rows)
     pre_metric_difference = float(
         ples_summary["pre_event_max_abs_mape_difference"]
@@ -380,13 +370,13 @@ def _async_lifecycle_inference_v2(model, dataset, args):
     training_trace = _load_training_trace(args)
     required_training_hash = manifest.get("training_protocol_hash")
     checkpoint_training_hash = training_trace.get("training_protocol_hash")
-    formal_lcbt_v2 = bool(
+    formal_protocol_match = bool(
         checkpoint_training_hash
         and checkpoint_training_hash == required_training_hash
     )
-    if not formal_lcbt_v2:
+    if not formal_protocol_match:
         print(
-            "Warning: checkpoint is not proven to come from this frozen LCBT v2 "
+            "Warning: checkpoint is not proven to come from this frozen LCBT v3 "
             "training manifest; results are diagnostic-only and the three-seed "
             "collector will reject them."
         )
@@ -396,7 +386,7 @@ def _async_lifecycle_inference_v2(model, dataset, args):
         "protocol_hash": manifest["protocol_hash"],
         "training_protocol_hash": checkpoint_training_hash,
         "required_training_protocol_hash": required_training_hash,
-        "formal_lcbt_v2": formal_lcbt_v2,
+        "formal_protocol_match": formal_protocol_match,
         "lce_protocol_hash": manifest["lce_protocol_hash"],
         "ples_protocol_hash": manifest["ples_protocol_hash"],
         "model": args.model,
@@ -411,14 +401,19 @@ def _async_lifecycle_inference_v2(model, dataset, args):
     }
     main_payload = {
         **common,
-        "table": "LCE v1 main",
+        "table": "LCE v2 main",
         "aggregation": manifest["lce"]["aggregation"],
         "metrics": lce_summary["main_metrics"],
     }
     phase_payload = {
         **common,
-        "table": "LCE v1 phases",
+        "table": "LCE v2 phases",
         "metrics": lce_summary["phase_metrics"],
+    }
+    trajectory_payload = {
+        **common,
+        "table": "LCE v2 evidence trajectories",
+        "metrics": lce_summary["trajectory_metrics"],
     }
     effects_payload = {
         **common,
@@ -460,6 +455,16 @@ def _async_lifecycle_inference_v2(model, dataset, args):
         PHASE_ORDER,
         "phase",
     )
+    trajectory_rows = [
+        {"track": track, **cell}
+        for track, cells in lce_summary["trajectory_metrics"].items()
+        for cell in cells
+    ]
+    _write_csv(
+        os.path.join(output_dir, "lce_trajectory_summary.csv"),
+        trajectory_rows,
+        ["track", "k", "visibility", "MAPE", "MAE", "RMSE"],
+    )
     effect_rows = [
         {
             "effect": name,
@@ -478,6 +483,7 @@ def _async_lifecycle_inference_v2(model, dataset, args):
     for filename, payload in (
         ("lce_main_summary.json", main_payload),
         ("lce_phase_summary.json", phase_payload),
+        ("lce_trajectory_summary.json", trajectory_payload),
         ("ples_effects_summary.json", effects_payload),
     ):
         with open(os.path.join(output_dir, filename), "w", encoding="utf-8") as handle:
@@ -534,6 +540,7 @@ def _async_lifecycle_inference_v2(model, dataset, args):
         "lce": {
             "main_metrics": lce_summary["main_metrics"],
             "phase_metrics": lce_summary["phase_metrics"],
+            "trajectory_metrics": lce_summary["trajectory_metrics"],
         },
         "ples": {
             "paired_effects": ples_summary["paired_effects"],
@@ -545,5 +552,5 @@ def _async_lifecycle_inference_v2(model, dataset, args):
 
 def async_lifecycle_inference(model, data_loader, args, criterions=None):
     if int(args.slide_step) != 1:
-        raise ValueError("LCE v1/PLES v2 requires slide_step=1")
-    return _async_lifecycle_inference_v2(model, data_loader.dataset, args)
+        raise ValueError("LCE v2/PLES v2 requires slide_step=1")
+    return _async_lifecycle_inference(model, data_loader.dataset, args)

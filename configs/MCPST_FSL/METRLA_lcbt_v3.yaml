@@ -1,6 +1,6 @@
 runtime:
-  model: STBP
-  model_variant: sb_l2
+  model: MCPST_FSL
+  model_variant: mc_l3
   model_recipe: baseline
   mode: train
 dataset:
@@ -23,34 +23,19 @@ training:
   batch_size: 16
   num_workers: 8
   loss: mse
-  optimizer: adam
+  optimizer: adamw
   scheduler: None
   scheduler_patience: 1
-  lr: 0.001
+  lr: 0.0003
   weight_decay: 0.0001
   d_model: 64
-async_test:
-  ples_manifest_root: ./protocol_manifests
-  ples_protocol_version: 2
-  lce_protocol_version: 1
-  ples_pre_steps: 12
-  ples_post_steps: 36
-  ples_seed: 2026
-  ples_bootstrap_samples: 2000
-  ples_bootstrap_seed: 2026
-family:
-  dropout: 0.0
-  model:
-    in_channel: 12
-    out_channel: 12
-    hidden_channel: 192
 lifecycle:
   train_for_async_lifecycle: true
   lifecycle_role_features: true
   lifecycle_history_age_feature: true
   lifecycle_age_mode: state_duration
   lifecycle_observation_mask_feature: true
-  lifecycle_training_strategy: lcbt_v2
+  lifecycle_training_strategy: lcbt_v3
   lcbt_manifest_root: ./protocol_manifests
   lcbt_protocol_seed: 2026
   lcbt_validation_seed: 12026
@@ -67,3 +52,25 @@ lifecycle:
   lcbt_cohort_fractions: [0.025, 0.05, 0.10]
   lcbt_cohort_weights: [0.25, 0.50, 0.25]
   lcbt_clustered_ratio: 0.50
+async_test:
+  ples_manifest_root: ./protocol_manifests
+  ples_protocol_version: 2
+  lce_protocol_version: 2
+  ples_pre_steps: 12
+  ples_post_steps: 36
+  ples_seed: 2026
+  ples_bootstrap_samples: 2000
+  ples_bootstrap_seed: 2026
+family:
+  training:
+    test_dataset: metrla
+  model:
+    input_dim: 1
+    hidden_dim: 64
+    pred_len: 12
+    spatial_dim: 4
+    num_diffusion_steps: 3
+    num_oscillator_steps: 4
+    num_eigen_vectors: 6
+    node_minibatch_cpu: 2048
+    node_minibatch_gpu: 1024

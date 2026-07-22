@@ -3,6 +3,48 @@ from data_provider.graph_data_loader import (
     LifecycleCoveragePEMS,
 )
 from torch.utils.data import DataLoader
+from torch.utils.data import Sampler
+import numpy as np
+
+
+class LifecycleBalancedBatchSampler(Sampler):
+    """Group-balanced batches backed by the dataset's epoch-specific schedule."""
+
+    def __init__(self, dataset, batch_size, seed):
+        if int(batch_size) < 4 or int(batch_size) % 4:
+            raise ValueError("LCBT v3 batch_size must be divisible by four")
+        self.dataset = dataset
+        self.batch_size = int(batch_size)
+        self.seed = int(seed)
+
+    def __iter__(self):
+        groups = {name: [] for name in ("zero_history", "steady", "join", "fault")}
+        for index, item in enumerate(self.dataset.schedule):
+            groups[str(item["scenario"])].append(index)
+        rng = np.random.default_rng(
+            self.seed + int(getattr(self.dataset, "current_epoch", 0)) * 1_000_003
+        )
+        for name in groups:
+            groups[name] = list(rng.permutation(groups[name]))
+        per_group = self.batch_size // 4
+        full_batches = min(len(indices) // per_group for indices in groups.values())
+        cursor = {name: 0 for name in groups}
+        for _ in range(full_batches):
+            batch = []
+            for name in groups:
+                start = cursor[name]
+                end = start + per_group
+                batch.extend(groups[name][start:end])
+                cursor[name] = end
+            yield list(rng.permutation(batch))
+        tail = []
+        for name in groups:
+            tail.extend(groups[name][cursor[name]:])
+        for start in range(0, len(tail), self.batch_size):
+            yield list(rng.permutation(tail[start:start + self.batch_size]))
+
+    def __len__(self):
+        return (len(self.dataset) + self.batch_size - 1) // self.batch_size
 
 
 def data_provider(args, flag):
@@ -10,13 +52,13 @@ def data_provider(args, flag):
         Dataset = AsyncLifecyclePEMS
     elif (
         args.train_for_async_lifecycle
-        and args.lifecycle_training_strategy == "lcbt_v2"
+        and args.lifecycle_training_strategy == "lcbt_v3"
         and flag in {"train", "val"}
     ):
         Dataset = LifecycleCoveragePEMS
     else:
         raise ValueError(
-            f"Unsupported data request flag={flag!r}; use LCBT v2 train/val or LCE/PLES test_async"
+            f"Unsupported data request flag={flag!r}; use LCBT train/val or LCE/PLES test_async"
         )
     if flag != 'train':
         shuffle_flag = False
@@ -25,7 +67,7 @@ def data_provider(args, flag):
         freq = args.freq
     else:
         shuffle_flag = True
-        drop_last = args.lifecycle_training_strategy != "lcbt_v2"
+        drop_last = False
         batch_size = args.batch_size  # bsz for train and valid
         freq = args.freq
 
@@ -60,6 +102,7 @@ def data_provider(args, flag):
             lce_protocol_version=args.lce_protocol_version,
             ples_manifest_root=args.ples_manifest_root,
             ples_overwrite_manifest=args.ples_overwrite_manifest,
+            lifecycle_training_strategy=args.lifecycle_training_strategy,
         )
         dataset_kwargs.update(
             lcbt_manifest_root=args.lcbt_manifest_root,
@@ -91,11 +134,23 @@ def data_provider(args, flag):
             lcbt_generated_unseen_fraction=args.lcbt_generated_unseen_fraction,
             lifecycle_age_mode=args.lifecycle_age_mode,
             lcbt_overwrite_manifest=args.lcbt_overwrite_manifest,
+            lifecycle_training_strategy=args.lifecycle_training_strategy,
         )
     data_set = Dataset(**dataset_kwargs)
-
-    return DataLoader(data_set,
-                      batch_size=batch_size,
-                      shuffle=shuffle_flag,
-                      num_workers=args.num_workers,
-                      drop_last=drop_last)
+    if flag == "train" and args.lifecycle_training_strategy == "lcbt_v3":
+        return DataLoader(
+            data_set,
+            batch_sampler=LifecycleBalancedBatchSampler(
+                data_set,
+                batch_size=batch_size,
+                seed=args.lcbt_protocol_seed,
+            ),
+            num_workers=args.num_workers,
+        )
+    return DataLoader(
+        data_set,
+        batch_size=batch_size,
+        shuffle=shuffle_flag,
+        num_workers=args.num_workers,
+        drop_last=drop_last,
+    )

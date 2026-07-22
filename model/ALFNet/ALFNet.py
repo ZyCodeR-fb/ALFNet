@@ -160,8 +160,8 @@ class Model(nn.Module):
             and configs.lifecycle_observation_mask_feature
         ):
             raise ValueError("ALFNet requires availability, state-age, and observation-mask inputs")
-        if configs.lifecycle_training_strategy != "lcbt_v2":
-            raise ValueError("ALFNet streamlined mainline requires lifecycle_training_strategy=lcbt_v2")
+        if configs.lifecycle_training_strategy != "lcbt_v3":
+            raise ValueError("ALFNet streamlined mainline requires lifecycle_training_strategy=lcbt_v3")
 
         family = getattr(configs, "model_family_cfg", {}) or {}
         experts = family.get("experts", {})

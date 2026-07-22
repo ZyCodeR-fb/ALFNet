@@ -15,7 +15,7 @@ def _last_role(x_enc, args):
     role_start = int(args.raw_enc_in)
     role_end = role_start + ROLE_CHANNEL_COUNT
     if x_enc.size(-1) < role_end:
-        raise ValueError("LCBT v2 input is missing the four availability channels")
+        raise ValueError("LCBT v3 input is missing the four availability channels")
     return x_enc[:, -1, :, role_start:role_end]
 
 
@@ -101,8 +101,8 @@ def _criterion_metrics(criterions, args, loss, y_omi, inverse_y, inverse_y_hat):
 
 
 def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epoch):
-    if args.lifecycle_training_strategy != "lcbt_v2":
-        raise ValueError("The streamlined trainer only supports lifecycle_training_strategy=lcbt_v2")
+    if args.lifecycle_training_strategy != "lcbt_v3":
+        raise ValueError("The streamlined trainer requires lcbt_v3")
     training = bool(train and mode == "train")
     model.train(training)
     model.to(args.device)
@@ -118,8 +118,10 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
 
     with torch.set_grad_enabled(training):
         for batch in dataloader:
-            if len(batch) != 9:
-                raise ValueError(f"LCBT v2 batches must contain 9 tensors, got {len(batch)}")
+            if len(batch) != 10:
+                raise ValueError(
+                    f"lcbt_v3 batches must contain 10 tensors, got {len(batch)}"
+                )
             batch = [tensor.to(args.device) for tensor in batch]
             (
                 x_enc,
@@ -131,6 +133,7 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                 group_ids,
                 target_cohort_mask,
                 calendar_ids,
+                evidence_steps,
             ) = batch
             x_enc = x_enc.float()
             x_dec = x_dec.float()
@@ -239,13 +242,17 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                     phase_ids.detach().cpu().numpy(),
                     target_cohort_mask.detach().cpu().numpy(),
                     calendar_ids.detach().cpu().numpy(),
+                    evidence_steps.detach().cpu().numpy(),
                 )
 
     if valid_batches == 0:
-        raise RuntimeError(f"No finite LCBT v2 batches were collected for {mode} at epoch {epoch}")
+        raise RuntimeError(
+            f"No finite {args.lifecycle_training_strategy} batches were collected "
+            f"for {mode} at epoch {epoch}"
+        )
     metrics = {name: value / valid_batches for name, value in metric_sums.items()}
     lifecycle = (
-        finalize_lifecycle_validation_mae(lifecycle_cells)
+        finalize_lifecycle_validation_mae(lifecycle_cells, input_len=args.input_len)
         if mode == "val"
         else {}
     )

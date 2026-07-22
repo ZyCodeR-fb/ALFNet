@@ -105,7 +105,7 @@ class Model(nn.Module):
             raise ValueError("ALFGraph requires the explicit observation-mask channel")
         recipe = (getattr(configs, "model_family_cfg", {}) or {}).get("recipe", {})
         if bool(recipe.get("use_grin_input_imputer", False)):
-            raise ValueError("rf_l2s uses one shared GRIN in ALFNet, not inside ALFGraph")
+            raise ValueError("ALFNet uses one shared GRIN, not an ALFGraph-local GRIN")
         output_steps = configs.pred_len if configs.pred_len > 0 else configs.look_back
         backbone_input = int(configs.enc_in) - 1
         self.output_dim = int(configs.c_out)
