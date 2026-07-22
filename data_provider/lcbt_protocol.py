@@ -5,63 +5,12 @@ from datetime import datetime, timezone
 import numpy as np
 
 
-LCBT_PROTOCOL_NAME = "Lifecycle Coverage-Balanced Training"
-LCBT_PROTOCOL_VERSION = 1
-LCBT_PHASES = ("Cold", "Warm", "Ready", "Onset", "Decay", "Outage")
-LCBT_SCENARIOS = ("join", "fault", "steady")
 LCBT_V2_PROTOCOL_NAME = "Lifecycle Coverage-Balanced Training v2"
 LCBT_V2_PROTOCOL_VERSION = 2
-LCBT_V2_PHASES = LCBT_PHASES
+LCBT_V2_PHASES = ("Cold", "Warm", "Ready", "Onset", "Decay", "Outage")
 LCBT_V2_GROUPS = ("zero_history", "steady", "join", "fault")
 LCBT_V2_REPORT_GROUPS = ("Unseen", "Steady", "Join", "Fault")
 CALENDAR_REGIMES = ("AM", "PM", "OffPeak", "Weekend")
-
-
-def accumulate_phase_mae(
-    phase_error_sums,
-    phase_counts,
-    y_true,
-    y_pred,
-    phase_ids,
-    changed_node_mask,
-):
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-    phase_ids = np.asarray(phase_ids).reshape(-1).astype(np.int64)
-    changed_node_mask = np.asarray(changed_node_mask).astype(bool)
-    valid = np.isfinite(y_true) & np.isfinite(y_pred)
-    absolute_error = np.abs(y_pred - y_true)
-    for phase_index in range(len(LCBT_PHASES)):
-        sample_mask = phase_ids == phase_index
-        if not np.any(sample_mask):
-            continue
-        node_mask = changed_node_mask[sample_mask]
-        selected_valid = valid[sample_mask] & node_mask[:, None, :, None]
-        count = int(selected_valid.sum())
-        if count <= 0:
-            continue
-        phase_error_sums[phase_index] += float(
-            absolute_error[sample_mask][selected_valid].sum()
-        )
-        phase_counts[phase_index] += count
-
-
-def finalize_phase_mae(phase_error_sums, phase_counts):
-    per_phase = {}
-    finite_values = []
-    for phase_index, phase_name in enumerate(LCBT_PHASES):
-        if phase_counts[phase_index] <= 0:
-            per_phase[f"{phase_name}_MAE"] = float("nan")
-            continue
-        value = phase_error_sums[phase_index] / phase_counts[phase_index]
-        per_phase[f"{phase_name}_MAE"] = float(value)
-        finite_values.append(value)
-    per_phase["mae"] = (
-        float(sum(finite_values) / len(finite_values))
-        if len(finite_values) == len(LCBT_PHASES)
-        else float("nan")
-    )
-    return per_phase
 
 
 def stable_hash(value):
@@ -179,7 +128,7 @@ def _scenario_assignments(
     calendar_regimes,
     ratios,
     rng,
-    scenario_names=LCBT_SCENARIOS,
+    scenario_names=LCBT_V2_GROUPS,
 ):
     calendar_regimes = np.asarray(calendar_regimes, dtype=object)
     num_samples = len(calendar_regimes)
@@ -220,38 +169,6 @@ def _scenario_assignments(
     return assignments
 
 
-def _interleave_regime_indices(indices, calendar_regimes, rng):
-    queues = []
-    for regime in CALENDAR_REGIMES:
-        regime_indices = [index for index in indices if calendar_regimes[index] == regime]
-        if regime_indices:
-            shuffled = np.asarray(regime_indices, dtype=np.int64)[rng.permutation(len(regime_indices))]
-            queues.append(list(shuffled))
-    remaining = [index for index in indices if calendar_regimes[index] not in CALENDAR_REGIMES]
-    if remaining:
-        shuffled = np.asarray(remaining, dtype=np.int64)[rng.permutation(len(remaining))]
-        queues.append(list(shuffled))
-
-    ordered = []
-    while any(queues):
-        for queue in queues:
-            if queue:
-                ordered.append(int(queue.pop()))
-    return ordered
-
-
-def _phase_id(scenario, transition_steps, input_len):
-    if scenario == "steady":
-        return -1
-    if scenario == "join":
-        if transition_steps == 0:
-            return 0
-        return 2 if transition_steps == input_len else 1
-    if scenario == "fault":
-        if transition_steps == 0:
-            return 3
-        return 5 if transition_steps == input_len else 4
-    raise ValueError(f"unsupported LCBT scenario: {scenario}")
 
 
 def _phase_id_v2(scenario, evidence_steps, input_len):
@@ -323,117 +240,6 @@ def _balanced_values(size, values, weights, rng):
     return output[rng.permutation(len(output))].tolist()
 
 
-def build_lcbt_schedule(
-    num_samples,
-    input_len,
-    adjacency,
-    calendar_regimes,
-    seed,
-    epoch,
-    scenario_ratios=(0.40, 0.40, 0.20),
-    cohort_fractions=(0.025, 0.05, 0.10),
-    cohort_weights=(0.25, 0.50, 0.25),
-    clustered_ratio=0.50,
-):
-    num_samples = int(num_samples)
-    input_len = int(input_len)
-    adjacency = np.asarray(adjacency)
-    calendar_regimes = [str(value) for value in calendar_regimes]
-    if num_samples <= 0 or input_len <= 0:
-        raise ValueError("num_samples and input_len must be positive")
-    if adjacency.ndim != 2 or adjacency.shape[0] != adjacency.shape[1]:
-        raise ValueError("adjacency must be square")
-    if len(calendar_regimes) != num_samples:
-        raise ValueError("calendar_regimes must align with num_samples")
-    if not 0.0 <= float(clustered_ratio) <= 1.0:
-        raise ValueError("clustered_ratio must be in [0, 1]")
-
-    rng = np.random.default_rng(int(seed) + int(epoch) * 1_000_003)
-    assignments = _scenario_assignments(calendar_regimes, scenario_ratios, rng)
-    transition_steps = np.full(num_samples, input_len, dtype=np.int64)
-    for scenario in ("join", "fault"):
-        indices = np.flatnonzero(assignments == scenario).tolist()
-        ordered = _interleave_regime_indices(indices, calendar_regimes, rng)
-        offset = int(rng.integers(0, input_len + 1))
-        for rank, index in enumerate(ordered):
-            transition_steps[index] = (rank + offset) % (input_len + 1)
-
-    event_indices = np.flatnonzero(assignments != "steady").tolist()
-    fractions = _balanced_values(len(event_indices), cohort_fractions, cohort_weights, rng)
-    topology_modes = _balanced_values(
-        len(event_indices),
-        ("clustered", "scattered"),
-        (float(clustered_ratio), 1.0 - float(clustered_ratio)),
-        rng,
-    )
-    weights, strata = _weighted_degree_strata(adjacency)
-    exposure = np.zeros(adjacency.shape[0], dtype=np.int64)
-    event_rank = {sample_index: rank for rank, sample_index in enumerate(event_indices)}
-
-    schedule = []
-    for sample_index in range(num_samples):
-        scenario = str(assignments[sample_index])
-        changed_nodes = []
-        cohort_fraction = 0.0
-        topology_mode = "none"
-        if scenario != "steady":
-            rank = event_rank[sample_index]
-            cohort_fraction = float(fractions[rank])
-            topology_mode = str(topology_modes[rank])
-            cohort_size = min(
-                adjacency.shape[0],
-                max(1, int(round(adjacency.shape[0] * cohort_fraction))),
-            )
-            if topology_mode == "clustered":
-                changed_nodes = _select_clustered_nodes(
-                    weights,
-                    strata,
-                    exposure,
-                    rng,
-                    cohort_size,
-                    seed_stratum=rank,
-                )
-            else:
-                changed_nodes = _select_scattered_nodes(strata, exposure, rng, cohort_size)
-            exposure[np.asarray(changed_nodes, dtype=np.int64)] += 1
-
-        steps = int(transition_steps[sample_index])
-        schedule.append(
-            {
-                "scenario": scenario,
-                "transition_steps": steps,
-                "phase_id": _phase_id(scenario, steps, input_len),
-                "changed_nodes": changed_nodes,
-                "cohort_fraction": cohort_fraction,
-                "topology_mode": topology_mode,
-                "calendar_regime": calendar_regimes[sample_index],
-            }
-        )
-    return schedule
-
-
-def _balanced_event_evidence(size, input_len, rng):
-    """Balance onset, transition, and settled stages without weighting by duration."""
-    if input_len < 2:
-        raise ValueError("LCBT v2 requires input_len >= 2")
-    stage_counts = _allocate_counts(int(size), (1.0, 1.0, 1.0))
-    values = [1] * int(stage_counts[0])
-    middle_values = list(range(2, input_len))
-    if middle_values:
-        values.extend(
-            int(value)
-            for value in _balanced_values(
-                int(stage_counts[1]),
-                middle_values,
-                np.ones(len(middle_values), dtype=np.float64),
-                rng,
-            )
-        )
-    else:
-        values.extend([1] * int(stage_counts[1]))
-    values.extend([int(input_len)] * int(stage_counts[2]))
-    values = np.asarray(values, dtype=np.int64)
-    return values[rng.permutation(len(values))]
 
 
 def build_lcbt_v2_schedule(

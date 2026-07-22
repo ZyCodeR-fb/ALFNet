@@ -63,8 +63,7 @@ def test_v2_event_clock_distinguishes_both_static_anchors_from_event_onsets():
 
 def test_all_models_expose_explicit_lcbt_v2_configs():
     config_paths = [
-        ROOT / "configs" / "ALFNet" / "rf_lcb2_g.yaml",
-        ROOT / "configs" / "ALFNet" / "rf_lcb2_s.yaml",
+        ROOT / "configs" / "ALFNet" / "rf_l2s.yaml",
     ] + [
         ROOT / "configs" / model / "METRLA_lcbt_v2.yaml"
         for model in (
@@ -81,34 +80,6 @@ def test_all_models_expose_explicit_lcbt_v2_configs():
         assert "ples_protocol_version: 2" in text
         assert "lce_protocol_version: 1" in text
         assert "lcbt_zero_history_ratio: 0.25" in text
-
-
-def test_v2_configs_only_change_protocol_fields_and_short_variant_names():
-    yaml = pytest.importorskip("yaml")
-    families = (
-        "MoGERNN", "PatchSTG", "FCLSTM", "GWNET", "HA", "MCPST_FSL",
-        "SLPF", "STBP", "STFiT", "STGCN", "STGODE", "STID",
-    )
-    pairs = [
-        (ROOT / "configs" / family / "METRLA_lcbt.yaml", ROOT / "configs" / family / "METRLA_lcbt_v2.yaml")
-        for family in families
-    ] + [
-        (ROOT / "configs" / "ALFNet" / "rf_lcb_g.yaml", ROOT / "configs" / "ALFNet" / "rf_lcb2_g.yaml"),
-        (ROOT / "configs" / "ALFNet" / "rf_lcb_s.yaml", ROOT / "configs" / "ALFNet" / "rf_lcb2_s.yaml"),
-    ]
-    for old_path, new_path in pairs:
-        old = yaml.safe_load(old_path.read_text(encoding="utf-8"))
-        new = yaml.safe_load(new_path.read_text(encoding="utf-8"))
-        assert old["dataset"] == new["dataset"]
-        old_runtime = {key: value for key, value in old["runtime"].items() if key != "model_variant"}
-        new_runtime = {key: value for key, value in new["runtime"].items() if key != "model_variant"}
-        assert old_runtime == new_runtime
-        old_training = {key: value for key, value in old["training"].items() if key != "stop_based"}
-        new_training = {key: value for key, value in new["training"].items() if key != "stop_based"}
-        assert old_training == new_training
-        assert len(new["runtime"]["model_variant"]) <= 12
-        if "family" in old:
-            assert old["family"] == new["family"]
 
 
 def test_v2_origins_are_calendar_adaptive_and_respect_inclusive_clock_bounds():
@@ -422,12 +393,12 @@ def test_ples_v2_uses_descriptive_directions_and_zero_pre_event_difference():
 
 def test_checkpoint_uses_point_one_percent_primary_then_worst_group_tiebreak():
     pytest.importorskip("omegaconf")
-    from experiments.train import _accept_lifecycle_checkpoint
+    from experiments.train import _accept_checkpoint
 
-    assert _accept_lifecycle_checkpoint(9.98, 10.0, 12.0, 11.0)
-    assert not _accept_lifecycle_checkpoint(9.995, 10.0, 12.0, 11.0)
-    assert _accept_lifecycle_checkpoint(10.005, 10.0, 10.5, 11.0)
-    assert not _accept_lifecycle_checkpoint(10.02, 10.0, 1.0, 11.0)
+    assert _accept_checkpoint(9.98, 10.0, 12.0, 11.0)
+    assert not _accept_checkpoint(9.995, 10.0, 12.0, 11.0)
+    assert _accept_checkpoint(10.005, 10.0, 10.5, 11.0)
+    assert not _accept_checkpoint(10.02, 10.0, 1.0, 11.0)
 
 
 def _build_v2_dataset(tmp_path, flag, overwrite_manifest=True):
@@ -466,7 +437,6 @@ def _build_v2_dataset(tmp_path, flag, overwrite_manifest=True):
         lifecycle_history_age_feature=True,
         lifecycle_observation_mask_feature=True,
         lcbt_manifest_root=str(tmp_path / "manifests"),
-        lcbt_protocol_version=2,
         lcbt_join_ratio=0.25,
         lcbt_fault_ratio=0.25,
         lcbt_steady_ratio=0.25,
@@ -546,7 +516,6 @@ def test_async_v2_provider_uses_inclusive_clock_and_frozen_test_unseen_pool():
         lcbt_manifest_root=str(workdir / "manifests"),
         lcbt_scaler_end_ratio=0.50,
         lcbt_test_start_ratio=0.60,
-        lcbt_protocol_version=2,
         ples_protocol_version=2,
         lce_protocol_version=1,
         ples_manifest_root=str(workdir / "manifests"),
@@ -606,7 +575,6 @@ def test_v2_evaluator_writes_separate_lce_and_ples_outputs():
         lcbt_manifest_root=str(workdir / "manifests"),
         lcbt_scaler_end_ratio=0.50,
         lcbt_test_start_ratio=0.60,
-        lcbt_protocol_version=2,
         ples_protocol_version=2,
         lce_protocol_version=1,
         ples_manifest_root=str(workdir / "manifests"),
@@ -631,7 +599,6 @@ def test_v2_evaluator_writes_separate_lce_and_ples_outputs():
         )
     args = SimpleNamespace(
         slide_step=1,
-        test_for_changed=False,
         best_prediction_path=str(workdir / "predictions"),
         best_checkpoint_path=str(checkpoint_dir),
         exp_id="v2-smoke",

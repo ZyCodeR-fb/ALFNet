@@ -69,7 +69,7 @@ def test_lce_collector_reports_three_seed_mean_std_and_checks_hashes():
     collector = _load_collector()
     root = ROOT / ".pytest_cache" / "lce_v2_collection"
     run_dirs = []
-    for model, variant in (("ALFNet", "rf_l2g"), ("MoGERNN", "mg_l2")):
+    for model, variant in (("ALFNet", "rf_l2s"), ("MoGERNN", "mg_l2")):
         for seed, offset in ((32, -1.0), (42, 0.0), (52, 1.0)):
             run_dirs.append(_write_run(root / variant, model, variant, seed, offset))
 
@@ -85,7 +85,7 @@ def test_lce_collector_reports_three_seed_mean_std_and_checks_hashes():
     assert alf_life["MAPE_mean"] == pytest.approx(11.5)
     assert alf_life["MAPE_std"] == pytest.approx(1.0)
 
-    bad = _write_run(root / "bad", "ALFNet", "rf_l2g", 52, protocol_hash="changed")
+    bad = _write_run(root / "bad", "ALFNet", "rf_l2s", 52, protocol_hash="changed")
     with pytest.raises(ValueError, match="protocol hash"):
         collector.aggregate_results([run_dirs[0], run_dirs[1], bad], expected_seeds=(32, 42, 52))
 
@@ -93,8 +93,8 @@ def test_lce_collector_reports_three_seed_mean_std_and_checks_hashes():
 def test_lce_collector_rejects_missing_or_duplicate_seeds():
     collector = _load_collector()
     root = ROOT / ".pytest_cache" / "lce_v2_collection_seed_check"
-    seed32 = _write_run(root, "ALFNet", "rf_l2g", 32)
-    seed42 = _write_run(root, "ALFNet", "rf_l2g", 42)
+    seed32 = _write_run(root, "ALFNet", "rf_l2s", 32)
+    seed42 = _write_run(root, "ALFNet", "rf_l2s", 42)
 
     with pytest.raises(ValueError, match="expected seeds"):
         collector.aggregate_results([seed32, seed42], expected_seeds=(32, 42, 52))

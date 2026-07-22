@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 from einops import rearrange, repeat
-from timm.models.vision_transformer import Attention, Mlp
 
 from layers.source_timefilter import TimeFilterPatchMixer
 
@@ -158,39 +157,6 @@ class WindowAttBlock(nn.Module):
             alpha=timefilter_alpha,
             dropout=timefilter_dropout,
             residual_scale=timefilter_residual_scale,
-        )
-
-        # These original PatchSTG layers are retained only for old checkpoint keys.
-        # Crossformer TSA is the active attention path in rf_alf_sd.
-        self.nnorm1 = nn.LayerNorm(hidden_size)
-        self.nattn = Attention(
-            hidden_size,
-            num_heads=num_heads,
-            qkv_bias=True,
-            attn_drop=0.1,
-            proj_drop=0.1,
-        )
-        self.nnorm2 = nn.LayerNorm(hidden_size)
-        self.nmlp = Mlp(
-            in_features=hidden_size,
-            hidden_features=mlp_hidden_dim,
-            act_layer=nn.GELU,
-            drop=0.1,
-        )
-        self.snorm1 = nn.LayerNorm(hidden_size)
-        self.sattn = Attention(
-            hidden_size,
-            num_heads=num_heads,
-            qkv_bias=True,
-            attn_drop=0.1,
-            proj_drop=0.1,
-        )
-        self.snorm2 = nn.LayerNorm(hidden_size)
-        self.smlp = Mlp(
-            in_features=hidden_size,
-            hidden_features=mlp_hidden_dim,
-            act_layer=nn.GELU,
-            drop=0.1,
         )
 
     def forward(self, x):

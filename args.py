@@ -22,7 +22,7 @@ def _add_arguments(parser):
         "--mode",
         type=str,
         default=None,
-        choices=["train", "test_async", "test_shockwave", "test_changed", "inference"],
+        choices=["train", "test_async"],
         help="optional high-level run mode override",
     )
     parser.add_argument("--project_name", type=str, default="MoGERNN")
@@ -48,7 +48,6 @@ def _add_arguments(parser):
     parser.add_argument("--pos_mark", action="store_true", help="do not add pos stamp to feature")
 
     # train
-    parser.add_argument("--step_type", type=str, default="step", help="step type for the model")
     parser.add_argument("--max_epoch", type=int, default=50)
     parser.add_argument(
         "--loss",
@@ -69,31 +68,21 @@ def _add_arguments(parser):
         "--stop_based",
         type=str,
         default="train_mask",
-        choices=["val_total", "val_mask", "val_role", "val_phase", "val_lifecycle", "train_total", "train_mask", "train_role"],
+        choices=["val_lifecycle"],
         help="early stopping criteria",
     )
-    parser.add_argument("--return_best", action="store_true", help="return best model")
-    parser.add_argument("--test_for_changed", action="store_true", help="test pretrained model in changed sensor network")
     parser.add_argument("--test_for_async_lifecycle", action="store_true", help="test pretrained model in async lifecycle sensor network")
-    parser.add_argument("--test_for_shockwave", action="store_true", help="legacy alias for the PLES async test")
     parser.add_argument("--train_for_async_lifecycle", action="store_true", help="train model with lifecycle-aware window simulation")
     parser.add_argument("--train_init_checkpoint_path", default=None, help="optional checkpoint path used to initialize model weights before training/fine-tuning")
-    parser.add_argument("--read_only", action="store_true", help="read only")
-    parser.add_argument("--inference_only", action="store_true", help="inference only")
     parser.add_argument("--pretrained_model_path", default=None, help="path to pretrained model")
-    parser.add_argument("--async_num_events", type=int, default=4, help="event-count divisor used by lifecycle-aware training simulation")
     parser.add_argument("--ples_manifest_root", type=str, default="./protocol_manifests", help="dataset-specific PLES manifest root")
     parser.add_argument("--ples_pre_steps", type=int, default=12, help="dense pre-event steps in PLES")
     parser.add_argument("--ples_post_steps", type=int, default=36, help="dense post-event steps in PLES")
-    parser.add_argument("--ples_temporal_blocks", type=int, default=4, help="dataset-adaptive temporal blocks in PLES")
-    parser.add_argument("--ples_cohort_count", type=int, default=5, help="requested disjoint node cohorts in PLES")
-    parser.add_argument("--ples_cohort_fraction", type=float, default=0.05, help="requested changed-node fraction per PLES cohort")
-    parser.add_argument("--ples_min_event_gap", type=int, default=72, help="minimum raw time-step gap between PLES origins")
     parser.add_argument("--ples_seed", type=int, default=2026, help="PLES protocol seed recorded in the manifest")
     parser.add_argument("--ples_bootstrap_samples", type=int, default=2000, help="hierarchical bootstrap samples for PLES effects")
     parser.add_argument("--ples_bootstrap_seed", type=int, default=2026, help="hierarchical bootstrap seed for PLES effects")
-    parser.add_argument("--ples_protocol_version", type=int, default=1, choices=[1, 2])
-    parser.add_argument("--lce_protocol_version", type=int, default=0, choices=[0, 1])
+    parser.add_argument("--ples_protocol_version", type=int, default=2, choices=[2])
+    parser.add_argument("--lce_protocol_version", type=int, default=1, choices=[1])
     parser.add_argument("--ples_overwrite_manifest", action="store_true", help="overwrite a mismatched canonical PLES manifest intentionally")
     parser.add_argument("--lifecycle_role_features", action="store_true", help="append lifecycle role one-hot features to async lifecycle inputs")
     parser.add_argument("--lifecycle_history_age_feature", action="store_true", help="append lifecycle history-age feature to async lifecycle inputs")
@@ -105,32 +94,16 @@ def _add_arguments(parser):
     parser.add_argument(
         "--lifecycle_age_mode",
         type=str,
-        default="legacy_cumulative",
-        choices=["legacy_cumulative", "state_duration"],
-    )
-    parser.add_argument(
-        "--lifecycle_event_sampling",
-        type=str,
-        default="mixed",
-        choices=["random", "clustered", "mixed"],
-        help="node sampling strategy for lifecycle-aware training events",
-    )
-    parser.add_argument(
-        "--lifecycle_keep_random_mask",
-        action="store_true",
-        help="keep the legacy extra random masking on the raw observation channel during lifecycle-aware train/val",
+        default="state_duration",
+        choices=["state_duration"],
     )
     parser.add_argument(
         "--lifecycle_training_strategy",
         type=str,
-        default="v1",
-        choices=["v1", "round1", "round2", "round3", "round3_event_only", "round3_weight_only", "round4_dense_event_only", "round4_dense_weighted", "lcbt_v1", "lcbt_v2"],
-        help="lifecycle-aware training recipe: v1=original heavy local lifecycle simulation, round1=lighter events + keep legacy random mask, round2=round1 without local VS nodes, round3=combined event+weight tuning, round3_event_only=only the event-profile changes from round3, round3_weight_only=only the optimizer weighting changes on top of round2-style events",
+        default="none",
+        choices=["none", "lcbt_v2"],
+        help="lifecycle-aware training recipe; the maintained protocol is lcbt_v2",
     )
-    parser.add_argument("--lifecycle_aas_loss_weight", type=float, default=None, help="optional training loss weight override for AAS nodes in lifecycle-aware training")
-    parser.add_argument("--lifecycle_nas_loss_weight", type=float, default=None, help="optional training loss weight override for NAS nodes in lifecycle-aware training")
-    parser.add_argument("--lifecycle_vs_loss_weight", type=float, default=None, help="optional training loss weight override for VS nodes in lifecycle-aware training")
-    parser.add_argument("--lifecycle_fs_loss_weight", type=float, default=None, help="optional training loss weight override for FS nodes in lifecycle-aware training")
     parser.add_argument("--lcbt_manifest_root", type=str, default="./protocol_manifests", help="dataset-specific LCBT manifest root")
     parser.add_argument("--lcbt_protocol_seed", type=int, default=2026, help="LCBT training schedule seed")
     parser.add_argument("--lcbt_validation_seed", type=int, default=12026, help="fixed LCBT validation schedule seed")
@@ -138,9 +111,9 @@ def _add_arguments(parser):
     parser.add_argument("--lcbt_val_end_ratio", type=float, default=0.60)
     parser.add_argument("--lcbt_test_start_ratio", type=float, default=0.60)
     parser.add_argument("--lcbt_scaler_end_ratio", type=float, default=0.50)
-    parser.add_argument("--lcbt_join_ratio", type=float, default=0.40)
-    parser.add_argument("--lcbt_fault_ratio", type=float, default=0.40)
-    parser.add_argument("--lcbt_steady_ratio", type=float, default=0.20)
+    parser.add_argument("--lcbt_join_ratio", type=float, default=0.25)
+    parser.add_argument("--lcbt_fault_ratio", type=float, default=0.25)
+    parser.add_argument("--lcbt_steady_ratio", type=float, default=0.25)
     parser.add_argument("--lcbt_zero_history_ratio", type=float, default=0.25)
     parser.add_argument("--lcbt_unseen_validation_ratio", type=float, default=0.40)
     parser.add_argument("--lcbt_generated_unseen_fraction", type=float, default=0.25)
@@ -176,7 +149,6 @@ def _add_arguments(parser):
     parser.add_argument("--verbose", action="store_true", help="verbose")
     parser.add_argument("--log_interval", type=int, default=100)
 
-    parser.add_argument("--save_model", action="store_true", help="save model not model state dict")
     # dataset
     parser.add_argument("--unknown_nodes_path", type=str, default="", help="path for unobserved sensors id in the train data")
     parser.add_argument("--unknown_nodes_list", type=str, default="", help="unobserved sensors in the train data")
@@ -255,19 +227,9 @@ def _normalize_node_lists(args):
 def _apply_mode_overrides(args):
     if args.mode is None:
         return
-    args.test_for_changed = False
     args.test_for_async_lifecycle = False
-    args.test_for_shockwave = False
-    args.inference_only = False
     if args.mode == "test_async":
         args.test_for_async_lifecycle = True
-    elif args.mode == "test_shockwave":
-        args.test_for_async_lifecycle = True
-        args.test_for_shockwave = True
-    elif args.mode == "test_changed":
-        args.test_for_changed = True
-    elif args.mode == "inference":
-        args.inference_only = True
 
 
 def _validate_required_fields(args):
@@ -280,8 +242,6 @@ def _validate_required_fields(args):
 def finalize_args(args):
     _normalize_node_lists(args)
     _apply_mode_overrides(args)
-    if args.test_for_shockwave:
-        args.test_for_async_lifecycle = True
     _validate_required_fields(args)
 
     if args.test_for_async_lifecycle:
@@ -289,12 +249,8 @@ def finalize_args(args):
             raise ValueError("ples_pre_steps must be positive")
         if args.ples_post_steps < args.input_len:
             raise ValueError("ples_post_steps must cover at least one complete input history")
-        if args.ples_temporal_blocks < 1 or args.ples_cohort_count < 1:
-            raise ValueError("ples_temporal_blocks and ples_cohort_count must be positive")
-        if not 0 < args.ples_cohort_fraction <= 1:
-            raise ValueError("ples_cohort_fraction must be in (0, 1]")
-        if args.ples_min_event_gap < 0 or args.ples_bootstrap_samples < 0:
-            raise ValueError("ples_min_event_gap and ples_bootstrap_samples must be non-negative")
+        if args.ples_bootstrap_samples < 0:
+            raise ValueError("ples_bootstrap_samples must be non-negative")
 
     assert args.input_features in args.target_features, "input_features should be in target_features"
     lifecycle_feature_enabled = (
@@ -307,9 +263,13 @@ def finalize_args(args):
     if args.train_for_async_lifecycle or lifecycle_feature_enabled:
         if args.input_features != args.target_features or args.input_features not in {"q", "o", "v"}:
             raise ValueError("lifecycle-aware training/input augmentation currently supports one same input/target feature among q/o/v")
-    if args.train_for_async_lifecycle and args.lifecycle_training_strategy in {"round1", "round2", "round3", "round3_event_only", "round3_weight_only"}:
-        args.lifecycle_keep_random_mask = True
-    if args.lifecycle_training_strategy in {"lcbt_v1", "lcbt_v2"}:
+    if args.train_for_async_lifecycle and args.lifecycle_training_strategy != "lcbt_v2":
+        raise ValueError(
+            "train_for_async_lifecycle requires lifecycle_training_strategy=lcbt_v2"
+        )
+    if args.test_for_async_lifecycle and args.lifecycle_training_strategy != "lcbt_v2":
+        raise ValueError("test_async requires lifecycle_training_strategy=lcbt_v2")
+    if args.lifecycle_training_strategy == "lcbt_v2":
         required_lcbt_features = {
             "lifecycle_role_features": args.lifecycle_role_features,
             "lifecycle_history_age_feature": args.lifecycle_history_age_feature,
@@ -320,7 +280,7 @@ def finalize_args(args):
         ]
         if missing_features:
             raise ValueError(
-                f"{args.lifecycle_training_strategy} requires raw + role(4) + age(1) + mask(1); missing: "
+                "lcbt_v2 requires raw + role(4) + age(1) + mask(1); missing: "
                 + ", ".join(missing_features)
             )
         fixed_ratios = {
@@ -330,33 +290,18 @@ def finalize_args(args):
             "lcbt_scaler_end_ratio": 0.50,
             "lcbt_clustered_ratio": 0.50,
         }
-        if args.lifecycle_training_strategy == "lcbt_v2":
-            fixed_ratios.update(
-                {
-                    "lcbt_zero_history_ratio": 0.25,
-                    "lcbt_join_ratio": 0.25,
-                    "lcbt_fault_ratio": 0.25,
-                    "lcbt_steady_ratio": 0.25,
-                    "lcbt_unseen_validation_ratio": 0.40,
-                    "lcbt_generated_unseen_fraction": 0.25,
-                }
-            )
-            if args.lifecycle_age_mode != "state_duration":
-                raise ValueError("lcbt_v2 requires lifecycle_age_mode=state_duration")
-            if args.stop_based != "val_lifecycle":
-                raise ValueError("lcbt_v2 requires stop_based=val_lifecycle")
-            if args.lce_protocol_version != 1 or args.ples_protocol_version != 2:
-                raise ValueError(
-                    "lcbt_v2 requires lce_protocol_version=1 and ples_protocol_version=2"
-                )
-        else:
-            fixed_ratios.update(
-                {
-                    "lcbt_join_ratio": 0.40,
-                    "lcbt_fault_ratio": 0.40,
-                    "lcbt_steady_ratio": 0.20,
-                }
-            )
+        fixed_ratios.update(
+            {
+                "lcbt_zero_history_ratio": 0.25,
+                "lcbt_join_ratio": 0.25,
+                "lcbt_fault_ratio": 0.25,
+                "lcbt_steady_ratio": 0.25,
+                "lcbt_unseen_validation_ratio": 0.40,
+                "lcbt_generated_unseen_fraction": 0.25,
+            }
+        )
+        if args.stop_based != "val_lifecycle":
+            raise ValueError("lcbt_v2 requires stop_based=val_lifecycle")
         changed_ratios = [
             f"{name}={getattr(args, name)}"
             for name, expected in fixed_ratios.items()
@@ -367,9 +312,12 @@ def finalize_args(args):
                 f"{args.lifecycle_training_strategy} uses fixed split/scenario/topology ratios; unexpected values: "
                 + ", ".join(changed_ratios)
             )
-        ratios = [args.lcbt_join_ratio, args.lcbt_fault_ratio, args.lcbt_steady_ratio]
-        if args.lifecycle_training_strategy == "lcbt_v2":
-            ratios.append(args.lcbt_zero_history_ratio)
+        ratios = [
+            args.lcbt_join_ratio,
+            args.lcbt_fault_ratio,
+            args.lcbt_steady_ratio,
+            args.lcbt_zero_history_ratio,
+        ]
         if any(value < 0 for value in ratios) or sum(ratios) <= 0:
             raise ValueError("LCBT scenario ratios must be non-negative with a positive sum")
         if len(args.lcbt_cohort_fractions) != len(args.lcbt_cohort_weights):
@@ -399,28 +347,6 @@ def finalize_args(args):
             )
         if not 0 <= args.lcbt_clustered_ratio <= 1:
             raise ValueError("lcbt_clustered_ratio must be in [0, 1]")
-        args.lifecycle_keep_random_mask = False
-    strategy_weight_defaults = {
-        "v1": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
-        "round1": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
-        "round2": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
-        "round3": {"aas": 1.0, "nas": 1.0, "vs": 1.35, "fs": 1.60},
-        "round3_event_only": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
-        "round3_weight_only": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.60},
-        "round4_dense_event_only": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
-        "round4_dense_weighted": {"aas": 1.0, "nas": 1.20, "vs": 1.20, "fs": 1.30},
-        "lcbt_v1": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
-        "lcbt_v2": {"aas": 1.0, "nas": 1.0, "vs": 1.0, "fs": 1.0},
-    }
-    default_weights = strategy_weight_defaults[args.lifecycle_training_strategy]
-    if args.lifecycle_aas_loss_weight is None:
-        args.lifecycle_aas_loss_weight = default_weights["aas"]
-    if args.lifecycle_nas_loss_weight is None:
-        args.lifecycle_nas_loss_weight = default_weights["nas"]
-    if args.lifecycle_vs_loss_weight is None:
-        args.lifecycle_vs_loss_weight = default_weights["vs"]
-    if args.lifecycle_fs_loss_weight is None:
-        args.lifecycle_fs_loss_weight = default_weights["fs"]
     args.c_out = len(args.target_features)
     args.raw_enc_in = len(args.input_features)
     args.enc_in = args.raw_enc_in
@@ -432,9 +358,18 @@ def finalize_args(args):
         args.enc_in += 1
     args.enc_mark_in = 3 * (args.t_mark) + 2 * (args.pos_mark)
     print(
-        f"enc_in enc_mark_in, and c_out is set automatically based on input_features,target_features and t_mark,pos_mark",
+        "enc_in enc_mark_in, and c_out is set automatically based on "
+        "input_features,target_features and t_mark,pos_mark"
     )
-    args.num_experts = 1 * (args.mean_expert) + 1 * (args.weight_expert) + 1 * (args.max_expert) + 1 * (args.min_expert) + 1 * (args.diffusion_expert)
+    args.num_experts = sum(
+        (
+            args.mean_expert,
+            args.weight_expert,
+            args.max_expert,
+            args.min_expert,
+            args.diffusion_expert,
+        )
+    )
     return args
 
 

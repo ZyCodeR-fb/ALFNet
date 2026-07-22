@@ -10,11 +10,10 @@ from torch import nn
 
 from args import initialize_args
 from data_provider.data_factory import data_provider
-from experiments import async_lifecycle_inference, inference_model, train_model
-from model.regist_model import model_dict
+from experiments import async_lifecycle_inference, train_model
+from model.regist_model import load_model_class
 from utils.evaluation import MSEPinballLoss, MultiPinBallLoss, SlitPhyLoss, masked_gaussian_nll_loss, rmse_loss
 from utils.logtool import print_config, print_header, print_train, set_wandb
-from utils.report_results import load_prediction, report_error
 
 
 MAX_EXP_ID_COMPONENT_LEN = 250
@@ -61,10 +60,6 @@ def _build_train_signature(args):
         "num_used_experts": args.num_used_experts,
         "expert_bits": expert_bits,
         "train_init_checkpoint_path": warm_start_path,
-        "lifecycle_aas_loss_weight": args.lifecycle_aas_loss_weight,
-        "lifecycle_nas_loss_weight": args.lifecycle_nas_loss_weight,
-        "lifecycle_vs_loss_weight": args.lifecycle_vs_loss_weight,
-        "lifecycle_fs_loss_weight": args.lifecycle_fs_loss_weight,
     }
     signature_hash = hashlib.md5(json.dumps(signature_payload, sort_keys=True).encode("utf-8")).hexdigest()[:8]
     readable = (
@@ -113,30 +108,16 @@ def build_exp_id(args):
     if args.model_recipe != "base":
         exp_prefix = f"{exp_prefix}-recipe-{args.model_recipe}"
 
-    use_lifecycle_train_prefix = args.train_for_async_lifecycle or (
-        args.test_for_async_lifecycle
-        and (
-            args.lifecycle_role_features
-            or args.lifecycle_history_age_feature
-            or args.lifecycle_training_strategy != "v1"
-            or args.lifecycle_keep_random_mask
-        )
+    use_lifecycle_train_prefix = (
+        args.train_for_async_lifecycle or args.test_for_async_lifecycle
     )
     if use_lifecycle_train_prefix:
-        strategy_prefix = "" if args.lifecycle_training_strategy == "v1" else f"strategy-{args.lifecycle_training_strategy}-"
         exp_prefix = (
             f"{exp_prefix}-lifecycle_train-"
-            f"{strategy_prefix}"
-            f"sampling-{args.lifecycle_event_sampling}-"
+            f"strategy-{args.lifecycle_training_strategy}-"
             f"role-{int(args.lifecycle_role_features)}-"
             f"age-{int(args.lifecycle_history_age_feature)}-"
-            f"randmask-{int(args.lifecycle_keep_random_mask)}"
-        )
-    elif args.lifecycle_role_features or args.lifecycle_history_age_feature:
-        exp_prefix = (
-            f"{exp_prefix}-lifecycle_input-"
-            f"role-{int(args.lifecycle_role_features)}-"
-            f"age-{int(args.lifecycle_history_age_feature)}"
+            f"mask-{int(args.lifecycle_observation_mask_feature)}"
         )
     return _shorten_exp_id_component(f"{exp_prefix}-{exp_id}")
 
@@ -150,9 +131,10 @@ def _validate_checkpoint_compatibility(checkpoint, args):
         "raw_enc_in": args.raw_enc_in,
         "c_out": args.c_out,
         "lifecycle_training_strategy": args.lifecycle_training_strategy,
-        "lifecycle_keep_random_mask": args.lifecycle_keep_random_mask,
         "lifecycle_role_features": args.lifecycle_role_features,
         "lifecycle_history_age_feature": args.lifecycle_history_age_feature,
+        "lifecycle_observation_mask_feature": args.lifecycle_observation_mask_feature,
+        "lifecycle_age_mode": args.lifecycle_age_mode,
     }
     mismatches = []
     for key, expected in expected_pairs.items():
@@ -185,96 +167,25 @@ def _validate_checkpoint_shape_compatibility(checkpoint, args):
 
 
 def _load_model_state(model, loaded, args, validator):
-    if isinstance(loaded, dict) and "state_dict" in loaded:
-        validator(loaded, args)
-        state_dict = _patch_compatible_state_dict(model, loaded["state_dict"])
-        model.load_state_dict(state_dict)
-        return model
-    return loaded
-
-
-def _patch_compatible_state_dict(model, state_dict):
-    model_state = model.state_dict()
-    compatible_state = dict(state_dict)
-    optional_runtime_buffers = {
-        "graph_recovery_expert_role_scale",
-        "role_residual_scale",
-        "role_graph_prior",
-        "role_graph_alpha_floor",
-    }
-    for key in optional_runtime_buffers:
-        if key not in compatible_state and key in model_state:
-            compatible_state[key] = model_state[key]
-    return compatible_state
-
-
-def _checkpoint_files(checkpoint_dir):
-    return [
-        os.path.join(checkpoint_dir, "best_val_checkpoint.pth"),
-        os.path.join(checkpoint_dir, "best_train_checkpoint.pth"),
-        os.path.join(checkpoint_dir, "best_test_checkpoint.pth"),
-    ]
+    if not isinstance(loaded, dict) or "state_dict" not in loaded:
+        raise TypeError("Checkpoint must be a state_dict payload produced by the LCBT v2 trainer")
+    validator(loaded, args)
+    model.load_state_dict(loaded["state_dict"])
+    return model
 
 
 def _select_checkpoint_file(checkpoint_dir):
-    for checkpoint_file in _checkpoint_files(checkpoint_dir):
-        if os.path.exists(checkpoint_file):
-            return checkpoint_file
-    return None
-
-
-def _exp_id_without_cfg_hash(exp_id):
-    marker_index = exp_id.rfind("-cfg")
-    if marker_index == -1:
-        return exp_id
-    return exp_id[:marker_index]
-
-
-def _compatible_checkpoint_prefixes(args):
-    base_prefix = _exp_id_without_cfg_hash(args.exp_id)
-    return [base_prefix]
-
-
-def _find_compatible_checkpoint_dir(args, requested_checkpoint_dir):
-    root_dir = args.best_checkpoint_path
-    if not os.path.isdir(root_dir):
-        return None
-
-    requested_checkpoint_dir = os.path.normpath(requested_checkpoint_dir)
-    prefixes = _compatible_checkpoint_prefixes(args)
-    candidates = []
-    for dirname in os.listdir(root_dir):
-        checkpoint_dir = os.path.join(root_dir, dirname)
-        if not os.path.isdir(checkpoint_dir):
-            continue
-        if os.path.normpath(checkpoint_dir) == requested_checkpoint_dir:
-            continue
-        checkpoint_file = _select_checkpoint_file(checkpoint_dir)
-        if checkpoint_file is None:
-            continue
-        if not any(dirname.startswith(prefix) for prefix in prefixes):
-            continue
-        candidates.append((os.path.getmtime(checkpoint_file), checkpoint_dir, checkpoint_file))
-
-    if not candidates:
-        return None
-    candidates.sort(reverse=True)
-    return candidates[0][1]
+    checkpoint_file = os.path.join(checkpoint_dir, "best_val_checkpoint.pth")
+    return checkpoint_file if os.path.exists(checkpoint_file) else None
 
 
 def _load_checkpoint_from_dir(args, checkpoint_dir):
     checkpoint_file = _select_checkpoint_file(checkpoint_dir)
     if checkpoint_file is None:
-        fallback_dir = _find_compatible_checkpoint_dir(args, checkpoint_dir)
-        if fallback_dir is not None:
-            print(f"-> Current exp_id checkpoint not found: {checkpoint_dir}")
-            print(f"-> Use compatible checkpoint directory: {fallback_dir}")
-            checkpoint_dir = fallback_dir
-            checkpoint_file = _select_checkpoint_file(checkpoint_dir)
-
-    if checkpoint_file is None:
-        expected_files = ", ".join(_checkpoint_files(checkpoint_dir))
-        raise FileNotFoundError(f"No checkpoint file found. Expected one of: {expected_files}")
+        raise FileNotFoundError(
+            f"No LCBT v2 validation checkpoint found at "
+            f"{os.path.join(checkpoint_dir, 'best_val_checkpoint.pth')}"
+        )
 
     checkpoint = torch.load(checkpoint_file, weights_only=False)
     print(f"├── load pretrained from {checkpoint_dir}/")
@@ -323,69 +234,6 @@ def load_pretrained_model(model, args):
     return model, checkpoint_dir + os.sep
 
 
-def _safe_pretrained_snapshot_path(args):
-    os.makedirs("./pretrained", exist_ok=True)
-    exp_hash = hashlib.md5(args.exp_id.encode("utf-8")).hexdigest()[:12]
-    variant = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in args.model_variant)
-    filename = f"{args.model}-{variant}-cfg{exp_hash}.pth"
-    if len(filename) > 160:
-        filename = f"{args.model}-cfg{exp_hash}.pth"
-    return os.path.join("./pretrained", filename)
-
-
-def _pretrained_snapshot_payload(pretrained, args):
-    if isinstance(pretrained, nn.Module):
-        return {
-            "state_dict": pretrained.state_dict(),
-            "config": {
-                "model": args.model,
-                "model_variant": args.model_variant,
-                "model_recipe": args.model_recipe,
-                "exp_id": args.exp_id,
-                "d_model": args.d_model,
-                "k_hop": args.k_hop,
-                "input_len": args.input_len,
-                "pred_len": args.pred_len,
-                "look_back": args.look_back,
-                "slide_step": args.slide_step,
-                "enc_in": args.enc_in,
-                "raw_enc_in": args.raw_enc_in,
-                "c_out": args.c_out,
-                "lifecycle_training_strategy": args.lifecycle_training_strategy,
-                "lifecycle_keep_random_mask": args.lifecycle_keep_random_mask,
-                "lifecycle_role_features": args.lifecycle_role_features,
-                "lifecycle_history_age_feature": args.lifecycle_history_age_feature,
-                "lifecycle_observation_mask_feature": getattr(
-                    args,
-                    "lifecycle_observation_mask_feature",
-                    False,
-                ),
-                "lifecycle_age_mode": getattr(
-                    args,
-                    "lifecycle_age_mode",
-                    "legacy_cumulative",
-                ),
-                "lce_protocol_version": getattr(args, "lce_protocol_version", 0),
-                "ples_protocol_version": getattr(args, "ples_protocol_version", 1),
-            },
-            "model_class": pretrained.__class__.__name__,
-            "model_module": pretrained.__class__.__module__,
-        }
-    return pretrained
-
-
-def save_pretrained_snapshot(pretrained, args):
-    snapshot_path = _safe_pretrained_snapshot_path(args)
-    try:
-        torch.save(_pretrained_snapshot_payload(pretrained, args), snapshot_path)
-        with open(snapshot_path + ".exp_id.txt", "w", encoding="utf-8") as fp:
-            fp.write(args.exp_id + "\n")
-        print(f"-> Saved pretrained state snapshot to {snapshot_path}")
-    except Exception as exc:
-        print(f"-> Skip pretrained snapshot save to {snapshot_path}: {exc}")
-        print(f"   Best checkpoints remain available under {args.best_checkpoint_path}")
-
-
 def initialize_training_from_checkpoint(model, args):
     if args.train_init_checkpoint_path is None:
         return model
@@ -409,8 +257,8 @@ if __name__ == "__main__":
     )
     loss = loss_candidate[args.loss]
     criterions = dict(zip([args.loss, "split_phy_loss"], [loss, SlitPhyLoss(features=args.target_features)]))
-    model = model_dict[args.model].Model(args).float()
-    if not (args.test_for_async_lifecycle or args.test_for_changed or args.inference_only):
+    model = load_model_class(args.model)(args).float()
+    if not args.test_for_async_lifecycle:
         model = initialize_training_from_checkpoint(model, args)
     model_parameters = filter(lambda p: p.requires_grad, model.parameters())
     args.num_params = sum([np.prod(p.size()) for p in model_parameters])
@@ -422,8 +270,6 @@ if __name__ == "__main__":
     print_train(args)
 
     if args.test_for_async_lifecycle:
-        if args.test_for_shockwave:
-            print("Note: --mode test_shockwave is a compatibility alias for --mode test_async.")
         model, args.best_checkpoint_path = load_pretrained_model(model, args)
         args.slide_step = 1
         test_loader = data_provider(args, "test")
@@ -438,45 +284,26 @@ if __name__ == "__main__":
         async_lifecycle_inference(model, test_loader, args, criterions)
         exit()
 
-    if args.test_for_changed or args.inference_only:
-        model, args.best_checkpoint_path = load_pretrained_model(model, args)
-        args.slide_step = 12
-        test_loader = data_provider(args, "test")
-        print(f"├── test  data dim: {len(test_loader.dataset)}")  # type: ignore
-        model.to(args.device).float()
-        inference_model(model, test_loader, args, criterions)
-        exit()
-
     slide_step = args.slide_step
     args.slide_step = 1  # use 1 for train to collect more data
     train_loader = data_provider(args, "train")
     args.slide_step = slide_step
     val_loader = data_provider(args, "val")
-    is_lcbt = args.lifecycle_training_strategy in {"lcbt_v1", "lcbt_v2"}
-    if is_lcbt:
-        data_loaders = {"train": train_loader, "val": val_loader}
-        test_loader = None
-    else:
-        test_loader = data_provider(args, "test")
-        data_loaders = {
-            "train": train_loader,
-            "val": val_loader,
-            "test": test_loader,
-        }
+    data_loaders = {"train": train_loader, "val": val_loader}
     optimizers = {"adamw": torch.optim.AdamW, "adam": torch.optim.Adam, "sgd": torch.optim.SGD}
     optimizer_params = model.get_optimizer_param_groups(args.lr) if hasattr(model, "get_optimizer_param_groups") else model.parameters()
     optimizer = optimizers[args.optimizer](optimizer_params, lr=args.lr, weight_decay=args.weight_decay)
-    schdulers = {
+    schedulers = {
         "cosine": torch.optim.lr_scheduler.CosineAnnealingLR,
         "step": torch.optim.lr_scheduler.StepLR,
         "plateau": torch.optim.lr_scheduler.ReduceLROnPlateau,
     }
     if args.scheduler == "plateau":
-        scheduler = schdulers[args.scheduler](optimizer, mode="min", factor=0.5, min_lr=1e-5, patience=args.scheduler_patience)
+        scheduler = schedulers[args.scheduler](optimizer, mode="min", factor=0.5, min_lr=1e-5, patience=args.scheduler_patience)
     elif args.scheduler == "cosine":
-        scheduler = schdulers[args.scheduler](optimizer, T_max=5, eta_min=1e-7)
+        scheduler = schedulers[args.scheduler](optimizer, T_max=5, eta_min=1e-7)
     elif args.scheduler == "step":
-        scheduler = schdulers[args.scheduler](
+        scheduler = schedulers[args.scheduler](
             optimizer,
             step_size=args.scheduler_patience,
             gamma=0.5,
@@ -489,17 +316,9 @@ if __name__ == "__main__":
                 pass
 
         scheduler = NullScheduler()
-    if args.verbose:
-        print_header("*** Model Configurations ***")
-        print(model)
-    print_header("*** Experiment Configurations *** ")
-    print_config(configs)
-    print_train(args)
     print(f"├── train data dim: {len(train_loader.dataset)}")  # type: ignore
     print(f"├── val   data dim: {len(val_loader.dataset)}")  # type: ignore
-    if test_loader is not None:
-        print(f"└── test  data dim: {len(test_loader.dataset)}")  # type: ignore
-    pretrained = train_model(
+    train_model(
         model=model,
         optimizer=optimizer,
         scheduler=scheduler,
@@ -508,11 +327,4 @@ if __name__ == "__main__":
         args=args,
         wandb=wandb,
     )
-    if args.save_model:
-        save_pretrained_snapshot(pretrained, args)
-
-    if not is_lcbt:
-        path = f"{args.best_prediction_path}best_total_y.pkl"
-        y_pred, y, AAS, VS, FS, NAS = load_prediction(path, "val")
-        report_error(y_pred, y, AAS, VS, FS, NAS, f"{args.model}-{args.dloader_name}", "./reports.csv")
     print("-> Done!")

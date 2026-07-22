@@ -3,268 +3,151 @@ from torch import nn
 
 from layers.DCRNNCell import DCRNNCell
 from layers.gnn import calculate_random_walk_matrix
-from layers.source_grin import GRINInputImputer
-
-
-def _build_recurrent_cell(cell_type, input_size, hidden_size, k):
-    cell_type = str(cell_type).lower()
-    if cell_type not in {"dcrnn", "dcgru", "graph_gru"}:
-        raise ValueError(
-            f"ALFGraph only retains the final DCRNN cell, got cell_type={cell_type}."
-        )
-    return DCRNNCell(input_size, hidden_size, k)
 
 
 class Encoder(nn.Module):
 
-    def __init__(self, input_size, hidden_size, num_layers, k=2, cell_type="dcrnn"):
-        super(Encoder, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.rnn_cells = nn.ModuleList([
-            _build_recurrent_cell(
-                cell_type,
-                input_size if i == 0 else hidden_size,
-                hidden_size,
-                k,
-            )
-            for i in range(num_layers)
-        ])
+    def __init__(self, input_size, hidden_size, num_layers, k):
+        super().__init__()
+        self.hidden_size = int(hidden_size)
+        self.num_layers = int(num_layers)
+        self.cells = nn.ModuleList(
+            [
+                DCRNNCell(
+                    input_size if layer == 0 else hidden_size,
+                    hidden_size,
+                    k,
+                )
+                for layer in range(num_layers)
+            ]
+        )
 
-    def forward(self, x, A_q, A_h, h0=None):
-        batch_size, seq_len, num_nodes, _ = x.size()
-        if h0 is None:
-            h0 = torch.zeros(
-                self.num_layers,
-                batch_size,
-                num_nodes,
-                self.hidden_size,
-                device=x.device,
-            )
-
-        hidden_state = h0
-        for t in range(seq_len):
-            states = []
-            layer_input = x[:, t, :, :]
-            for layer_idx in range(self.num_layers):
-                next_hidden = self.rnn_cells[layer_idx](
+    def forward(self, sequence, forward_support, backward_support):
+        batch, steps, nodes, _ = sequence.shape
+        hidden = torch.zeros(
+            self.num_layers,
+            batch,
+            nodes,
+            self.hidden_size,
+            device=sequence.device,
+            dtype=sequence.dtype,
+        )
+        for step in range(steps):
+            layer_input = sequence[:, step]
+            next_states = []
+            for layer, cell in enumerate(self.cells):
+                layer_input = cell(
                     layer_input,
-                    hidden_state[layer_idx],
-                    A_q,
-                    A_h,
+                    hidden[layer],
+                    forward_support,
+                    backward_support,
                 )
-                layer_input = next_hidden
-                states.append(next_hidden)
-            hidden_state = torch.stack(states, dim=0)
-        return hidden_state
+                next_states.append(layer_input)
+            hidden = torch.stack(next_states, dim=0)
+        return hidden
 
 
-class Decoder(nn.Module):
+class ResidualDeltaDecoder(nn.Module):
 
-    def __init__(
-        self,
-        input_size,
-        hidden_size,
-        out_seq_len,
-        output_size=None,
-        num_layers=1,
-        k=2,
-        cell_type="dcrnn",
-        output_mode="direct",
-        residual_scale=1.0,
-    ):
-        super(Decoder, self).__init__()
-        self.input_size = input_size
-        self.output_size = input_size if output_size is None else output_size
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.out_seq_len = out_seq_len
-        self.output_mode = str(output_mode).lower()
-        self.residual_scale = float(residual_scale)
-        self.rnn_cells = nn.ModuleList([
-            _build_recurrent_cell(
-                cell_type,
-                input_size if i == 0 else hidden_size,
-                hidden_size,
-                k,
-            )
-            for i in range(num_layers)
-        ])
-        self.fc = nn.Linear(hidden_size, self.output_size)
+    def __init__(self, output_size, hidden_size, num_layers, out_steps, k, scale):
+        super().__init__()
+        self.output_size = int(output_size)
+        self.num_layers = int(num_layers)
+        self.out_steps = int(out_steps)
+        self.scale = float(scale)
+        self.cells = nn.ModuleList(
+            [
+                DCRNNCell(
+                    output_size if layer == 0 else hidden_size,
+                    hidden_size,
+                    k,
+                )
+                for layer in range(num_layers)
+            ]
+        )
+        self.projection = nn.Linear(hidden_size, output_size)
 
     def forward(
         self,
         initial_input,
-        h,
-        A_q,
-        A_h,
+        hidden,
+        forward_support,
+        backward_support,
         teacher_input,
-        teacher_forcing_ratio=0.5,
+        teacher_forcing_ratio,
     ):
-        input_at_t = initial_input
-        outputs = [None for _ in range(self.out_seq_len)]
-        for t in range(self.out_seq_len):
-            decoder_input = input_at_t
-            states = []
-            for layer_idx in range(self.num_layers):
-                next_hidden = self.rnn_cells[layer_idx](
-                    input_at_t,
-                    h[layer_idx],
-                    A_q,
-                    A_h,
+        current = initial_input
+        outputs = []
+        for step in range(self.out_steps):
+            anchor = current
+            next_states = []
+            for layer, cell in enumerate(self.cells):
+                current = cell(
+                    current,
+                    hidden[layer],
+                    forward_support,
+                    backward_support,
                 )
-                input_at_t = next_hidden
-                states.append(next_hidden)
-            h = torch.stack(states, dim=0)
-            raw_output = self.fc(next_hidden)
-            if self.output_mode in {"residual_delta", "delta", "residual"}:
-                output = (
-                    decoder_input[..., :self.output_size]
-                    + self.residual_scale * raw_output
-                )
-            else:
-                output = raw_output
-            outputs[t] = output
-            use_teacher_forcing = (
-                torch.rand(1).item() < teacher_forcing_ratio and self.training
-            )
-            input_at_t = teacher_input[:, t] if use_teacher_forcing else output
+                next_states.append(current)
+            hidden = torch.stack(next_states, dim=0)
+            output = anchor[..., :self.output_size] + self.scale * self.projection(current)
+            outputs.append(output)
+            use_teacher = self.training and torch.rand(1).item() < teacher_forcing_ratio
+            current = teacher_input[:, step] if use_teacher else output
         return torch.stack(outputs, dim=1)
-
-
-class Seq2Seq(nn.Module):
-
-    def __init__(
-        self,
-        enc_input_size,
-        dec_input_size,
-        hidden_size,
-        num_layers,
-        out_seq_len,
-        k=2,
-        cell_type="dcrnn",
-        encoder_cell_type=None,
-        decoder_cell_type=None,
-        decoder_output_mode="direct",
-        decoder_residual_scale=1.0,
-    ):
-        super(Seq2Seq, self).__init__()
-        encoder_cell_type = (
-            cell_type if encoder_cell_type is None else encoder_cell_type
-        )
-        decoder_cell_type = (
-            cell_type if decoder_cell_type is None else decoder_cell_type
-        )
-        self.encoder = Encoder(
-            enc_input_size,
-            hidden_size,
-            num_layers,
-            k,
-            cell_type=encoder_cell_type,
-        )
-        self.decoder = Decoder(
-            dec_input_size,
-            hidden_size,
-            out_seq_len,
-            output_size=dec_input_size,
-            num_layers=num_layers,
-            k=k,
-            cell_type=decoder_cell_type,
-            output_mode=decoder_output_mode,
-            residual_scale=decoder_residual_scale,
-        )
-
-    def forward(
-        self,
-        x_enc,
-        x_dec,
-        A_q,
-        A_h,
-        initial_input,
-        teacher_forcing_ratio=0.5,
-    ):
-        hidden = self.encoder(x_enc, A_q, A_h)
-        return self.decoder(
-            initial_input,
-            hidden,
-            A_q,
-            A_h,
-            x_dec,
-            teacher_forcing_ratio,
-        )
 
 
 class Model(nn.Module):
 
     def __init__(self, configs):
-        super(Model, self).__init__()
-        self.out_len = configs.pred_len if configs.pred_len > 0 else configs.look_back
-        self.output_dim = configs.c_out
-        recipe_cfg = (getattr(configs, "model_family_cfg", {}) or {}).get(
-            "recipe", {}
+        super().__init__()
+        if not configs.lifecycle_observation_mask_feature:
+            raise ValueError("ALFGraph requires the explicit observation-mask channel")
+        recipe = (getattr(configs, "model_family_cfg", {}) or {}).get("recipe", {})
+        if bool(recipe.get("use_grin_input_imputer", False)):
+            raise ValueError("rf_l2s uses one shared GRIN in ALFNet, not inside ALFGraph")
+        output_steps = configs.pred_len if configs.pred_len > 0 else configs.look_back
+        backbone_input = int(configs.enc_in) - 1
+        self.output_dim = int(configs.c_out)
+        self.encoder = Encoder(
+            backbone_input,
+            configs.d_model,
+            configs.e_layers,
+            configs.k_hop,
         )
-        self.use_grin_input_imputer = bool(
-            recipe_cfg.get("use_grin_input_imputer", False)
-        )
-
-        # Keep these names stable so existing rf_alf_sd checkpoints load unchanged.
-        self.data_pre = (
-            GRINInputImputer(configs, recipe_cfg)
-            if self.use_grin_input_imputer
-            else None
-        )
-        self.raw_enc_in = getattr(configs, "raw_enc_in", configs.enc_in)
-        self.lifecycle_observation_mask_feature = bool(
-            getattr(configs, "lifecycle_observation_mask_feature", False)
-        )
-        backbone_enc_in = int(configs.enc_in) - int(
-            self.lifecycle_observation_mask_feature
-        )
-        self.current_node_ids = None
-        cell_type = recipe_cfg.get(
-            "cell_type", recipe_cfg.get("mogernn_cell_type", "dcrnn")
-        )
-        encoder_cell_type = recipe_cfg.get(
-            "encoder_cell_type", recipe_cfg.get("mogernn_encoder_cell_type", None)
-        )
-        decoder_cell_type = recipe_cfg.get(
-            "decoder_cell_type", recipe_cfg.get("mogernn_decoder_cell_type", None)
-        )
-        self.seq2seq = Seq2Seq(
-            backbone_enc_in,
+        self.decoder = ResidualDeltaDecoder(
             configs.c_out,
             configs.d_model,
             configs.e_layers,
-            self.out_len,
+            output_steps,
             configs.k_hop,
-            cell_type=cell_type,
-            encoder_cell_type=encoder_cell_type,
-            decoder_cell_type=decoder_cell_type,
-            decoder_output_mode=recipe_cfg.get("decoder_output_mode", "direct"),
-            decoder_residual_scale=float(
-                recipe_cfg.get("decoder_residual_scale", 1.0)
-            ),
+            recipe.get("decoder_residual_scale", 0.3),
         )
 
     def set_current_node_ids(self, node_ids):
-        # Retained for the common expert wrapper; the final graph has fixed support.
-        self.current_node_ids = node_ids
+        return None
 
-    def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, *args):
-        x_dec = args[0]
-        A_q = calculate_random_walk_matrix(adj)
-        A_h = calculate_random_walk_matrix(adj.T)
-        if self.data_pre is not None:
-            x_enc = self.data_pre(adj, x_enc, x_t_mark, pos_mark)
-            x_enc = self.data_pre.without_observation_mask(x_enc)
-        epoch = args[-1]
-        teacher_forcing_ratio = 1 - (epoch / 40)
-        initial_input = x_enc[:, -1, :, :self.output_dim]
-        return self.seq2seq(
-            x_enc,
-            x_dec,
-            A_q,
-            A_h,
+    def forward(
+        self,
+        adjacency,
+        x_enc,
+        x_t_mark=None,
+        pos_mark=None,
+        x_dec=None,
+        dec_t_mark=None,
+        epoch=0,
+    ):
+        forward_support = calculate_random_walk_matrix(adjacency)
+        backward_support = calculate_random_walk_matrix(adjacency.T)
+        backbone_input = x_enc[..., :-1]
+        hidden = self.encoder(backbone_input, forward_support, backward_support)
+        initial_input = backbone_input[:, -1, :, :self.output_dim]
+        teacher_forcing_ratio = 1.0 - float(epoch) / 40.0
+        return self.decoder(
             initial_input,
+            hidden,
+            forward_support,
+            backward_support,
+            x_dec,
             teacher_forcing_ratio,
         )

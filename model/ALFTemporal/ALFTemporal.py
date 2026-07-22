@@ -62,13 +62,7 @@ def _build_spatial_layout(
     adj,
     recur_times,
     spa_patchsize,
-    layout_type="kd_tree",
 ):
-    if str(layout_type).lower() not in {"kd_tree", "kdtree", "position"}:
-        raise ValueError(
-            "ALFTemporal only retains the final KDTree spatial layout, "
-            f"got spatial_layout={layout_type}."
-        )
     parts_idx = _kd_tree(positions.T, int(recur_times), 0)
     ori_parts_idx, reo_parts_idx, reo_all_idx = _reorder_data(
         parts_idx,
@@ -93,8 +87,6 @@ class Model(nn.Module):
         self.known_nodes = list(self.cfg["known_nodes"])
         self.output_dim = configs.c_out
 
-        if bool(model_cfg.get("use_revin", False)):
-            raise ValueError("ALFTemporal no longer includes the failed PatchRevIN variant.")
         full_adj = load_project_adjacency(
             {"data_path": configs.data_path}
         ).cpu().numpy()
@@ -105,7 +97,6 @@ class Model(nn.Module):
                 full_adj,
                 int(model_cfg["recur_times"]),
                 int(model_cfg["spa_patchsize"]),
-                model_cfg.get("spatial_layout", "kd_tree"),
             )
         )
         self.ori_parts_idx = ori_parts_idx
@@ -119,21 +110,6 @@ class Model(nn.Module):
                 "PatchSTG requires tem_patchsize * tem_patchnum == pred_len "
                 "under the current adapter"
             )
-        if str(model_cfg.get("attention_type", "")).lower() not in {
-            "crossformer_tsa",
-            "crossformer",
-            "tsa",
-        }:
-            raise ValueError(
-                "ALFTemporal requires attention_type=crossformer_tsa after "
-                "final-model cleanup."
-            )
-        if not bool(model_cfg.get("use_timefilter_patch_mixer", False)):
-            raise ValueError(
-                "ALFTemporal requires use_timefilter_patch_mixer=true after "
-                "final-model cleanup."
-            )
-
         self.backbone = PatchSTGBackbone(
             tem_patchsize=tem_patchsize,
             tem_patchnum=tem_patchnum,
