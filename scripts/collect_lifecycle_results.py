@@ -6,8 +6,17 @@ from collections import OrderedDict
 from pathlib import Path
 
 
-MAIN_ORDER = ("Unseen", "Steady", "Join", "Fault", "LifeAvg")
-PHASE_ORDER = ("Cold", "Warm", "Ready", "Onset", "Decay", "Outage")
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from data_provider.ples_protocol import (  # noqa: E402
+    MAIN_TABLE_ROWS as MAIN_ORDER,
+    PHASE_ORDER,
+)
+
 METRICS = ("MAPE", "MAE", "RMSE")
 HASH_FIELDS = (
     "protocol_hash",
@@ -32,8 +41,8 @@ def _load_run(result_dir):
         result_dir = result_dir.parent
     main = _read_json(result_dir / "lce_main_summary.json")
     phases = _read_json(result_dir / "lce_phase_summary.json")
-    if int(main.get("schema_version", 0)) != 2 or int(phases.get("schema_version", 0)) != 2:
-        raise ValueError(f"LCE aggregation only accepts lifecycle protocol v2 outputs: {result_dir}")
+    if int(main.get("schema_version", 0)) != 3 or int(phases.get("schema_version", 0)) != 3:
+        raise ValueError(f"LCE aggregation only accepts lifecycle protocol v3 outputs: {result_dir}")
     for field in HASH_FIELDS + PROVENANCE_FIELDS + (
         "model",
         "model_variant",
@@ -133,7 +142,7 @@ def aggregate_results(result_dirs, expected_seeds=(32, 42, 52)):
         return rows
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "table": "LCE v3 three-seed mean and sample standard deviation",
         "dataset": runs[0]["dataset"],
         **runs[0]["hashes"],

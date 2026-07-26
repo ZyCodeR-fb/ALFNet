@@ -547,7 +547,8 @@ def main():
 
     print(f"PairedBootstrap: {run_a['model']}({run_a['model_variant']}) vs {run_b['model']}({run_b['model_variant']})")
     print(f"  seed={run_a['seed']} | rows={len(rows_a)} | origins={len(tensor_a.origin_ids)} "
-          f"| units={len(tensor_a.unit_rows)} | regimes={tensor_a.regimes}")
+          f"| day-blocks={len(tensor_a.block_rows)} | cohorts={tensor_a.cohort_ids} "
+          f"| strata={len(tensor_a.regimes)}")
     print(f"  protocol_hash={run_a['hashes']['protocol_hash']}")
     print(f"  training_protocol_hash={run_a['hashes']['training_protocol_hash']}")
     print(f"  PreEventCheck: identical treated/control sums on {pre_a}/{pre_b} pre-event rows")
@@ -564,7 +565,13 @@ def main():
     for record, value in zip(family, adjusted):
         record["p_holm_primary"] = value
 
-    output_dir = Path(args.output_dir) / f"{run_a['model']}-vs-{run_b['model']}-seed{run_a['seed']}"
+    # Two arms of the same model differ only in their config hash, so the model
+    # name alone let one comparison silently overwrite another.
+    def _tag(run):
+        suffix = run["result_dir"].replace("\\", "/").split("/")[-2]
+        return f"{run['model']}-{suffix.split('-cfg')[-1]}" if "-cfg" in suffix else run["model"]
+
+    output_dir = Path(args.output_dir) / f"{_tag(run_a)}-vs-{_tag(run_b)}-seed{run_a['seed']}"
     output_dir.mkdir(parents=True, exist_ok=True)
     fieldnames = ["table", "row", "metric", run_a["model"], run_b["model"], "delta",
                   "ci_low", "ci_high", "p_bootstrap", "p_holm_primary", "lower_is_better", "verdict"]

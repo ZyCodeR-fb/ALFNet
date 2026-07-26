@@ -30,7 +30,7 @@ def _write_run(
     run_dir = root / f"{model}-{seed}"
     run_dir.mkdir(parents=True, exist_ok=True)
     common = {
-        "schema_version": 2,
+        "schema_version": 3,
         "protocol_hash": protocol_hash,
         "training_protocol_hash": "training-v2",
         "required_training_protocol_hash": "training-v2",
@@ -50,6 +50,7 @@ def _write_run(
             "Join": 10.0,
             "Fault": 11.0,
             "LifeAvg": 11.5,
+            "WorstGroup": 16.0,
         }.items()
     }
     phases = {
