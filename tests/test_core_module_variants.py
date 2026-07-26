@@ -152,7 +152,9 @@ def test_family_override_sweeps_one_leaf_without_touching_the_config():
     from args import _add_arguments, _load_config_payload, finalize_args
     from main import build_exp_id
 
-    path = str(ROOT / "configs/ALFNet/rf_l3s.yaml")
+    config_path = ROOT / "configs/ALFNet/rf_l3s.yaml"
+    path = str(config_path)
+    before = config_path.read_bytes()
 
     def _load(*overrides):
         parser = argparse.ArgumentParser()
@@ -163,6 +165,9 @@ def test_family_override_sweeps_one_leaf_without_touching_the_config():
         args.model_family_cfg = family
         return finalize_args(args)
 
+    baseline = _load().model_family_cfg["recipe"]["patch_residual_role_scale"]
+    untouched = {key: baseline[key] for key in ("aas", "vs", "fs")}
+
     budgets, exp_ids = {}, set()
     for value in ("0.10", "0.20", "0.35"):
         args = _load("--family_override", f"recipe.patch_residual_role_scale.nas={value}")
@@ -170,15 +175,13 @@ def test_family_override_sweeps_one_leaf_without_touching_the_config():
         exp_ids.add(build_exp_id(args))
 
     assert [budgets[v]["nas"] for v in ("0.10", "0.20", "0.35")] == [0.10, 0.20, 0.35]
-    # Only nas moves; every other role budget is untouched.
-    for value, scale in budgets.items():
-        assert (scale["aas"], scale["vs"], scale["fs"]) == (0.20, 0.00, 0.35)
+    # Only nas moves; every other role budget keeps whatever the config holds.
+    for scale in budgets.values():
+        assert {key: scale[key] for key in ("aas", "vs", "fs")} == untouched
     # Distinct experiment directories, so parallel arms cannot overwrite one another.
     assert len(exp_ids) == 3
-    # And the file on disk is never edited.
-    assert _read_yaml("configs/ALFNet/rf_l3s.yaml")["family"]["recipe"][
-        "patch_residual_role_scale"
-    ]["nas"] == 0.20
+    # The override lives in memory: the file on disk is byte-identical afterwards.
+    assert config_path.read_bytes() == before
 
     with pytest.raises(ValueError, match="refusing to invent"):
         _load("--family_override", "recipe.no_such_knob=1")
