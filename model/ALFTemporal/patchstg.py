@@ -210,6 +210,7 @@ class PatchSTG(nn.Module):
         ori_parts_idx,
         reo_parts_idx,
         reo_all_idx,
+        input_channels=3,
         crossformer_router_factor=4,
         crossformer_dropout=0.1,
         timefilter_n_heads=4,
@@ -227,8 +228,12 @@ class PatchSTG(nn.Module):
         self.tod, self.dow = tod, dow
         dims = input_dims + tod_dims + dow_dims + node_dims
 
+        # Signal channels plus the two normalised calendar channels appended in
+        # embedding(). Widening this convolution is how the lifecycle context
+        # reaches the patch expert; no extra module is introduced.
+        self.input_channels = int(input_channels)
         self.input_st_fc = nn.Conv2d(
-            in_channels=3,
+            in_channels=self.input_channels,
             out_channels=input_dims,
             kernel_size=(1, tem_patchsize),
             stride=(1, tem_patchsize),
@@ -300,6 +305,11 @@ class PatchSTG(nn.Module):
             te[..., 0:1] / self.tod,
             te[..., 1:2] / self.dow,
         ], dim=-1).float()
+        if input_signal.shape[-1] != self.input_channels:
+            raise ValueError(
+                f"PatchSTG expects {self.input_channels} input channels "
+                f"(signal + 2 calendar), got {input_signal.shape[-1]}"
+            )
         input_data = self.input_st_fc(input_signal.transpose(1, 3)).transpose(1, 3)
         tod_index = te[:, -input_data.shape[1]:, :, 0].long().clamp(
             min=0,

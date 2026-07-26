@@ -3,11 +3,17 @@ from torch import nn
 
 from layers.DCRNNCell import DCRNNCell
 from layers.gnn import calculate_random_walk_matrix
+from layers.lifecycle_moge import (
+    LIFECYCLE_STATE_CHANNELS,
+    SUPPORT_NAMES,
+    LifecycleRoutedGraphConv,
+    build_lifecycle_supports,
+)
 
 
 class Encoder(nn.Module):
 
-    def __init__(self, input_size, hidden_size, num_layers, k):
+    def __init__(self, input_size, hidden_size, num_layers, k, conv_factory=None):
         super().__init__()
         self.hidden_size = int(hidden_size)
         self.num_layers = int(num_layers)
@@ -17,12 +23,13 @@ class Encoder(nn.Module):
                     input_size if layer == 0 else hidden_size,
                     hidden_size,
                     k,
+                    conv_factory,
                 )
                 for layer in range(num_layers)
             ]
         )
 
-    def forward(self, sequence, forward_support, backward_support):
+    def forward(self, sequence, forward_support, backward_support, supports, state_sequence):
         batch, steps, nodes, _ = sequence.shape
         hidden = torch.zeros(
             self.num_layers,
@@ -34,6 +41,9 @@ class Encoder(nn.Module):
         )
         for step in range(steps):
             layer_input = sequence[:, step]
+            # The lifecycle state is per step: a Join node is VS before its
+            # cutoff and NAS after it, so routing follows the event as it lands.
+            step_state = None if state_sequence is None else state_sequence[:, step]
             next_states = []
             for layer, cell in enumerate(self.cells):
                 layer_input = cell(
@@ -41,6 +51,8 @@ class Encoder(nn.Module):
                     hidden[layer],
                     forward_support,
                     backward_support,
+                    supports=supports,
+                    state=step_state,
                 )
                 next_states.append(layer_input)
             hidden = torch.stack(next_states, dim=0)
@@ -49,7 +61,7 @@ class Encoder(nn.Module):
 
 class ResidualDeltaDecoder(nn.Module):
 
-    def __init__(self, output_size, hidden_size, num_layers, out_steps, k, scale):
+    def __init__(self, output_size, hidden_size, num_layers, out_steps, k, scale, conv_factory=None):
         super().__init__()
         self.output_size = int(output_size)
         self.num_layers = int(num_layers)
@@ -61,6 +73,7 @@ class ResidualDeltaDecoder(nn.Module):
                     output_size if layer == 0 else hidden_size,
                     hidden_size,
                     k,
+                    conv_factory,
                 )
                 for layer in range(num_layers)
             ]
@@ -75,6 +88,8 @@ class ResidualDeltaDecoder(nn.Module):
         backward_support,
         teacher_input,
         teacher_forcing_ratio,
+        supports=None,
+        state=None,
     ):
         current = initial_input
         outputs = []
@@ -87,6 +102,8 @@ class ResidualDeltaDecoder(nn.Module):
                     hidden[layer],
                     forward_support,
                     backward_support,
+                    supports=supports,
+                    state=state,
                 )
                 next_states.append(current)
             hidden = torch.stack(next_states, dim=0)
@@ -107,13 +124,47 @@ class Model(nn.Module):
         if bool(recipe.get("use_grin_input_imputer", False)):
             raise ValueError("ALFNet uses one shared GRIN, not an ALFGraph-local GRIN")
         output_steps = configs.pred_len if configs.pred_len > 0 else configs.look_back
-        backbone_input = int(configs.enc_in) - 1
+        # The observation mask stays in: after GRIN it is the only channel that
+        # says whether a value was measured or imputed, which is exactly what the
+        # router needs.
+        backbone_input = int(configs.enc_in)
+        self.raw_enc_in = int(configs.raw_enc_in)
         self.output_dim = int(configs.c_out)
+        self.graph_conv = str(recipe.get("graph_conv", "lifecycle_moge"))
+        if self.graph_conv not in {"lifecycle_moge", "diffusion"}:
+            raise ValueError(f"unsupported ALFGraph graph_conv: {self.graph_conv}")
+        self.routed = self.graph_conv == "lifecycle_moge"
+        self.state_dim = LIFECYCLE_STATE_CHANNELS
+        if self.raw_enc_in + self.state_dim != backbone_input:
+            raise ValueError(
+                f"ALFGraph expects raw({self.raw_enc_in}) + lifecycle({self.state_dim}) "
+                f"channels, but enc_in is {backbone_input}"
+            )
+
+        conv_factory = None
+        if self.routed:
+            num_experts = int(recipe.get("moge_num_experts", len(SUPPORT_NAMES)))
+            top_k = int(recipe.get("moge_top_k", 2))
+            noisy_gating = bool(recipe.get("moge_noisy_gating", True))
+            loss_coef = float(recipe.get("moge_load_balance_coef", 1e-2))
+
+            def conv_factory(in_size, out_size):
+                return LifecycleRoutedGraphConv(
+                    in_size,
+                    out_size,
+                    num_experts=num_experts,
+                    state_dim=self.state_dim,
+                    k=top_k,
+                    noisy_gating=noisy_gating,
+                    loss_coef=loss_coef,
+                )
+
         self.encoder = Encoder(
             backbone_input,
             configs.d_model,
             configs.e_layers,
             configs.k_hop,
+            conv_factory,
         )
         self.decoder = ResidualDeltaDecoder(
             configs.c_out,
@@ -122,10 +173,18 @@ class Model(nn.Module):
             output_steps,
             configs.k_hop,
             recipe.get("decoder_residual_scale", 0.3),
+            conv_factory,
         )
 
     def set_current_node_ids(self, node_ids):
         return None
+
+    def _routed_convs(self):
+        return [
+            module
+            for module in self.modules()
+            if isinstance(module, LifecycleRoutedGraphConv)
+        ]
 
     def forward(
         self,
@@ -139,15 +198,45 @@ class Model(nn.Module):
     ):
         forward_support = calculate_random_walk_matrix(adjacency)
         backward_support = calculate_random_walk_matrix(adjacency.T)
-        backbone_input = x_enc[..., :-1]
-        hidden = self.encoder(backbone_input, forward_support, backward_support)
-        initial_input = backbone_input[:, -1, :, :self.output_dim]
+        supports, state_sequence = None, None
+        if self.routed:
+            supports = build_lifecycle_supports(
+                adjacency,
+                forward_support,
+                backward_support,
+            )
+            state_sequence = x_enc[..., self.raw_enc_in:self.raw_enc_in + self.state_dim]
+            for conv in self._routed_convs():
+                conv.reset_router_stats()
+
+        hidden = self.encoder(
+            x_enc,
+            forward_support,
+            backward_support,
+            supports,
+            state_sequence,
+        )
+        initial_input = x_enc[:, -1, :, :self.output_dim]
         teacher_forcing_ratio = 1.0 - float(epoch) / 40.0
-        return self.decoder(
+        prediction = self.decoder(
             initial_input,
             hidden,
             forward_support,
             backward_support,
             x_dec,
             teacher_forcing_ratio,
+            supports,
+            # No lifecycle state exists beyond the input window, so the decoder
+            # holds the last observed one rather than inventing a future.
+            None if state_sequence is None else state_sequence[:, -1],
         )
+        output = {"pred": prediction}
+        if self.routed:
+            terms = [
+                loss
+                for loss in (conv.pop_router_loss() for conv in self._routed_convs())
+                if loss is not None
+            ]
+            if terms:
+                output["aux_losses"] = {"graph_router": torch.stack(terms).mean()}
+        return output

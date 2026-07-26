@@ -173,6 +173,18 @@ class Model(nn.Module):
         self.patch_expert, self.patch_args = _build_expert(
             experts["patch"], configs.device, "patch"
         )
+        self.graph_input_dim = int(self.graph_args.enc_in)
+        # The patch expert declares how much lifecycle context it consumes, so
+        # its ablation switch lives in the ALFTemporal config and needs no
+        # duplicated wiring here.
+        self.patch_input_dim = int(
+            getattr(self.patch_expert, "expert_input_dim", configs.raw_enc_in)
+        )
+        if self.patch_input_dim > int(configs.enc_in):
+            raise ValueError(
+                f"patch expert requests {self.patch_input_dim} channels but the "
+                f"lifecycle input only provides {int(configs.enc_in)}"
+            )
 
         recipe = family.get("recipe", {})
         model_cfg = family.get("model", {})
@@ -218,11 +230,14 @@ class Model(nn.Module):
                 for _ in range(AVAILABILITY_COUNT)
             ]
         )
+        # NAS is the role every Join node carries at the last input step. A zero
+        # budget makes beta identically zero there, which switches the patch
+        # expert (and the route/regret gradients) off for the whole Join track.
         self.register_buffer(
             "patch_budget",
             _role_tensor(
                 recipe.get("patch_residual_role_scale", {}),
-                {"aas": 0.20, "nas": 0.0, "vs": 0.0, "fs": 0.35},
+                {"aas": 0.20, "nas": 0.20, "vs": 0.0, "fs": 0.35},
             ),
             persistent=False,
         )
@@ -301,22 +316,22 @@ class Model(nn.Module):
         epoch,
     ):
         filled = self.shared_input_imputer(adjacency, x_enc, x_t_mark, pos_mark)
-        raw = filled[..., :self.raw_enc_in]
-        graph_channels = int(self.graph_args.enc_in)
-        graph_input = torch.cat(
-            [raw, filled[..., self.raw_enc_in:graph_channels]],
-            dim=-1,
-        )
+        # filled is [imputed_raw, availability(4), state_age, observation_mask];
+        # each expert takes the prefix it declares.
+        graph_input = filled[..., :self.graph_input_dim]
+        patch_input = filled[..., :self.patch_input_dim]
         if hasattr(self.graph_expert, "set_current_node_ids"):
-            self.graph_expert.set_current_node_ids(self._current_node_ids(raw.size(2)))
+            self.graph_expert.set_current_node_ids(self._current_node_ids(filled.size(2)))
         decoder = None if x_dec is None else x_dec[..., :self.output_dim]
         graph_output = self.graph_expert(
             adjacency, graph_input, x_t_mark, pos_mark, decoder, dec_t_mark, epoch
         )
         patch_output = self.patch_expert(
-            adjacency, raw, x_t_mark, pos_mark, decoder, dec_t_mark, epoch
+            adjacency, patch_input, x_t_mark, pos_mark, decoder, dec_t_mark, epoch
         )
-        return unpack_model_output(graph_output)[0], unpack_model_output(patch_output)[0]
+        y_graph, graph_meta = unpack_model_output(graph_output)
+        y_patch, _ = unpack_model_output(patch_output)
+        return y_graph, y_patch, graph_meta.get("aux_losses")
 
     def forward(
         self,
@@ -328,7 +343,7 @@ class Model(nn.Module):
         dec_t_mark=None,
         epoch=0,
     ):
-        y_graph, y_patch = self._run_experts(
+        y_graph, y_patch, expert_aux_losses = self._run_experts(
             adjacency,
             x_enc,
             x_t_mark,
@@ -364,6 +379,7 @@ class Model(nn.Module):
         }
         return {
             "pred": prediction,
+            "aux_losses": expert_aux_losses,
             "forecast_loss_mode": "role_balanced_mix",
             "forecast_role_balanced_beta": self.forecast_role_balanced_beta,
             "route_routing": {

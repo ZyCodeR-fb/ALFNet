@@ -198,7 +198,7 @@ def bootstrap_gains(ours_rows, baseline_rows, samples=2000, seed=2026):
 def _cell_mape_v2(row, prefix):
     count = int(row["count"])
     if count <= 0:
-        raise ValueError("PLES v2 comparison cell has no valid targets")
+        raise ValueError("PLES v3 comparison cell has no valid targets")
     return 100.0 * float(row[f"{prefix}_ape_sum"]) / count
 
 
@@ -207,7 +207,7 @@ def _calendar_balanced_mape_v2(rows, prefix):
     for row in rows:
         by_regime[str(row.get("regime", "all"))].append(_cell_mape_v2(row, prefix))
     if not by_regime:
-        raise ValueError("PLES v2 comparison has no calendar cells")
+        raise ValueError("PLES v3 comparison has no calendar cells")
     return float(np.mean([np.mean(values) for values in by_regime.values()]))
 
 
@@ -228,7 +228,7 @@ def _effect_curves_v2(rows):
             effect_name = "FaultPenalty"
             effect = treated - control
         else:
-            raise ValueError(f"Unsupported PLES v2 track: {track}")
+            raise ValueError(f"Unsupported PLES v3 track: {track}")
         curves.append(
             {
                 "track": track,
@@ -245,10 +245,10 @@ def compare_rows_v2(ours_rows, baseline_rows):
     ours_index = _index_rows(ours_rows)
     baseline_index = _index_rows(baseline_rows)
     if set(ours_index) != set(baseline_index):
-        raise ValueError("PLES v2 model exports do not contain the same paired cells")
+        raise ValueError("PLES v3 model exports do not contain the same paired cells")
     for key in ours_index:
         if ours_index[key]["count"] != baseline_index[key]["count"]:
-            raise ValueError(f"PLES v2 valid-target counts differ for paired cell {key}")
+            raise ValueError(f"PLES v3 valid-target counts differ for paired cell {key}")
 
     ours_curves = {
         (row["track"], row["tau"], row["phase"]): row
@@ -259,7 +259,7 @@ def compare_rows_v2(ours_rows, baseline_rows):
         for row in _effect_curves_v2(baseline_rows)
     }
     if set(ours_curves) != set(baseline_curves):
-        raise ValueError("PLES v2 model curves do not share the same track/tau cells")
+        raise ValueError("PLES v3 model curves do not share the same track/tau cells")
 
     curves = []
     for key in sorted(ours_curves, key=lambda value: (value[0], value[1])):
@@ -285,11 +285,11 @@ def _advantages_v2(curves):
     join = [row for row in post if row["effect_name"] == "JoinLift"]
     fault = [row for row in post if row["effect_name"] == "FaultPenalty"]
     if not join or not fault:
-        raise ValueError("PLES v2 comparison requires post-event Join and Fault cells")
+        raise ValueError("PLES v3 comparison requires post-event Join and Fault cells")
     return {
         "JoinLiftGain": float(np.mean([row["advantage_mape"] for row in join])),
         "FaultPenaltyReduction": float(np.mean([row["advantage_mape"] for row in fault])),
-        "PeakFaultPenaltyReduction": float(
+        "OutageFaultPenaltyReduction": float(
             max(row["baseline_effect_mape"] for row in fault)
             - max(row["ours_effect_mape"] for row in fault)
         ),
@@ -308,7 +308,7 @@ def bootstrap_advantages_v2(ours_rows, baseline_rows, samples=2000, seed=2026):
     for row in baseline_rows:
         baseline_units[int(row["origin_id"])][int(row["cohort_id"])].append(row)
     if set(ours_units) != set(baseline_units):
-        raise ValueError("PLES v2 model exports do not share bootstrap origins")
+        raise ValueError("PLES v3 model exports do not share bootstrap origins")
 
     rng = np.random.default_rng(seed)
     origin_ids = sorted(ours_units)
@@ -438,7 +438,7 @@ def plot_comparison_v2(curves, output_path, ours_label, baseline_label, dpi=260)
         axis.spines["top"].set_visible(False)
         axis.spines["right"].set_visible(False)
     axes[1].legend(frameon=False, loc="best")
-    fig.suptitle("PLES v2 Paired Lifecycle Effects", fontsize=16, weight="bold")
+    fig.suptitle("PLES v3 Paired Lifecycle Effects", fontsize=16, weight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -474,12 +474,12 @@ def main():
         )
         summary = {
             "schema_version": 2,
-            "protocol": "PLES v2 paired model comparison",
+            "protocol": "PLES v3 paired model comparison",
             "protocol_hash": ours_summary["protocol_hash"],
             "definitions": {
                 "JoinLiftGain": "JoinLift_ours - JoinLift_baseline; higher is better",
                 "FaultPenaltyReduction": "FaultPenalty_baseline - FaultPenalty_ours; higher is better",
-                "PeakFaultPenaltyReduction": "PeakFaultPenalty_baseline - PeakFaultPenalty_ours; higher is better",
+                "OutageFaultPenaltyReduction": "OutageFaultPenalty_baseline - OutageFaultPenalty_ours; higher is better",
             },
             "ours": args.ours_label,
             "baseline": args.baseline_label,

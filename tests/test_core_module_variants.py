@@ -1,17 +1,29 @@
+import copy
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 import yaml
 
 from args import load_args_from_config
+from layers.DCRNNCell import DiffConv
+from layers.lifecycle_moge import (
+    LIFECYCLE_STATE_CHANNELS,
+    SUPPORT_NAMES,
+    LifecycleRoutedGraphConv,
+    LifecycleRouter,
+    build_lifecycle_supports,
+)
 from layers.source_grin import GRINInputImputer
 from layers.source_timefilter import TimeFilterPatchMixer
 from model.ALFGraph.ALFGraph import Model as ALFGraph
 from model.ALFNet.ALFNet import Model as ALFNet
+from model.ALFTemporal.ALFTemporal import Model as ALFTemporal
 from model.ALFTemporal.ALFTemporal import _build_spatial_layout
 from model.ALFTemporal.patchstg import WindowAttBlock
+from utils.model_output import sum_aux_losses, unpack_model_output
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,8 +56,8 @@ def test_streamlined_yaml_surface_has_one_alfnet_mainline():
     assert config["runtime"]["model"] == "ALFNet"
     assert config["runtime"]["model_variant"] == "rf_l3s"
     assert config["lifecycle"]["lifecycle_training_strategy"] == "lcbt_v3"
-    assert config["async_test"]["lce_protocol_version"] == 2
-    assert config["async_test"]["ples_protocol_version"] == 2
+    assert config["async_test"]["lce_protocol_version"] == 3
+    assert config["async_test"]["ples_protocol_version"] == 3
     assert set(config["family"]["experts"]) == {"graph", "patch"}
 
     for model in COMPARISON_MODELS:
@@ -60,8 +72,8 @@ def test_streamlined_yaml_surface_has_one_alfnet_mainline():
         assert args.model == model
         assert args.lifecycle_training_strategy == "lcbt_v3"
         assert args.stop_based == "val_lifecycle"
-        assert args.lce_protocol_version == 2
-        assert args.ples_protocol_version == 2
+        assert args.lce_protocol_version == 3
+        assert args.ples_protocol_version == 3
 
 
 def test_alfnet_contains_one_shared_grin_and_no_graph_local_grin():
@@ -81,13 +93,90 @@ def test_alfnet_contains_one_shared_grin_and_no_graph_local_grin():
         isinstance(module, GRINInputImputer)
         for module in model.graph_expert.modules()
     )
-    assert sum(parameter.numel() for parameter in model.parameters()) == 3_288_746
+    # 3_288_746 + 4_608 for the widened patch input convolution that carries the
+    # availability / state_age / observation-mask channels (6 * 64 * 12), then
+    # + 151_824 for the lifecycle-routed graph core replacing DiffConv.
+    assert sum(parameter.numel() for parameter in model.parameters()) == 3_445_178
     assert not hasattr(model, "fusion_gate")
     assert all(
         not hasattr(block, "nattn") and not hasattr(block, "sattn")
         for block in model.patch_expert.backbone.spa_encoder
     )
     assert model.graph_expert.decoder.scale == 0.3
+
+
+def _alftemporal_args(lifecycle_input=None):
+    args = load_args_from_config(
+        str(ROOT / "configs/ALFTemporal/METRLA_alftemporal_t65.yaml"),
+        overrides={"device": "cpu"},
+    )
+    if lifecycle_input is not None:
+        args.model_family_cfg["model"]["lifecycle_input"] = lifecycle_input
+    return args
+
+
+def test_alftemporal_consumes_prediction_time_lifecycle_context():
+    expert = ALFTemporal(_alftemporal_args())
+
+    # raw + availability(4) + state_age + observation mask, then two calendar
+    # channels appended inside the backbone embedding.
+    assert expert.lifecycle_input is True
+    assert expert.expert_input_dim == 7
+    assert expert.backbone.input_channels == 9
+    assert expert.backbone.input_st_fc.in_channels == 9
+
+
+def test_alftemporal_lifecycle_input_ablation_falls_back_to_raw_only():
+    expert = ALFTemporal(_alftemporal_args(lifecycle_input=False))
+
+    assert expert.expert_input_dim == 1
+    assert expert.backbone.input_channels == 3
+
+
+def test_alfnet_routes_lifecycle_channels_to_both_experts():
+    args = load_args_from_config(
+        str(ROOT / "configs/ALFNet/rf_l3s.yaml"),
+        overrides={"device": "cpu"},
+    )
+    model = ALFNet(args)
+
+    assert model.graph_input_dim == args.enc_in
+    assert model.patch_input_dim == args.enc_in
+    assert model.patch_expert.expert_input_dim == args.enc_in
+
+
+def test_join_role_receives_a_non_zero_patch_budget():
+    """A zero NAS budget silences the patch expert on the whole Join track."""
+    args = load_args_from_config(
+        str(ROOT / "configs/ALFNet/rf_l3s.yaml"),
+        overrides={"device": "cpu"},
+    )
+    model = ALFNet(args).eval()
+    aas, nas, vs, fs = model.patch_budget.tolist()
+
+    assert nas > 0.0
+    assert (aas, fs) == (pytest.approx(0.20), pytest.approx(0.35))
+    assert vs == 0.0  # a never-observed node still has no temporal evidence
+
+    nodes, probe = 157, [0, 1, 2]
+    beta = {}
+    for name, role_index in (("NAS", 1), ("VS", 2)):
+        x = torch.zeros(1, args.input_len, nodes, args.enc_in)
+        x[..., 0] = torch.randn(1, args.input_len, nodes)
+        x[..., 1] = 1.0  # everyone AAS
+        x[..., 5] = 1.0  # state_age
+        x[..., 6] = 1.0  # observation mask
+        x[:, :, probe, 1:5] = 0.0
+        x[:, :, probe, 1 + role_index] = 1.0
+        t_mark = torch.zeros(1, args.input_len, 3)
+        t_mark[..., 1] = 8.0
+        with torch.no_grad():
+            output = model(torch.eye(nodes), x, t_mark, None, None, t_mark, 0)
+        beta[name] = (1.0 - output["route_routing"]["alpha"])[:, :, probe, :]
+
+    assert beta["NAS"].min() > 0.0, "Join nodes must be able to use the patch expert"
+    assert beta["NAS"].max() <= nas
+    assert torch.equal(beta["VS"], torch.zeros_like(beta["VS"]))
 
 
 def test_alftemporal_kdtree_layout_covers_every_node():
@@ -118,21 +207,112 @@ def test_alftemporal_kdtree_layout_covers_every_node():
     assert len(padded) == part_count * 4
 
 
-def test_alfgraph_preserves_final_residual_delta_contract():
+def _alfgraph_args(**recipe_overrides):
     args = load_args_from_config(
         str(ROOT / "configs/ALFGraph/METRLA_alfgraph_sd.yaml"),
         overrides={"device": "cpu"},
     )
+    args.model_family_cfg = copy.deepcopy(args.model_family_cfg)
+    args.model_family_cfg["recipe"].update(recipe_overrides)
+    return args
+
+
+def _alfgraph_batch(args, nodes=5, role_index=0):
+    x = torch.zeros(2, args.input_len, nodes, args.enc_in)
+    x[..., 0] = torch.randn(2, args.input_len, nodes)
+    x[..., 1 + role_index] = 1.0
+    x[..., 5] = 1.0  # state_age
+    x[..., 6] = 1.0  # observation mask
+    return x, torch.randn(2, args.pred_len, nodes, args.c_out)
+
+
+def test_alfgraph_preserves_final_residual_delta_contract():
+    args = _alfgraph_args()
     model = ALFGraph(args)
-    batch, steps, nodes = 2, args.input_len, 5
-    x = torch.randn(batch, steps, nodes, args.enc_in)
-    x[..., -1] = 1.0
-    teacher = torch.randn(batch, args.pred_len, nodes, args.c_out)
+    nodes = 5
+    x, teacher = _alfgraph_batch(args, nodes)
 
     output = model(torch.eye(nodes), x, x_dec=teacher, epoch=40)
 
-    assert output.shape == (batch, args.pred_len, nodes, args.c_out)
-    assert torch.isfinite(output).all()
+    assert output["pred"].shape == (2, args.pred_len, nodes, args.c_out)
+    assert torch.isfinite(output["pred"]).all()
+
+
+def test_alfgraph_keeps_the_observation_mask_channel():
+    """After GRIN the mask is the only measured-vs-imputed signal the router has."""
+    args = _alfgraph_args()
+    model = ALFGraph(args)
+    first_conv = model.encoder.cells[0].forget_gate
+
+    assert model.state_dim == LIFECYCLE_STATE_CHANNELS
+    assert first_conv.in_channels == args.enc_in + args.d_model
+
+
+def test_alfgraph_routes_five_supports_with_top_k_two():
+    args = _alfgraph_args()
+    model = ALFGraph(args)
+    routed = [m for m in model.modules() if isinstance(m, LifecycleRoutedGraphConv)]
+
+    # encoder 2 layers + decoder 2 layers, three gates each.
+    assert len(routed) == 12
+    assert not [m for m in model.modules() if isinstance(m, DiffConv)]
+    assert all(conv.num_experts == 5 and conv.router.k == 2 for conv in routed)
+
+    supports = build_lifecycle_supports(
+        torch.eye(4) + torch.ones(4, 4),
+        torch.eye(4),
+        torch.eye(4),
+    )
+    assert supports.shape == (len(SUPPORT_NAMES), 4, 4)
+    assert torch.equal(supports[0], torch.eye(4))  # identity expert keeps self
+    for support in supports:
+        assert torch.allclose(support.sum(dim=1), torch.ones(4), atol=1e-5)
+
+
+def test_lifecycle_router_activates_exactly_top_k_experts():
+    router = LifecycleRouter(LIFECYCLE_STATE_CHANNELS, num_experts=5, k=2).eval()
+    torch.manual_seed(0)
+    router.w_gate.data.normal_(0.0, 1.0)
+    state = torch.randn(3, 7, LIFECYCLE_STATE_CHANNELS)
+
+    gates, aux_loss = router(state)
+
+    assert gates.shape == (3, 7, 5)
+    assert torch.all((gates > 0).sum(dim=-1) == 2)
+    assert torch.allclose(gates.sum(dim=-1), torch.ones(3, 7), atol=1e-6)
+    assert torch.isfinite(aux_loss) and aux_loss >= 0
+
+
+def test_alfgraph_router_loss_reaches_the_alfnet_objective():
+    args = _alfgraph_args()
+    model = ALFGraph(args)
+    nodes = 5
+    x, teacher = _alfgraph_batch(args, nodes)
+
+    output = model(torch.eye(nodes), x, x_dec=teacher, epoch=40)
+    prediction, meta = unpack_model_output(output)
+    total = sum_aux_losses(meta.get("aux_losses"), device=prediction.device)
+
+    assert set(meta["aux_losses"]) == {"graph_router"}
+    assert total is not None and torch.isfinite(total)
+
+    total.backward()
+    assert model.encoder.cells[0].forget_gate.router.w_gate.grad.abs().sum() > 0
+
+
+def test_alfgraph_diffusion_control_restores_the_single_operator():
+    """The parameter-matched control keeps DiffConv and emits no router loss."""
+    args = _alfgraph_args(graph_conv="diffusion")
+    model = ALFGraph(args)
+    nodes = 5
+    x, teacher = _alfgraph_batch(args, nodes)
+
+    output = model(torch.eye(nodes), x, x_dec=teacher, epoch=40)
+
+    assert len([m for m in model.modules() if isinstance(m, DiffConv)]) == 12
+    assert not [m for m in model.modules() if isinstance(m, LifecycleRoutedGraphConv)]
+    assert "aux_losses" not in output
+    assert torch.isfinite(output["pred"]).all()
 
 
 def test_grin_uses_explicit_mask_without_exogenous_duplication():

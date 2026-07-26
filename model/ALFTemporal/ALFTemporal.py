@@ -7,6 +7,12 @@ from model.comparison_model.family_utils import build_patchstg_cfg
 from .patchstg import PatchSTG as PatchSTGBackbone
 
 
+# Availability one-hot (4) + state_age (1) + observation mask (1). Every one of
+# these is known at prediction time, so feeding them leaks nothing.
+LIFECYCLE_CHANNELS = 6
+CALENDAR_CHANNELS = 2
+
+
 def _augment_align(dist_matrix, auglen):
     sorted_idx = np.argsort(dist_matrix.reshape(-1) * -1)
     sorted_idx = sorted_idx % dist_matrix.shape[-1]
@@ -86,6 +92,12 @@ class Model(nn.Module):
         self.full_num_nodes = int(self.cfg["node_num"])
         self.known_nodes = list(self.cfg["known_nodes"])
         self.output_dim = configs.c_out
+        # Ablation switch: with lifecycle_input off the expert sees only the raw
+        # series, which is the pre-fix behaviour.
+        self.lifecycle_input = bool(model_cfg.get("lifecycle_input", True))
+        self.expert_input_dim = int(configs.raw_enc_in) + (
+            LIFECYCLE_CHANNELS if self.lifecycle_input else 0
+        )
 
         full_adj = load_project_adjacency(
             {"data_path": configs.data_path}
@@ -127,6 +139,7 @@ class Model(nn.Module):
             ori_parts_idx=self.ori_parts_idx,
             reo_parts_idx=self.reo_parts_idx,
             reo_all_idx=self.reo_all_idx,
+            input_channels=self.expert_input_dim + CALENDAR_CHANNELS,
             crossformer_router_factor=int(
                 model_cfg.get("crossformer_router_factor", 4)
             ),
@@ -163,17 +176,22 @@ class Model(nn.Module):
         )
 
     def _scatter_to_full_nodes(self, x_enc, current_node_ids):
+        if x_enc.shape[-1] < self.expert_input_dim:
+            raise ValueError(
+                f"ALFTemporal expects at least {self.expert_input_dim} input channels "
+                f"(raw + lifecycle context), got {x_enc.shape[-1]}"
+            )
         if x_enc.shape[2] == self.full_num_nodes:
-            return x_enc[..., :self.output_dim]
+            return x_enc[..., :self.expert_input_dim]
         full_x = torch.zeros(
             x_enc.shape[0],
             x_enc.shape[1],
             self.full_num_nodes,
-            self.output_dim,
+            self.expert_input_dim,
             device=x_enc.device,
             dtype=x_enc.dtype,
         )
-        full_x[..., current_node_ids, :] = x_enc[..., :self.output_dim]
+        full_x[..., current_node_ids, :] = x_enc[..., :self.expert_input_dim]
         return full_x
 
     def forward(

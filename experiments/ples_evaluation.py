@@ -6,12 +6,13 @@ import numpy as np
 import torch
 
 from data_provider.ples_protocol import (
+    MAIN_TABLE_ROWS,
     PHASE_ORDER,
-    PLES_V2_EFFECT_NAMES,
-    bootstrap_paired_effects_v2,
+    PLES_EFFECT_NAMES,
+    bootstrap_paired_effects,
     phase_for_tau_v2,
     summarize_lce_rows,
-    summarize_paired_rows_v2,
+    summarize_paired_rows,
 )
 from utils.model_output import unpack_model_output
 
@@ -213,8 +214,8 @@ def _write_metric_table(output_dir, stem, metrics, row_order, row_label):
 
 def _async_lifecycle_inference(model, dataset, args):
     manifest = dataset.get_protocol_manifest()
-    if int(getattr(args, "lce_protocol_version", 0)) != 2:
-        raise ValueError("The maintained evaluation protocol requires LCE v2")
+    if int(getattr(args, "lce_protocol_version", 0)) != 3:
+        raise ValueError("The maintained evaluation protocol requires LCE v3")
     protocol_token = manifest["protocol_hash"][:10]
     output_dir = os.path.join(
         args.best_prediction_path,
@@ -240,7 +241,7 @@ def _async_lifecycle_inference(model, dataset, args):
     post_steps = int(manifest["requested"]["post_steps"])
     pre_prediction_max_abs = 0.0
     model.eval()
-    print("-> Start LCE v2 + PLES v2 inference...")
+    print("-> Start LCE v3 + PLES v3 inference...")
     for origin_index, origin in enumerate(manifest["origins"], start=1):
         for tau in range(-pre_steps, post_steps + 1):
             control_sample = dataset.build_ples_sample(
@@ -268,7 +269,7 @@ def _async_lifecycle_inference(model, dataset, args):
                         equal_nan=True,
                     ):
                         raise ValueError(
-                            "PLES v2 pre-event treatment/control inputs differ; "
+                            "PLES v3 pre-event treatment/control inputs differ; "
                             f"origin={origin['origin_id']} track={track} cohort={cohort_id} tau={tau}"
                         )
                     sample_index[(track, cohort_id)] = len(samples)
@@ -297,7 +298,7 @@ def _async_lifecycle_inference(model, dataset, args):
                         equal_nan=True,
                     ):
                         raise ValueError(
-                            "PLES v2 paired samples do not share the same prediction target"
+                            "PLES v3 paired samples do not share the same prediction target"
                         )
                     if tau < 0 and nodes:
                         difference = torch.abs(
@@ -349,23 +350,34 @@ def _async_lifecycle_inference(model, dataset, args):
 
     if pre_prediction_max_abs > 1e-5:
         raise ValueError(
-            "PLES v2 pre-event treatment/control predictions differ: "
+            "PLES v3 pre-event treatment/control predictions differ: "
             f"max_abs={pre_prediction_max_abs:.6g}"
         )
-    lce_summary = summarize_lce_rows(rows, input_len=args.input_len)
-    ples_summary = summarize_paired_rows_v2(rows)
+    main_cohort_ids = manifest["resolved"]["main_cohort_ids"]
+    lce_summary = summarize_lce_rows(
+        rows,
+        input_len=args.input_len,
+        main_cohort_ids=main_cohort_ids,
+    )
+    ples_summary = summarize_paired_rows(
+        rows,
+        input_len=args.input_len,
+        main_cohort_ids=main_cohort_ids,
+    )
     pre_metric_difference = float(
         ples_summary["pre_event_max_abs_mape_difference"]
     )
     if pre_metric_difference > 1e-7:
         raise ValueError(
-            "PLES v2 pre-event paired MAPE difference is non-zero: "
+            "PLES v3 pre-event paired MAPE difference is non-zero: "
             f"max_abs={pre_metric_difference:.6g}"
         )
-    bootstrap = bootstrap_paired_effects_v2(
+    bootstrap = bootstrap_paired_effects(
         rows,
+        input_len=args.input_len,
         samples=int(getattr(args, "ples_bootstrap_samples", 2000)),
         seed=int(getattr(args, "ples_bootstrap_seed", 2026)),
+        main_cohort_ids=main_cohort_ids,
     )
     training_trace = _load_training_trace(args)
     required_training_hash = manifest.get("training_protocol_hash")
@@ -381,7 +393,7 @@ def _async_lifecycle_inference(model, dataset, args):
             "collector will reject them."
         )
     common = {
-        "schema_version": 2,
+        "schema_version": 3,
         "protocol": manifest["protocol"],
         "protocol_hash": manifest["protocol_hash"],
         "training_protocol_hash": checkpoint_training_hash,
@@ -401,23 +413,26 @@ def _async_lifecycle_inference(model, dataset, args):
     }
     main_payload = {
         **common,
-        "table": "LCE v2 main",
+        "table": "LCE v3 main",
         "aggregation": manifest["lce"]["aggregation"],
         "metrics": lce_summary["main_metrics"],
+        "large_event_metrics": lce_summary["large_event_metrics"],
+        "main_cohort_ids": main_cohort_ids,
+        "large_event_cohort_ids": manifest["resolved"]["large_event_cohort_ids"],
     }
     phase_payload = {
         **common,
-        "table": "LCE v2 phases",
+        "table": "LCE v3 phases",
         "metrics": lce_summary["phase_metrics"],
     }
     trajectory_payload = {
         **common,
-        "table": "LCE v2 evidence trajectories",
+        "table": "LCE v3 evidence trajectories",
         "metrics": lce_summary["trajectory_metrics"],
     }
     effects_payload = {
         **common,
-        "table": "PLES v2 paired effects",
+        "table": "PLES v3 paired effects",
         "paired_effects": ples_summary["paired_effects"],
         "paired_effect_intervals": bootstrap,
         "pre_event_max_abs_input_difference": 0.0,
@@ -445,7 +460,7 @@ def _async_lifecycle_inference(model, dataset, args):
         output_dir,
         "lce_main_summary",
         lce_summary["main_metrics"],
-        ("Unseen", "Steady", "Join", "Fault", "LifeAvg"),
+        MAIN_TABLE_ROWS,
         "group",
     )
     phase_rows = _write_metric_table(
@@ -468,17 +483,19 @@ def _async_lifecycle_inference(model, dataset, args):
     effect_rows = [
         {
             "effect": name,
-            "point": bootstrap[name]["point"],
-            "ci_low": bootstrap[name]["low"],
-            "ci_high": bootstrap[name]["high"],
+            "metric": metric,
+            "point": bootstrap[metric][name]["point"],
+            "ci_low": bootstrap[metric][name]["low"],
+            "ci_high": bootstrap[metric][name]["high"],
             "direction": "higher_is_better" if name == "JoinLift" else "lower_is_better",
         }
-        for name in PLES_V2_EFFECT_NAMES
+        for metric in ("MAPE", "MAE")
+        for name in PLES_EFFECT_NAMES
     ]
     _write_csv(
         os.path.join(output_dir, "ples_effects_summary.csv"),
         effect_rows,
-        ["effect", "point", "ci_low", "ci_high", "direction"],
+        ["effect", "metric", "point", "ci_low", "ci_high", "direction"],
     )
     for filename, payload in (
         ("lce_main_summary.json", main_payload),
@@ -513,11 +530,12 @@ def _async_lifecycle_inference(model, dataset, args):
         ),
     ]
     for row in effect_rows:
+        label = f"{row['effect']}[{row['metric']}]"
         if row["ci_low"] is None or row["ci_high"] is None:
-            effect_lines.append(f"{row['effect']}={row['point']:.4f} | 95% CI=NA")
+            effect_lines.append(f"{label}={row['point']:.4f} | 95% CI=NA")
         else:
             effect_lines.append(
-                f"{row['effect']}={row['point']:.4f} | "
+                f"{label}={row['point']:.4f} | "
                 f"95% CI=[{row['ci_low']:.4f}, {row['ci_high']:.4f}]"
             )
     for filename, lines in (
@@ -531,14 +549,15 @@ def _async_lifecycle_inference(model, dataset, args):
     print(f"LCE: dataset={manifest['dataset']['name']} | origins={len(manifest['origins'])} | cohorts={len(cohorts)}")
     for line in main_lines:
         print(line)
-    print("PLES v2 paired effects (MAPE percentage points):")
+    print("PLES v3 paired effects:")
     for line in effect_lines[2:]:
         print(line)
-    print(f"-> LCE/PLES v2 results saved to {output_dir}")
+    print(f"-> LCE/PLES v3 results saved to {output_dir}")
     return {
         **common,
         "lce": {
             "main_metrics": lce_summary["main_metrics"],
+            "large_event_metrics": lce_summary["large_event_metrics"],
             "phase_metrics": lce_summary["phase_metrics"],
             "trajectory_metrics": lce_summary["trajectory_metrics"],
         },
@@ -552,5 +571,5 @@ def _async_lifecycle_inference(model, dataset, args):
 
 def async_lifecycle_inference(model, data_loader, args, criterions=None):
     if int(args.slide_step) != 1:
-        raise ValueError("LCE v2/PLES v2 requires slide_step=1")
+        raise ValueError("LCE v3/PLES v3 requires slide_step=1")
     return _async_lifecycle_inference(model, data_loader.dataset, args)

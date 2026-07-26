@@ -5,15 +5,23 @@ from pathlib import Path
 import numpy as np
 from torch.utils.data import Dataset
 import warnings
+from data_provider.calendar_strata import (
+    DAY_TYPES,
+    STRATA,
+    TOD_BINS,
+    calendar_stratum,
+    select_stratified_origins,
+    stratum_weights,
+    strip_diagnostics,
+    summarize_origins,
+)
 from data_provider.lcbt_protocol import (
-    CALENDAR_REGIMES,
     LCBT_GROUPS,
     LCBT_PHASES,
     LCBT_PROTOCOL_NAME,
     LCBT_PROTOCOL_VERSION,
     array_hash,
     build_lcbt_schedule,
-    calendar_regime,
     compose_effective_lifecycle_features,
     lcbt_manifest_hash,
     resolve_lcbt_boundaries,
@@ -21,7 +29,7 @@ from data_provider.lcbt_protocol import (
     split_unseen_nodes,
     stable_hash,
 )
-from data_provider.ples_protocol import build_protocol_manifest
+from data_provider.ples_protocol import build_protocol_manifest, main_table_cohort_plan
 from utils.timefeatures import time_features
 
 warnings.filterwarnings('ignore')
@@ -57,9 +65,9 @@ def _lcbt_window_regimes(timestamps, segment_start, segment_end, input_len, pred
     if num_samples <= 0:
         raise ValueError("LCBT segment is too short for the requested input/prediction lengths")
     if timestamps is None:
-        return ["OffPeak"] * num_samples
+        return [STRATA[0]] * num_samples
     return [
-        calendar_regime(timestamps[int(segment_start) + index + int(input_len) - 1])
+        calendar_stratum(timestamps[int(segment_start) + index + int(input_len) - 1])
         for index in range(num_samples)
     ]
 
@@ -70,24 +78,42 @@ def _lcbt_validation_origins(
     segment_end,
     input_len,
     pred_len,
+    per_stratum,
+    values=None,
+    min_observed_fraction=0.30,
 ):
-    num_windows = int(segment_end) - int(segment_start) - int(input_len) - int(pred_len) + 1
-    if num_windows <= 0:
-        raise ValueError("LCBT validation segment is too short")
-    if timestamps is None:
-        span = int(input_len) + int(pred_len)
-        return list(range(0, num_windows, max(1, span)))
+    """Stratified low-discrepancy validation origins.
 
-    grouped = {}
-    for window_index in range(num_windows):
-        timestamp = timestamps[int(segment_start) + window_index + int(input_len) - 1]
-        regime = calendar_regime(timestamp)
-        day = str(timestamp)[:10]
-        grouped.setdefault((day, regime), []).append(window_index)
-    return [
-        int(indices[len(indices) // 2])
-        for _, indices in sorted(grouped.items())
-    ]
+    The event instant is the last input step, so the selector works on window
+    indices and the caller adds the segment offset.
+    """
+    segment_length = int(segment_end) - int(segment_start)
+    if segment_length - int(input_len) - int(pred_len) + 1 <= 0:
+        raise ValueError("LCBT validation segment is too short")
+    segment_values = (
+        None
+        if values is None
+        else np.asarray(values)[int(segment_start):int(segment_end)]
+    )
+    origins = select_stratified_origins(
+        None if timestamps is None else np.asarray(timestamps)[int(segment_start):int(segment_end)],
+        segment_length,
+        input_len,
+        pred_len,
+        pre_steps=0,
+        post_steps=0,
+        per_stratum=per_stratum,
+        values=segment_values,
+        min_observed_fraction=min_observed_fraction,
+        # Every record of a validation origin replays the same window with a
+        # different lifecycle mask, so one origin touches exactly one episode
+        # rather than the tau sweep the test protocol runs.
+        min_spacing=int(input_len) + int(pred_len),
+    )
+    # The selector reports the event instant; the replay needs the window start.
+    for origin in origins:
+        origin["window_index"] = int(origin["local_index"]) - int(input_len) + 1
+    return [origin for origin in origins if origin["window_index"] >= 0]
 
 
 def _lcbt_schedule_summary(schedule, num_nodes):
@@ -182,6 +208,8 @@ class LifecycleCoveragePEMS(Dataset):
         lifecycle_age_mode="state_duration",
         lcbt_overwrite_manifest=False,
         lifecycle_training_strategy="lcbt_v3",
+        lcbt_validation_origins_per_stratum=2,
+        lcbt_min_observed_fraction=0.30,
     ):
         if flag not in {"train", "val"}:
             raise ValueError("LifecycleCoveragePEMS only supports train/val splits")
@@ -211,6 +239,10 @@ class LifecycleCoveragePEMS(Dataset):
         self.generated_unseen_fraction = float(lcbt_generated_unseen_fraction)
         self.lifecycle_age_mode = str(lifecycle_age_mode)
         self.lifecycle_training_strategy = str(lifecycle_training_strategy)
+        self.validation_origins_per_stratum = int(lcbt_validation_origins_per_stratum)
+        self.min_observed_fraction = float(lcbt_min_observed_fraction)
+        self.validation_origins = []
+        self.validation_origin_summary = {}
         if self.lifecycle_training_strategy != "lcbt_v3":
             raise ValueError("LifecycleCoveragePEMS requires lcbt_v3")
         if self.lifecycle_age_mode != "state_duration":
@@ -263,6 +295,9 @@ class LifecycleCoveragePEMS(Dataset):
         self.full_num_nodes = int(raw_values.shape[1])
         self.full_adjacency = np.asarray(payload["adj"])
         self.adjacency_hash = array_hash(self.full_adjacency)
+        # Targets on the full timeline, used only by the origin availability
+        # guard so that an origin buried in a network-wide outage is rejected.
+        self.guard_values = raw_values[..., self.tar_feas]
 
         if self.unknown_nodes_path:
             self.unknown_nodes = np.load(self.unknown_nodes_path).astype(int).tolist()
@@ -376,6 +411,21 @@ class LifecycleCoveragePEMS(Dataset):
             cohort_fractions=self.cohort_fractions,
             cohort_weights=self.cohort_weights,
             clustered_ratio=self.clustered_ratio,
+            cohort_size_base=self.full_num_nodes,
+            topology_adjacency=self.full_adjacency,
+            # Training runs on the known-node induced graph, so its schedule
+            # indices are local; this maps them back onto the full network.
+            node_ids=self.known_nodes,
+        )
+
+    @property
+    def validation_cohort_plan(self):
+        pools = self._validation_node_pools()
+        return main_table_cohort_plan(
+            self.full_num_nodes,
+            [len(nodes) for nodes in pools.values()],
+            cohort_fractions=self.cohort_fractions,
+            cohort_weights=self.cohort_weights,
         )
 
     def _validation_node_pools(self):
@@ -393,18 +443,16 @@ class LifecycleCoveragePEMS(Dataset):
             self.boundaries["val_end"],
             self.input_len,
             self.pred_len,
+            per_stratum=self.validation_origins_per_stratum,
+            values=self.guard_values,
+            min_observed_fraction=self.min_observed_fraction,
         )
-        validation_regimes = _lcbt_window_regimes(
-            self.full_timestamps,
-            self.boundaries["val_start"],
-            self.boundaries["val_end"],
-            self.input_len,
-            self.pred_len,
-        )
-        regimes = [
-            validation_regimes[int(origin)]
-            for origin in origins
-        ]
+        if not origins:
+            raise ValueError("LCBT validation segment produced no usable origins")
+        self.validation_origin_summary = summarize_origins(origins)
+        self.validation_origins = strip_diagnostics(origins)
+        origins = self.validation_origins
+        regimes = [str(origin["stratum"]) for origin in origins]
         selection_schedule = build_lcbt_schedule(
             len(origins) * 4,
             self.input_len,
@@ -413,32 +461,56 @@ class LifecycleCoveragePEMS(Dataset):
             seed=seed,
             epoch=0,
             scenario_ratios=(0.25, 0.25, 0.25, 0.25),
-            cohort_fractions=self.cohort_fractions,
-            cohort_weights=self.cohort_weights,
+            # Same tiers the LCE main table pools, so the checkpoint metric and
+            # the reported table never optimise different conditions.
+            cohort_fractions=self.validation_cohort_plan["fractions"],
+            cohort_weights=self.validation_cohort_plan["weights"],
             clustered_ratio=self.clustered_ratio,
             scenario_node_pools=self._validation_node_pools(),
+            cohort_size_base=self.full_num_nodes,
+            topology_adjacency=self.full_adjacency,
+            # One cohort per origin is replayed across every k, so sizes are
+            # balanced across origins in a stratum, not inside each k.
+            stratify_by_evidence=False,
         )
-        join_items = [item for item in selection_schedule if item["scenario"] == "join"]
-        fault_items = [item for item in selection_schedule if item["scenario"] == "fault"]
-        if len(join_items) != len(origins) or len(fault_items) != len(origins):
-            raise RuntimeError(
-                f"{self.lifecycle_training_strategy} validation replay is not four-group balanced"
-            )
+        # The schedule balances cohort size and topology *within* a calendar
+        # stratum, so a source item is only valid for an origin of the same
+        # stratum. Filtering the schedule globally and zipping it against the
+        # origins destroyed that: the k-th join item and the k-th origin sit in
+        # different strata whenever the scenario draw is not block-aligned.
+        by_stratum = {}
+        for item in selection_schedule:
+            scenario = str(item["scenario"])
+            if scenario in {"join", "fault"}:
+                by_stratum.setdefault((scenario, str(item["calendar_regime"])), []).append(item)
+        pending = {key: list(items) for key, items in by_stratum.items()}
+
+        def take(scenario, regime):
+            queue = pending.get((scenario, regime))
+            if not queue:
+                raise RuntimeError(
+                    f"{self.lifecycle_training_strategy} validation replay has no "
+                    f"{scenario} cohort left for stratum {regime}"
+                )
+            return queue.pop(0)
 
         records = []
-        for origin_rank, (origin, regime, join_item, fault_item) in enumerate(
-            zip(origins, regimes, join_items, fault_items)
-        ):
+        for origin_rank, (origin, regime) in enumerate(zip(origins, regimes)):
+            join_item = take("join", regime)
+            fault_item = take("fault", regime)
+            if (
+                str(join_item["calendar_regime"]) != regime
+                or str(fault_item["calendar_regime"]) != regime
+            ):
+                raise RuntimeError("validation replay paired a cohort from another stratum")
             calendar_id = (
-                CALENDAR_REGIMES.index(regime)
-                if regime in CALENDAR_REGIMES
-                else len(CALENDAR_REGIMES)
+                STRATA.index(regime) if regime in STRATA else len(STRATA)
             )
 
             def append_record(scenario, evidence, phase_id, group_id, source_item, pair):
                 records.append(
                     {
-                        "window_index": int(origin),
+                        "window_index": int(origin["window_index"]),
                         "scenario": scenario,
                         "evidence_steps": int(evidence),
                         "phase_id": int(phase_id),
@@ -448,6 +520,7 @@ class LifecycleCoveragePEMS(Dataset):
                         "topology_mode": str(source_item["topology_mode"]),
                         "calendar_regime": str(regime),
                         "calendar_id": int(calendar_id),
+                        "calendar_day": str(origin["calendar_day"]),
                         "matched_pair_id": f"val-{origin_rank:05d}-{pair}",
                     }
                 )
@@ -464,8 +537,9 @@ class LifecycleCoveragePEMS(Dataset):
     def _manifest_payload(self):
         train_schedule = self._build_schedule("train", self.protocol_seed, 0)
         validation_records = self._build_schedule("val", self.validation_seed, 0)
+        plan = self.validation_cohort_plan
         lce_semantics = {
-            "protocol_name": "LCE v2",
+            "protocol_name": "LCE v3",
             "validation_time_range": [
                 self.boundaries["val_start"],
                 self.boundaries["val_end"],
@@ -474,17 +548,20 @@ class LifecycleCoveragePEMS(Dataset):
             "join_phases": ["Cold", "Warm", "Ready"],
             "fault_phases": ["Onset", "Decay", "Outage"],
             "aggregation": "LifeAvg=mean(Unseen,Steady,mean_k(Join),mean_k(Fault)); k=1..L",
+            "strata_weighting": "equal over tod within day_type; day types by calendar share 5/7 and 2/7",
             "checkpoint_metric": "original-scale val_lifecycle_mae",
+            "checkpoint_tie_break": "worst_group_mae over the four semantic groups",
         }
         ples_semantics = {
-            "protocol_name": "PLES v2",
+            "protocol_name": "PLES v3",
             "test_time_range": [
                 self.boundaries["test_start"],
                 self.boundaries["test_end"],
             ],
             "event_clock": "input_end=event_time+tau+1",
-            "effects": ["JoinLift", "FaultPenalty", "PeakFaultPenalty"],
-            "bootstrap": "origin_then_cohort",
+            "effects": ["JoinLift", "FaultPenalty", "OutageFaultPenalty"],
+            "effect_metrics": ["MAPE", "MAE"],
+            "bootstrap": "stratified_origin_then_cohort",
         }
         payload = {
             "schema_version": 3,
@@ -540,8 +617,33 @@ class LifecycleCoveragePEMS(Dataset):
                 "training": self.protocol_seed,
                 "validation": self.validation_seed,
             },
+            "calendar_strata": {
+                "day_types": list(DAY_TYPES),
+                "tod_bins": [[name, start, end] for name, start, end in TOD_BINS],
+                "strata": list(STRATA),
+                "weighting": "equal over tod within day_type; day types by calendar share 5/7 and 2/7",
+                "weights": stratum_weights(),
+            },
+            "validation_origin_selection": {
+                "rule": "stratified_low_discrepancy",
+                "sequence": "golden_ratio_additive_recurrence",
+                "stratum_order": "chronological",
+                "per_stratum": self.validation_origins_per_stratum,
+                "min_spacing": self.input_len + self.pred_len,
+                "min_spacing_scope": "global; one replay window per origin",
+                "min_observed_fraction": self.min_observed_fraction,
+                "summary": self.validation_origin_summary,
+            },
             "cohort_fractions": list(self.cohort_fractions),
             "cohort_weights": list(self.cohort_weights),
+            "cohort_size_base": self.full_num_nodes,
+            "validation_cohort_plan": {
+                "fractions": list(plan["fractions"]),
+                "weights": list(plan["weights"]),
+                "realised_weights": plan["realised_weights"],
+                "dropped_for_pool_saturation": plan["dropped"],
+                "pool_saturation_limit": plan["pool_saturation_limit"],
+            },
             "clustered_ratio": self.clustered_ratio,
             "reference_training_schedule": _lcbt_schedule_summary(
                 train_schedule,
@@ -672,9 +774,9 @@ class LifecycleCoveragePEMS(Dataset):
         calendar_id = int(
             item.get(
                 "calendar_id",
-                CALENDAR_REGIMES.index(item["calendar_regime"])
-                if item["calendar_regime"] in CALENDAR_REGIMES
-                else len(CALENDAR_REGIMES),
+                STRATA.index(item["calendar_regime"])
+                if item["calendar_regime"] in STRATA
+                else len(STRATA),
             )
         )
         x_t_mark, y_t_mark = np.zeros_like(seq_x), np.zeros_like(seq_y)
@@ -752,11 +854,13 @@ class AsyncLifecyclePEMS(Dataset):
         ples_seed: int = 2026,
         ples_bootstrap_samples: int = 2000,
         ples_bootstrap_seed: int = 2026,
-        ples_protocol_version: int = 2,
-        lce_protocol_version: int = 2,
+        ples_protocol_version: int = 3,
+        lce_protocol_version: int = 3,
         ples_manifest_root: str = "./protocol_manifests",
         ples_overwrite_manifest: bool = False,
         lifecycle_training_strategy: str = "lcbt_v3",
+        lce_origins_per_stratum: int = 1,
+        lcbt_min_observed_fraction: float = 0.30,
     ):
         if flag != "test":
             raise ValueError("AsyncLifecyclePEMS only supports the test split")
@@ -803,6 +907,8 @@ class AsyncLifecyclePEMS(Dataset):
         self.lcbt_cohort_weights = tuple(float(value) for value in lcbt_cohort_weights)
         self.ples_protocol_version = int(ples_protocol_version)
         self.lce_protocol_version = int(lce_protocol_version)
+        self.origins_per_stratum = int(lce_origins_per_stratum)
+        self.min_observed_fraction = float(lcbt_min_observed_fraction)
         self.ples_manifest_root = Path(ples_manifest_root)
         self.ples_overwrite_manifest = bool(ples_overwrite_manifest)
         if self.lifecycle_training_strategy != "lcbt_v3":
@@ -810,11 +916,11 @@ class AsyncLifecyclePEMS(Dataset):
         if self.lifecycle_age_mode != "state_duration":
             raise ValueError("lifecycle async evaluation requires state_duration age")
         if (
-            self.ples_protocol_version != 2
-            or self.lce_protocol_version != 2
+            self.ples_protocol_version != 3
+            or self.lce_protocol_version != 3
         ):
             raise ValueError(
-                "lcbt_v3 async evaluation requires LCE v2 and PLES v2"
+                "lcbt_v3 async evaluation requires LCE v3 and PLES v3"
             )
         self.training_protocol_hash = None
         self.ples_options = {
@@ -964,7 +1070,9 @@ class AsyncLifecyclePEMS(Dataset):
             seed=self.ples_options["seed"],
             bootstrap_samples=self.ples_options["bootstrap_samples"],
             bootstrap_seed=self.ples_options["bootstrap_seed"],
-            lce_protocol_version=2,
+            lce_protocol_version=3,
+            origins_per_stratum=self.origins_per_stratum,
+            min_observed_fraction=self.min_observed_fraction,
         )
         self.protocol_manifest = self._ensure_evaluation_manifest(
             self.protocol_manifest

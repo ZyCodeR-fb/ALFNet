@@ -135,6 +135,8 @@ def data_provider(args, flag):
             lifecycle_age_mode=args.lifecycle_age_mode,
             lcbt_overwrite_manifest=args.lcbt_overwrite_manifest,
             lifecycle_training_strategy=args.lifecycle_training_strategy,
+            lcbt_validation_origins_per_stratum=args.lcbt_validation_origins_per_stratum,
+            lcbt_min_observed_fraction=args.lcbt_min_observed_fraction,
         )
     data_set = Dataset(**dataset_kwargs)
     if flag == "train" and args.lifecycle_training_strategy == "lcbt_v3":

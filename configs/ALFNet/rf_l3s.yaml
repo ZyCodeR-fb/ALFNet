@@ -61,8 +61,8 @@ lifecycle:
 
 async_test:
   ples_manifest_root: ./protocol_manifests
-  ples_protocol_version: 2
-  lce_protocol_version: 2
+  ples_protocol_version: 3
+  lce_protocol_version: 3
   ples_pre_steps: 12
   ples_post_steps: 36
   ples_seed: 2026
@@ -91,7 +91,8 @@ family:
     graph_expert_lr: 0.0005
     patch_expert_lr: 0.0001
     gate_lr: 0.00005
-    patch_residual_role_scale: {aas: 0.20, nas: 0.00, vs: 0.00, fs: 0.35}
+    # nas is the Join role; validation sweep is {0.10, 0.20, 0.35}.
+    patch_residual_role_scale: {aas: 0.20, nas: 0.20, vs: 0.00, fs: 0.35}
     forecast_loss_mode: role_balanced_mix
     forecast_role_balanced_beta: 0.10
     lambda_route: 0.05

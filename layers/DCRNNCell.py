@@ -29,7 +29,9 @@ class DiffConv(nn.Module):
     def _concat(x, x_next):
         return torch.cat([x, x_next.unsqueeze(0)], dim=0)
 
-    def forward(self, x, A_q, A_h):
+    def forward(self, x, A_q, A_h, **kwargs):
+        # kwargs absorbs the routing extras that the lifecycle-routed conv needs,
+        # so both convolutions share one cell signature.
         batch_size, num_nodes, input_size = x.shape
         x0 = x.permute(1, 2, 0).reshape(num_nodes, input_size * batch_size)
         features = torch.unsqueeze(x0, 0)
@@ -58,10 +60,11 @@ class DiffConv(nn.Module):
 class DCRNNCell(GraphGRUCellBase):
     """Diffusion convolutional recurrent cell (Li et al., ICLR 2018)."""
 
-    def __init__(self, input_size: int, hidden_size: int, k: int = 2):
-        forget_gate = DiffConv(input_size + hidden_size, hidden_size, k)
-        update_gate = DiffConv(input_size + hidden_size, hidden_size, k)
-        candidate_gate = DiffConv(input_size + hidden_size, hidden_size, k)
+    def __init__(self, input_size: int, hidden_size: int, k: int = 2, conv_factory=None):
+        build = conv_factory or (lambda in_size, out_size: DiffConv(in_size, out_size, k))
+        forget_gate = build(input_size + hidden_size, hidden_size)
+        update_gate = build(input_size + hidden_size, hidden_size)
+        candidate_gate = build(input_size + hidden_size, hidden_size)
         super(DCRNNCell, self).__init__(
             hidden_size=hidden_size,
             forget_gate=forget_gate,

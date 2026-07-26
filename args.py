@@ -81,8 +81,8 @@ def _add_arguments(parser):
     parser.add_argument("--ples_seed", type=int, default=2026, help="PLES protocol seed recorded in the manifest")
     parser.add_argument("--ples_bootstrap_samples", type=int, default=2000, help="hierarchical bootstrap samples for PLES effects")
     parser.add_argument("--ples_bootstrap_seed", type=int, default=2026, help="hierarchical bootstrap seed for PLES effects")
-    parser.add_argument("--ples_protocol_version", type=int, default=2, choices=[2])
-    parser.add_argument("--lce_protocol_version", type=int, default=2, choices=[2])
+    parser.add_argument("--ples_protocol_version", type=int, default=3, choices=[3])
+    parser.add_argument("--lce_protocol_version", type=int, default=3, choices=[3])
     parser.add_argument("--ples_overwrite_manifest", action="store_true", help="overwrite a mismatched canonical PLES manifest intentionally")
     parser.add_argument("--lifecycle_role_features", action="store_true", help="append lifecycle role one-hot features to async lifecycle inputs")
     parser.add_argument("--lifecycle_history_age_feature", action="store_true", help="append lifecycle history-age feature to async lifecycle inputs")
@@ -120,6 +120,9 @@ def _add_arguments(parser):
     parser.add_argument("--lcbt_cohort_fractions", type=float, nargs="+", default=[0.025, 0.05, 0.10])
     parser.add_argument("--lcbt_cohort_weights", type=float, nargs="+", default=[0.25, 0.50, 0.25])
     parser.add_argument("--lcbt_clustered_ratio", type=float, default=0.50)
+    parser.add_argument("--lcbt_validation_origins_per_stratum", type=int, default=2)
+    parser.add_argument("--lce_origins_per_stratum", type=int, default=1)
+    parser.add_argument("--lcbt_min_observed_fraction", type=float, default=0.30)
     parser.add_argument("--lcbt_overwrite_manifest", action="store_true", help="overwrite a mismatched LCBT manifest intentionally")
 
     parser.add_argument("--batch_size", type=int, default=32)
@@ -347,10 +350,10 @@ def finalize_args(args):
             )
         if not 0 <= args.lcbt_clustered_ratio <= 1:
             raise ValueError("lcbt_clustered_ratio must be in [0, 1]")
-        if int(args.lce_protocol_version) != 2:
-            raise ValueError("lcbt_v3 requires lce_protocol_version=2")
-        if int(args.ples_protocol_version) != 2:
-            raise ValueError(f"{args.lifecycle_training_strategy} requires ples_protocol_version=2")
+        if int(args.lce_protocol_version) != 3:
+            raise ValueError("lcbt_v3 requires lce_protocol_version=3")
+        if int(args.ples_protocol_version) != 3:
+            raise ValueError(f"{args.lifecycle_training_strategy} requires ples_protocol_version=3")
         if int(args.batch_size) % 4:
             raise ValueError("lcbt_v3 batch_size must be divisible by four")
     args.c_out = len(args.target_features)

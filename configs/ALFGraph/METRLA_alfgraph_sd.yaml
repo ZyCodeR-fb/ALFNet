@@ -38,8 +38,8 @@ lifecycle:
   lcbt_zero_history_ratio: 0.25
 
 async_test:
-  ples_protocol_version: 2
-  lce_protocol_version: 2
+  ples_protocol_version: 3
+  lce_protocol_version: 3
 
 family:
   recipe:
@@ -58,3 +58,12 @@ family:
     grin_cached_support: false
     decoder_output_mode: residual_delta
     decoder_residual_scale: 0.3
+    # Graph core. `lifecycle_moge` routes five propagation supports per node per
+    # step from the lifecycle state; `diffusion` restores the single fixed
+    # DiffConv operator. For the parameter-matched control set graph_conv:
+    # diffusion together with d_model: 82 (370,067 vs 377,873, -2.1%).
+    graph_conv: lifecycle_moge
+    moge_num_experts: 5
+    moge_top_k: 2
+    moge_noisy_gating: true
+    moge_load_balance_coef: 0.01

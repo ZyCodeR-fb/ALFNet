@@ -22,7 +22,7 @@ from data_provider.lcbt_protocol import (
 from data_provider.ples_protocol import (
     phase_for_tau_v2,
     summarize_lce_rows,
-    summarize_paired_rows_v2,
+    summarize_paired_rows,
 )
 from experiments.train import _accept_checkpoint
 
@@ -48,7 +48,7 @@ def _ring_adjacency(num_nodes):
     return adjacency
 
 
-def _metric_row(track, tau, treated, control, regime="AM"):
+def _metric_row(track, tau, treated, control, regime="Weekday/AMPeak"):
     phase = (
         ("Cold", "Warm", "Ready")
         if track == "join"
@@ -115,6 +115,91 @@ def test_lcbt_v3_uniformly_balances_every_evidence_length_per_track_and_calendar
                 }
 
 
+def test_validation_replay_pairs_cohorts_with_their_own_calendar_stratum(workspace_tmp):
+    """The source schedule must be matched per stratum, not zipped globally."""
+    validation = _build_dataset(workspace_tmp, "val")
+    origins = {
+        int(origin["window_index"]): str(origin["stratum"])
+        for origin in validation.validation_origins
+    }
+    mismatched = [
+        record
+        for record in validation.schedule
+        if record["scenario"] in {"join", "fault"}
+        and record["calendar_regime"] != origins[int(record["window_index"])]
+    ]
+    assert not mismatched, f"{len(mismatched)} replay records carry another stratum"
+
+
+def test_thin_strata_keep_every_cohort_size_tier():
+    """Reproduces the degeneracy that wiped the 2.5% tier out of validation.
+
+    With one sample per (stratum, evidence) cell, ``_allocate_counts(1, [1/3,
+    2/3])`` always returns the heavier tier, so evidence-level stratification
+    silently deleted the small cohorts. The validation replay uses one cohort per
+    origin across every k, so it must balance at the stratum level instead.
+    """
+    regimes = ["Weekday/AMPeak"] * 12 + ["Weekend/Midday"] * 12
+    kwargs = dict(
+        num_samples=len(regimes),
+        input_len=12,
+        adjacency=_ring_adjacency(24),
+        calendar_regimes=regimes,
+        seed=2026,
+        epoch=0,
+        cohort_fractions=(0.025, 0.05),
+        cohort_weights=(1 / 3, 2 / 3),
+    )
+
+    per_evidence = build_lcbt_schedule(stratify_by_evidence=True, **kwargs)
+    per_stratum = build_lcbt_schedule(stratify_by_evidence=False, **kwargs)
+
+    def tiers(schedule, regime):
+        return Counter(
+            item["cohort_fraction"]
+            for item in schedule
+            if item["scenario"] == "join" and item["calendar_regime"] == regime
+        )
+
+    # The defect: evidence-level stratification collapses onto one tier.
+    assert set(tiers(per_evidence, "Weekday/AMPeak")) == {0.05}
+    # The fix: both tiers survive once the balance is taken per stratum.
+    assert set(tiers(per_stratum, "Weekday/AMPeak")) == {0.025, 0.05}
+    assert set(tiers(per_stratum, "Weekend/Midday")) == {0.025, 0.05}
+
+
+def test_origin_selection_is_balanced_spaced_and_time_of_day_diverse():
+    """The three defects the midpoint rule and my first spacing fix produced."""
+    from data_provider.calendar_strata import (
+        TOD_NAMES,
+        lce_episode_span,
+        select_stratified_origins,
+    )
+
+    steps = 288 * 21  # three weeks at five-minute resolution
+    timestamps = (
+        np.datetime64("2026-03-02T00:00") + np.arange(steps) * np.timedelta64(5, "m")
+    )
+    origins = select_stratified_origins(
+        timestamps, steps, input_len=12, pred_len=12, pre_steps=12, post_steps=36
+    )
+    indices = sorted(origin["event_time_index"] for origin in origins)
+    spacing = min(b - a for a, b in zip(indices, indices[1:]))
+    counts = Counter(origin["tod_bin"] for origin in origins)
+    clocks = {
+        name: {origin["event_timestamp"][11:16] for origin in origins if origin["tod_bin"] == name}
+        for name in TOD_NAMES
+    }
+
+    # Globally spaced so LCE episodes never share data.
+    assert spacing >= lce_episode_span(12, 12)
+    # No time-of-day bin may be crowded out by the greedy placement order.
+    assert set(counts) == set(TOD_NAMES)
+    assert min(counts.values()) >= 0.5 * max(counts.values()), counts
+    # And each bin must land on many different clock times, not one midpoint.
+    assert all(len(values) >= 5 for values in clocks.values()), clocks
+
+
 def test_lcbt_boundaries_are_strict_and_scaler_cannot_see_validation_or_test():
     boundaries = resolve_lcbt_boundaries(1000)
     assert boundaries == {
@@ -164,7 +249,7 @@ def test_lce_v2_uses_exactly_one_complete_input_window_but_ples_keeps_long_tail(
         rows.append(_metric_row("fault", tau, treated=100.0 if tau >= 12 else tau + 13, control=3.0))
 
     lce = summarize_lce_rows(rows, input_len=12)
-    ples = summarize_paired_rows_v2(rows)
+    ples = summarize_paired_rows(rows, input_len=12)
 
     assert lce["main_metrics"]["Join"]["MAE"] == pytest.approx(6.5)
     assert lce["main_metrics"]["Fault"]["MAE"] == pytest.approx(18.5)
@@ -185,8 +270,8 @@ def test_lcbt_v3_configs_keep_models_unchanged_and_use_new_protocol_versions():
     for path in paths:
         text = path.read_text(encoding="utf-8")
         assert "lifecycle_training_strategy: lcbt_v3" in text
-        assert "lce_protocol_version: 2" in text
-        assert "ples_protocol_version: 2" in text
+        assert "lce_protocol_version: 3" in text
+        assert "ples_protocol_version: 3" in text
         assert "max_epoch: 100" in text
         assert "patience: 10" in text
 
@@ -394,8 +479,8 @@ def test_lce_and_ples_outputs_are_separate_and_protocol_matched(workspace_tmp):
         lcbt_manifest_root=str(workspace_tmp / "manifests"),
         lcbt_scaler_end_ratio=0.50,
         lcbt_test_start_ratio=0.60,
-        ples_protocol_version=2,
-        lce_protocol_version=2,
+        ples_protocol_version=3,
+        lce_protocol_version=3,
         ples_manifest_root=str(workspace_tmp / "manifests"),
         ples_overwrite_manifest=True,
         ples_pre_steps=1,
@@ -417,7 +502,7 @@ def test_lce_and_ples_outputs_are_separate_and_protocol_matched(workspace_tmp):
         ples_manifest_root=str(workspace_tmp / "manifests"),
         ples_bootstrap_samples=0,
         ples_bootstrap_seed=7,
-        lce_protocol_version=2,
+        lce_protocol_version=3,
         device="cpu",
         t_mark=False,
         pos_mark=False,
@@ -439,8 +524,12 @@ def test_lce_and_ples_outputs_are_separate_and_protocol_matched(workspace_tmp):
         / f"lifecycle-v3-{dataset.protocol_manifest['protocol_hash'][:10]}"
     )
     assert set(result["lce"]["main_metrics"]) == {
-        "Unseen", "Steady", "Join", "Fault", "LifeAvg"
+        "Unseen", "Steady", "Join", "Fault", "LifeAvg", "WorstGroup"
     }
+    assert result["lce"]["main_metrics"]["WorstGroup"]["MAE"] == max(
+        result["lce"]["main_metrics"][name]["MAE"]
+        for name in ("Unseen", "Steady", "Join", "Fault")
+    )
     assert len(result["lce"]["trajectory_metrics"]["Join"]) == 12
     for filename in (
         "lce_main_summary.json",

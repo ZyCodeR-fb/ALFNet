@@ -1,15 +1,19 @@
 import hashlib
 import json
-from datetime import datetime, timezone
 
 import numpy as np
 
+from data_provider.calendar_strata import (
+    STRATA,
+    calendar_stratum,
+    weighted_stratum_mean,
+)
 
-LCBT_PROTOCOL_NAME = "Lifecycle Coverage-Balanced Training v3"
-LCBT_PROTOCOL_VERSION = 3
+
+LCBT_PROTOCOL_NAME = "Lifecycle Coverage-Balanced Training v3.1"
+LCBT_PROTOCOL_VERSION = 4
 LCBT_PHASES = ("Cold", "Warm", "Ready", "Onset", "Decay", "Outage")
 LCBT_GROUPS = ("zero_history", "steady", "join", "fault")
-CALENDAR_REGIMES = ("AM", "PM", "OffPeak", "Weekend")
 
 
 def stable_hash(value):
@@ -37,31 +41,6 @@ def array_hash(value):
     else:
         digest.update(array.tobytes())
     return digest.hexdigest()
-
-
-def _as_datetime(value):
-    if hasattr(value, "to_pydatetime"):
-        return value.to_pydatetime()
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, np.datetime64):
-        micros = value.astype("datetime64[us]").astype(np.int64)
-        return datetime.fromtimestamp(
-            float(micros) / 1_000_000.0,
-            tz=timezone.utc,
-        ).replace(tzinfo=None)
-    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-
-
-def calendar_regime(value):
-    timestamp = _as_datetime(value)
-    if timestamp.weekday() >= 5:
-        return "Weekend"
-    if 7 <= timestamp.hour < 10:
-        return "AM"
-    if 16 <= timestamp.hour < 19:
-        return "PM"
-    return "OffPeak"
 
 
 def resolve_lcbt_boundaries(
@@ -132,7 +111,7 @@ def _scenario_assignments(
     calendar_regimes = np.asarray(calendar_regimes, dtype=object)
     num_samples = len(calendar_regimes)
     desired = _allocate_counts(num_samples, ratios)
-    regime_names = [name for name in CALENDAR_REGIMES if np.any(calendar_regimes == name)]
+    regime_names = [name for name in STRATA if np.any(calendar_regimes == name)]
     regime_names.extend(
         sorted({str(name) for name in calendar_regimes if str(name) not in regime_names})
     )
@@ -183,12 +162,37 @@ def _phase_id(scenario, evidence_steps, input_len):
     raise ValueError(f"unsupported LCBT scenario: {scenario}")
 
 
-def _weighted_degree_strata(adjacency):
+def _weighted_degree(adjacency):
     weights = np.nan_to_num(np.abs(np.asarray(adjacency, dtype=np.float64)), nan=0.0)
     np.fill_diagonal(weights, 0.0)
-    degree = weights.sum(axis=0) + weights.sum(axis=1)
-    order = np.lexsort((np.arange(len(degree)), degree))
-    return weights, [np.asarray(part, dtype=np.int64) for part in np.array_split(order, 3)]
+    return weights.sum(axis=0) + weights.sum(axis=1)
+
+
+def _degree_strata_for(graph_degree, pool):
+    """Split pool members into low/mid/high thirds of their full-graph degree.
+
+    Returned indices are positions inside ``pool``, which is what the selectors
+    work in, but the ordering comes from the network-wide degree.
+    """
+    pool = np.asarray(pool, dtype=np.int64)
+    local = np.arange(len(pool), dtype=np.int64)
+    order = local[np.lexsort((pool, graph_degree[pool]))]
+    return [np.asarray(part, dtype=np.int64) for part in np.array_split(order, 3)]
+
+
+def _hop_distances(adjacency):
+    """Hop distance on the graph the cohort is drawn from.
+
+    Clustering has to be measured on the graph, not on the induced subgraph of
+    the eligible pool: a pool of scattered unseen sensors has almost no internal
+    edges, so pool-internal connectivity cannot tell clustered from scattered.
+    """
+    from scipy.sparse.csgraph import shortest_path
+
+    weights = np.nan_to_num(np.abs(np.asarray(adjacency, dtype=np.float64)), nan=0.0)
+    np.fill_diagonal(weights, 0.0)
+    undirected = ((weights > 0) | (weights.T > 0)).astype(np.float64)
+    return shortest_path(undirected, method="D", unweighted=True, directed=False)
 
 
 def _least_exposed(candidates, exposure, rng, count):
@@ -200,10 +204,13 @@ def _least_exposed(candidates, exposure, rng, count):
     return candidates[order[: min(int(count), len(candidates))]].tolist()
 
 
+def _degree_quotas(strata, cohort_size):
+    return _allocate_counts(cohort_size, [max(len(stratum), 1) for stratum in strata])
+
+
 def _select_scattered_nodes(strata, exposure, rng, cohort_size):
-    counts = _allocate_counts(cohort_size, [1.0, 1.0, 1.0])
     selected = []
-    for stratum, count in zip(strata, counts):
+    for stratum, count in zip(strata, _degree_quotas(strata, cohort_size)):
         selected.extend(_least_exposed(stratum, exposure, rng, int(count)))
     if len(selected) < cohort_size:
         remaining = np.setdiff1d(np.arange(len(exposure)), selected, assume_unique=False)
@@ -211,18 +218,38 @@ def _select_scattered_nodes(strata, exposure, rng, cohort_size):
     return sorted({int(node) for node in selected})
 
 
-def _select_clustered_nodes(weights, strata, exposure, rng, cohort_size, seed_stratum):
-    seed_candidates = strata[int(seed_stratum) % len(strata)]
-    seed = _least_exposed(seed_candidates, exposure, rng, 1)[0]
-    selected = [int(seed)]
-    available = set(range(len(exposure))) - {int(seed)}
+def _select_clustered_nodes(hops, strata, exposure, rng, cohort_size, seed_stratum):
+    """Grow by hop proximity while honouring the same degree quotas as scattered.
+
+    Both styles now respect the low/mid/high degree split, so the two differ in
+    spatial compactness alone rather than in compactness *and* degree mix.
+    """
+    nonempty = [stratum for stratum in strata if len(stratum)]
+    if not nonempty:
+        raise ValueError("cannot build a clustered cohort from an empty node pool")
+    quotas = _degree_quotas(strata, cohort_size)
+    stratum_of = {
+        int(node): index for index, stratum in enumerate(strata) for node in stratum
+    }
+    seed_candidates = nonempty[int(seed_stratum) % len(nonempty)]
+    seed = int(_least_exposed(seed_candidates, exposure, rng, 1)[0])
+    remaining = {index: int(quota) for index, quota in enumerate(quotas)}
+    remaining[stratum_of[seed]] -= 1
+    selected = [seed]
+    available = set(range(len(exposure))) - {seed}
     while len(selected) < cohort_size and available:
-        candidates = np.asarray(sorted(available), dtype=np.int64)
-        connectivity = weights[np.ix_(candidates, np.asarray(selected, dtype=np.int64))].max(axis=1)
+        candidates = np.asarray(
+            sorted(node for node in available if remaining.get(stratum_of[node], 0) > 0),
+            dtype=np.int64,
+        )
+        if not len(candidates):
+            candidates = np.asarray(sorted(available), dtype=np.int64)
+        spread = hops[np.ix_(candidates, np.asarray(selected, dtype=np.int64))]
+        spread = np.where(np.isfinite(spread), spread, hops.shape[0]).mean(axis=1)
         jitter = rng.random(len(candidates))
-        order = np.lexsort((candidates, jitter, exposure[candidates], -connectivity))
-        chosen = int(candidates[order[0]])
+        chosen = int(candidates[np.lexsort((candidates, jitter, exposure[candidates], spread))[0]])
         selected.append(chosen)
+        remaining[stratum_of[chosen]] = remaining.get(stratum_of[chosen], 0) - 1
         available.remove(chosen)
     return sorted(selected)
 
@@ -247,8 +274,37 @@ def build_lcbt_schedule(
     cohort_weights=(0.25, 0.50, 0.25),
     clustered_ratio=0.50,
     scenario_node_pools=None,
+    cohort_size_base=None,
+    topology_adjacency=None,
+    node_ids=None,
+    stratify_by_evidence=True,
 ):
-    """Build the frozen LCBT v3 schedule with uniform evidence k=1..L."""
+    """Build the frozen LCBT schedule with uniform evidence k=1..L.
+
+    ``cohort_size_base`` fixes what a fraction is a fraction *of*. It defaults to
+    the graph handed in, which used to make "5%" mean 8 nodes during training
+    (157-node graph) and 10 nodes at validation/test (207-node graph). Passing
+    the full node count makes one absolute size hold everywhere.
+
+    ``topology_adjacency`` is the graph that defines degree and hop distance.
+    Node degree is a property of the road network, not of which sensors happen
+    to be visible in a split, so passing the full adjacency keeps "high-degree
+    node" and "clustered cohort" meaning the same thing in training, validation
+    and test. It defaults to ``adjacency`` for standalone use.
+
+    ``node_ids`` maps a schedule node index onto its row in
+    ``topology_adjacency``. Training runs on the known-node induced graph, whose
+    indices are local, so the map is what stops a local index from being read as
+    a full-graph node id.
+
+    ``stratify_by_evidence`` controls how finely cohort size and topology are
+    balanced. Training has thousands of samples per stratum, so balancing them
+    inside each evidence length is free. The validation replay has roughly one
+    sample per (stratum, evidence) cell and replays every k from one cohort, so
+    balancing per evidence there would ask ``_allocate_counts`` to split a single
+    sample across the size tiers, which always awards it to the heaviest tier and
+    wipes the 2.5% cohorts out entirely.
+    """
     num_samples = int(num_samples)
     input_len = int(input_len)
     adjacency = np.asarray(adjacency)
@@ -309,13 +365,15 @@ def build_lcbt_schedule(
             )
             evidence_values = (
                 range(1, input_len + 1)
-                if scenario in {"join", "fault"}
-                else (0,)
+                if stratify_by_evidence and scenario in {"join", "fault"}
+                else (None,)
             )
             for evidence in evidence_values:
-                indices = scenario_indices[
-                    evidence_steps[scenario_indices] == int(evidence)
-                ]
+                indices = (
+                    scenario_indices
+                    if evidence is None
+                    else scenario_indices[evidence_steps[scenario_indices] == int(evidence)]
+                )
                 if not len(indices):
                     continue
                 fractions[indices] = np.asarray(
@@ -334,6 +392,23 @@ def build_lcbt_schedule(
                     dtype=object,
                 )
     exposure = np.zeros(adjacency.shape[0], dtype=np.int64)
+    size_base = int(cohort_size_base or adjacency.shape[0])
+    topology = np.asarray(adjacency if topology_adjacency is None else topology_adjacency)
+    topology_ids = (
+        np.arange(adjacency.shape[0], dtype=np.int64)
+        if node_ids is None
+        else np.asarray(node_ids, dtype=np.int64)
+    )
+    if len(topology_ids) != adjacency.shape[0]:
+        raise ValueError("node_ids must give one topology row per schedule node")
+    if topology_ids.max(initial=-1) >= topology.shape[0]:
+        raise ValueError("node_ids fall outside topology_adjacency")
+    # Degree strata and hop distances both come from the topology graph and are
+    # only *restricted* to the pool afterwards, never recomputed on the induced
+    # subgraph: a pool of scattered unseen sensors has almost no internal edges,
+    # so its induced degrees and distances describe the pool, not the network.
+    graph_degree = _weighted_degree(topology)
+    graph_hops = _hop_distances(topology)
 
     schedule = []
     for sample_index in range(num_samples):
@@ -347,14 +422,15 @@ def build_lcbt_schedule(
         )
         cohort_size = min(
             len(pool),
-            max(1, int(round(adjacency.shape[0] * cohort_fraction))),
+            max(1, int(round(size_base * cohort_fraction))),
         )
-        pool_adjacency = adjacency[np.ix_(pool, pool)]
-        weights, strata = _weighted_degree_strata(pool_adjacency)
+        topology_pool = topology_ids[pool]
+        strata = _degree_strata_for(graph_degree, topology_pool)
+        pool_hops = graph_hops[np.ix_(topology_pool, topology_pool)]
         pool_exposure = exposure[pool].copy()
         if topology_mode == "clustered":
             selected_local = _select_clustered_nodes(
-                weights,
+                pool_hops,
                 strata,
                 pool_exposure,
                 rng,
@@ -466,9 +542,18 @@ def _finite_mean(values):
 
 
 def _calendar_balanced_state_mean(cell_state, label):
+    """Mean within each stratum, then the calendar-share weighted combination.
+
+    Equal weight over four regimes used to hand a validation Weekend cell built
+    from three origins a full quarter of the checkpoint metric.
+    """
     calendar_values = cell_state.get(label, {})
-    return _finite_mean(
-        [_finite_mean(values) for _, values in sorted(calendar_values.items())]
+    return weighted_stratum_mean(
+        {
+            STRATA[int(calendar_id)] if 0 <= int(calendar_id) < len(STRATA) else str(calendar_id):
+            _finite_mean(values)
+            for calendar_id, values in sorted(calendar_values.items())
+        }
     )
 
 

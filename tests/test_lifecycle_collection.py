@@ -57,8 +57,8 @@ def _write_run(
         for index, name in enumerate(("Cold", "Warm", "Ready", "Onset", "Decay", "Outage"))
     }
     for filename, table, metrics in (
-        ("lce_main_summary.json", "LCE v2 main", main),
-        ("lce_phase_summary.json", "LCE v2 phases", phases),
+        ("lce_main_summary.json", "LCE v3 main", main),
+        ("lce_phase_summary.json", "LCE v3 phases", phases),
     ):
         with (run_dir / filename).open("w", encoding="utf-8") as handle:
             json.dump({**common, "table": table, "metrics": metrics}, handle)
