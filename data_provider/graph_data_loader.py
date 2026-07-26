@@ -208,8 +208,9 @@ class LifecycleCoveragePEMS(Dataset):
         lifecycle_age_mode="state_duration",
         lcbt_overwrite_manifest=False,
         lifecycle_training_strategy="lcbt_v3",
-        lcbt_validation_origins_per_stratum=2,
+        lcbt_validation_origins_per_stratum=3,
         lcbt_min_observed_fraction=0.30,
+        lcbt_episode_hidden_fraction=None,
     ):
         if flag not in {"train", "val"}:
             raise ValueError("LifecycleCoveragePEMS only supports train/val splits")
@@ -241,6 +242,7 @@ class LifecycleCoveragePEMS(Dataset):
         self.lifecycle_training_strategy = str(lifecycle_training_strategy)
         self.validation_origins_per_stratum = int(lcbt_validation_origins_per_stratum)
         self.min_observed_fraction = float(lcbt_min_observed_fraction)
+        self.requested_hidden_fraction = lcbt_episode_hidden_fraction
         self.validation_origins = []
         self.validation_origin_summary = {}
         if self.lifecycle_training_strategy != "lcbt_v3":
@@ -416,7 +418,19 @@ class LifecycleCoveragePEMS(Dataset):
             # Training runs on the known-node induced graph, so its schedule
             # indices are local; this maps them back onto the full network.
             node_ids=self.known_nodes,
+            hidden_fraction=self.episode_hidden_fraction,
         )
+
+    @property
+    def episode_hidden_fraction(self):
+        """Share of training sensors held out per window.
+
+        Defaults to the evaluation hidden rate so the graph the model trains on
+        is as sparse as the one it is scored on.
+        """
+        if self.requested_hidden_fraction is not None:
+            return float(self.requested_hidden_fraction)
+        return len(self.master_unseen_nodes) / float(self.full_num_nodes)
 
     @property
     def validation_cohort_plan(self):
@@ -605,6 +619,11 @@ class LifecycleCoveragePEMS(Dataset):
                 "grin_is_protocol_preprocessing": False,
             },
             "objective": {
+                "episode_holdout": (
+                    "each training window hides a rotating share of the known nodes for its "
+                    "whole length; join/zero_history cohorts come from the hidden set, "
+                    "steady/fault from the visible remainder"
+                ),
                 "forecast_mask": "target_cohort_mask",
                 "auxiliary_mask": "target_cohort_mask_intersection",
                 "scenario_ratios": dict(zip(LCBT_GROUPS, self.scenario_ratios)),
@@ -637,6 +656,10 @@ class LifecycleCoveragePEMS(Dataset):
             "cohort_fractions": list(self.cohort_fractions),
             "cohort_weights": list(self.cohort_weights),
             "cohort_size_base": self.full_num_nodes,
+            "episode_hidden_fraction": self.episode_hidden_fraction,
+            "episode_hidden_nodes_per_window": int(
+                round(self.episode_hidden_fraction * len(self.known_nodes))
+            ),
             "validation_cohort_plan": {
                 "fractions": list(plan["fractions"]),
                 "weights": list(plan["weights"]),
@@ -703,6 +726,15 @@ class LifecycleCoveragePEMS(Dataset):
             role_ids[:, unseen] = ROLE_VS
             lifecycle_mask[:, unseen] = False
             state_age[:, unseen] = 0.0
+        else:
+            # The episode's held-out sensors, hidden for the whole window exactly
+            # as master-unseen nodes are at evaluation time. The scenario block
+            # below then reveals the Join cohort for its last k steps.
+            hidden = np.asarray(item.get("hidden_nodes", []), dtype=np.int64)
+            if len(hidden):
+                role_ids[:, hidden] = ROLE_VS
+                lifecycle_mask[:, hidden] = False
+                state_age[:, hidden] = 0.0
 
         changed_nodes = list(item["changed_nodes"])
         scenario = str(item["scenario"])

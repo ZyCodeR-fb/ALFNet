@@ -131,6 +131,54 @@ def test_validation_replay_pairs_cohorts_with_their_own_calendar_stratum(workspa
     assert not mismatched, f"{len(mismatched)} replay records carry another stratum"
 
 
+def test_episode_holdout_matches_the_evaluation_hidden_rate():
+    """Training used to show a graph with nothing permanently missing."""
+    nodes = 39  # divides evenly into three degree strata
+    regimes = ["Weekday/AMPeak", "Weekend/Midday"] * 32
+    common = dict(
+        num_samples=len(regimes),
+        input_len=12,
+        adjacency=_ring_adjacency(nodes),
+        calendar_regimes=regimes,
+        seed=2026,
+        epoch=0,
+        cohort_fractions=(0.05,),
+        cohort_weights=(1.0,),
+    )
+
+    without = build_lcbt_schedule(hidden_fraction=0.0, **common)
+    assert all(not item["hidden_nodes"] for item in without)
+
+    with_holdout = build_lcbt_schedule(hidden_fraction=0.30, **common)
+    for item in with_holdout:
+        hidden = set(item["hidden_nodes"])
+        assert len(hidden) == round(0.30 * nodes)
+        cohort = set(item["changed_nodes"])
+        if item["scenario"] in {"join", "zero_history"}:
+            assert cohort <= hidden, "join cohorts must sit on held-out sensors"
+        else:
+            assert not (cohort & hidden), "steady/fault cohorts must stay visible"
+
+    # Held-out duty rotates rather than always landing on the same sensors.
+    exposure = Counter(node for item in with_holdout for node in item["hidden_nodes"])
+    assert len(exposure) == nodes, "every sensor must take a turn being hidden"
+    assert max(exposure.values()) <= 1.2 * min(exposure.values())
+
+
+def test_episode_holdout_cannot_be_combined_with_fixed_pools():
+    with pytest.raises(ValueError, match="cannot be combined"):
+        build_lcbt_schedule(
+            num_samples=8,
+            input_len=12,
+            adjacency=_ring_adjacency(12),
+            calendar_regimes=["Weekday/AMPeak"] * 8,
+            seed=1,
+            epoch=0,
+            hidden_fraction=0.25,
+            scenario_node_pools={name: [0, 1, 2] for name in LCBT_GROUPS},
+        )
+
+
 def test_thin_strata_keep_every_cohort_size_tier():
     """Reproduces the degeneracy that wiped the 2.5% tier out of validation.
 

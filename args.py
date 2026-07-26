@@ -120,7 +120,14 @@ def _add_arguments(parser):
     parser.add_argument("--lcbt_cohort_fractions", type=float, nargs="+", default=[0.025, 0.05, 0.10])
     parser.add_argument("--lcbt_cohort_weights", type=float, nargs="+", default=[0.25, 0.50, 0.25])
     parser.add_argument("--lcbt_clustered_ratio", type=float, default=0.50)
-    parser.add_argument("--lcbt_validation_origins_per_stratum", type=int, default=2)
+    parser.add_argument("--lcbt_validation_origins_per_stratum", type=int, default=3)
+    parser.add_argument("--lcbt_episode_hidden_fraction", type=float, default=None,
+                        help="share of known sensors held out per training window; defaults to the evaluation hidden rate")
+    parser.add_argument("--lcbt_context_loss_weight", type=float, default=0.10,
+                        help="weight of the visible non-cohort context term in the forecast loss")
+    parser.add_argument("--family_override", action="append", default=[],
+                        metavar="PATH=VALUE",
+                        help="override one leaf of model_family_cfg, e.g. recipe.patch_residual_role_scale.nas=0.35")
     parser.add_argument("--lce_origins_per_stratum", type=int, default=1)
     parser.add_argument("--lcbt_min_observed_fraction", type=float, default=0.30)
     parser.add_argument("--lcbt_overwrite_manifest", action="store_true", help="overwrite a mismatched LCBT manifest intentionally")
@@ -242,9 +249,45 @@ def _validate_required_fields(args):
         raise ValueError(f"Missing required arguments after config merge: {', '.join(missing)}")
 
 
+def _apply_family_overrides(args):
+    """Patch one leaf of ``model_family_cfg`` from the command line.
+
+    Nested family values otherwise live only in the YAML, so sweeping a single
+    scalar meant either editing the file between runs -- which cannot be done
+    safely when several runs start at once -- or copying the whole config, which
+    lets the arms drift apart. An override keeps every arm provably identical
+    except for the value under test, and it lands before ``build_exp_id`` so each
+    value still gets its own experiment directory.
+    """
+    overrides = list(getattr(args, "family_override", []) or [])
+    if not overrides:
+        return
+    family = deepcopy(getattr(args, "model_family_cfg", {}) or {})
+    for item in overrides:
+        path, separator, raw = str(item).partition("=")
+        if not separator:
+            raise ValueError(f"--family_override needs dotted.path=value, got {item!r}")
+        keys = [part for part in path.strip().split(".") if part]
+        if not keys:
+            raise ValueError(f"--family_override has an empty path: {item!r}")
+        node = family
+        for key in keys[:-1]:
+            if not isinstance(node.get(key), dict):
+                raise ValueError(f"--family_override path {path!r} is not a mapping")
+            node = node[key]
+        if keys[-1] not in node:
+            raise ValueError(
+                f"--family_override target {path!r} is absent from the config; "
+                "refusing to invent a new key"
+            )
+        node[keys[-1]] = OmegaConf.to_object(OmegaConf.create(f"value: {raw}"))["value"]
+    args.model_family_cfg = family
+
+
 def finalize_args(args):
     _normalize_node_lists(args)
     _apply_mode_overrides(args)
+    _apply_family_overrides(args)
     _validate_required_fields(args)
 
     if args.test_for_async_lifecycle:

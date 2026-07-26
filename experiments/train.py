@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import statistics
 import time
 
 import torch
@@ -90,6 +91,7 @@ def _checkpoint_path_for_save(args):
 
 def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch):
     metrics = {}
+    timings = {}
     for mode in ("train", "val"):
         start = time.time()
         model, mode_metrics = shared_step(
@@ -103,7 +105,9 @@ def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch
             epoch=epoch,
         )
         metrics[mode] = mode_metrics
-        print(f"-> {mode} finished, took {time.time() - start:.2f}s")
+        timings[mode] = time.time() - start
+        print(f"-> {mode} finished, took {timings[mode]:.2f}s")
+    args.epoch_seconds.append(timings)
 
     improved = _save_checkpoint(
         model,
@@ -112,6 +116,10 @@ def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch
         epoch,
         metrics["val"]["lifecycle"],
     )
+    if improved:
+        args.seconds_to_best = sum(
+            entry["train"] + entry["val"] for entry in args.epoch_seconds
+        )
     monitored = metrics["val"]["lifecycle"]["mae"]
     if args.scheduler == "plateau":
         scheduler.step(monitored)
@@ -125,7 +133,44 @@ def _finite_or_none(value):
     return float(value) if math.isfinite(value) else None
 
 
-def _write_training_summary(args, finished_epoch, stop_reason):
+def _efficiency_report(args, data_loaders):
+    """Cost has to be recorded per run, not inferred from wall-clock afterwards.
+
+    Batch size, optimizer steps and model size differ between the models being
+    compared, so "it took N hours" is not a comparison. These fields let the
+    paper report samples/s, steps/s and peak memory alongside accuracy.
+    """
+    train_loader, val_loader = data_loaders["train"], data_loaders["val"]
+    train_seconds = [entry["train"] for entry in args.epoch_seconds]
+    val_seconds = [entry["val"] for entry in args.epoch_seconds]
+    total = sum(train_seconds) + sum(val_seconds)
+    steps = len(train_loader)
+    samples = len(train_loader.dataset)
+    mean_train = statistics.fmean(train_seconds) if train_seconds else float("nan")
+    peak_bytes = None
+    if torch.cuda.is_available():
+        peak_bytes = int(torch.cuda.max_memory_allocated())
+    return {
+        "trainable_parameters": int(getattr(args, "num_params", 0)),
+        "batch_size": int(args.batch_size),
+        "optimizer_steps_per_epoch": int(steps),
+        "train_samples_per_epoch": int(samples),
+        "validation_records": int(len(val_loader.dataset)),
+        "epochs_run": len(train_seconds),
+        "mean_train_seconds_per_epoch": mean_train,
+        "mean_val_seconds_per_epoch": (
+            statistics.fmean(val_seconds) if val_seconds else float("nan")
+        ),
+        "total_seconds": total,
+        "seconds_to_best_checkpoint": _finite_or_none(args.seconds_to_best),
+        "train_samples_per_second": samples / mean_train if mean_train else None,
+        "optimizer_steps_per_second": steps / mean_train if mean_train else None,
+        "peak_gpu_memory_bytes": peak_bytes,
+        "device": str(args.device),
+    }
+
+
+def _write_training_summary(args, finished_epoch, stop_reason, data_loaders):
     summary = {
         "finished_epoch": int(finished_epoch),
         "stop_reason": stop_reason,
@@ -138,6 +183,8 @@ def _write_training_summary(args, finished_epoch, stop_reason):
             args.best_val_worst_group_metric
         ),
         "best_val_lifecycle_metrics": args.best_val_lifecycle_metrics,
+        "validation_group_volatility": args.validation_group_volatility,
+        "efficiency": _efficiency_report(args, data_loaders),
         "training_protocol_hash": args.training_protocol_hash,
     }
     path = os.path.join(args.best_checkpoint_path, "training_summary.json")
@@ -177,6 +224,12 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
     args.best_val_worst_group_metric = float("inf")
     args.best_val_metric_epoch = -1
     args.best_val_lifecycle_metrics = {}
+    args.epoch_seconds = []
+    args.seconds_to_best = float("nan")
+    args.validation_group_history = {}
+    args.validation_group_volatility = {}
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
     args.training_protocol_hash = getattr(
         data_loaders["train"].dataset,
         "training_protocol_hash",
@@ -203,6 +256,10 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
             args,
             epoch,
         )
+        for name in ("unseen_mae", "steady_mae", "join_mae", "fault_mae"):
+            value = metrics["val"]["lifecycle"].get(name)
+            if value is not None and math.isfinite(value):
+                args.validation_group_history.setdefault(name, []).append(float(value))
         wait_count = 0 if improved else wait_count + 1
         if not improved:
             print(f"-> Early stopping count: {wait_count}/{args.patience}")
@@ -224,10 +281,21 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
 
     if args.best_val_metric_epoch < 0:
         raise RuntimeError("Training finished without a finite lifecycle checkpoint")
+    # Reported, not used for selection: a group whose score swings between
+    # epochs makes the checkpoint metric noisier than its value suggests.
+    args.validation_group_volatility = {
+        name: {
+            "std": statistics.pstdev(values) if len(values) > 1 else 0.0,
+            "max_epoch_to_epoch_jump": (
+                max(abs(b - a) for a, b in zip(values, values[1:])) if len(values) > 1 else 0.0
+            ),
+        }
+        for name, values in args.validation_group_history.items()
+    }
     stop_reason = "early_stop" if stopped_early else "max_epoch"
     print(f"-> Training stopped at epoch {finished_epoch}/{args.max_epoch} ({stop_reason})")
     print(f"-> Best val_lifecycle checkpoint: epoch {args.best_val_metric_epoch}")
-    _write_training_summary(args, finished_epoch, stop_reason)
+    _write_training_summary(args, finished_epoch, stop_reason, data_loaders)
 
     checkpoint = torch.load(_checkpoint_path(args), map_location="cpu", weights_only=False)
     model.load_state_dict(checkpoint["state_dict"])

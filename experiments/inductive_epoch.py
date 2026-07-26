@@ -9,6 +9,7 @@ from utils.model_output import sum_aux_losses, unpack_model_output
 
 
 ROLE_CHANNEL_COUNT = 4
+ROLE_AAS = 0
 
 
 def _last_role(x_enc, args):
@@ -39,6 +40,20 @@ def _role_balanced_loss(y_hat, y, valid_mask, last_role, loss_name):
         if selected.any():
             losses.append(element_loss[selected].mean())
     return torch.stack(losses).mean() if losses else None
+
+
+def _context_loss(y_hat, y, cohort_valid, last_role, loss_name):
+    """Ordinary forecasting on the steadily-online nodes outside the cohort."""
+    steady = last_role[..., ROLE_AAS].unsqueeze(1).unsqueeze(-1) > 0.5
+    selected = (
+        steady.expand_as(cohort_valid)
+        & ~cohort_valid
+        & torch.isfinite(y)
+        & torch.isfinite(y_hat)
+    )
+    if not selected.any():
+        return None
+    return _element_loss(y_hat, y, loss_name)[selected].mean()
 
 
 def _route_loss(route, y, valid_mask, last_role, epoch):
@@ -173,6 +188,21 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
             base_loss = criterions[args.loss](y_hat[valid_mask], y_for_loss[valid_mask])
             optimize_loss = base_loss
             last_role = _last_role(x_enc, args)
+            # Supervising only the event cohort leaves ~6% of nodes carrying the
+            # gradient, so ordinary forecasting on the rest of the graph is never
+            # trained. A small term on the visible non-cohort nodes restores it
+            # without letting the bulk of the graph drown out the event nodes.
+            context_weight = float(getattr(args, "lcbt_context_loss_weight", 0.0))
+            if context_weight > 0:
+                context_loss = _context_loss(
+                    y_hat,
+                    y_for_loss,
+                    cohort_valid,
+                    last_role,
+                    args.loss,
+                )
+                if context_loss is not None:
+                    optimize_loss = optimize_loss + context_weight * context_loss
             if meta.get("forecast_loss_mode") == "role_balanced_mix":
                 role_loss = _role_balanced_loss(
                     y_hat,

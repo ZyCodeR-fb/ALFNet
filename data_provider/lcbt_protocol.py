@@ -278,6 +278,7 @@ def build_lcbt_schedule(
     topology_adjacency=None,
     node_ids=None,
     stratify_by_evidence=True,
+    hidden_fraction=0.0,
 ):
     """Build the frozen LCBT schedule with uniform evidence k=1..L.
 
@@ -296,6 +297,17 @@ def build_lcbt_schedule(
     ``topology_adjacency``. Training runs on the known-node induced graph, whose
     indices are local, so the map is what stops a local index from being read as
     a full-graph node id.
+
+    ``hidden_fraction`` turns each training window into an episode with its own
+    held-out sensors. Without it the model trains on a graph where nothing is
+    permanently missing and only a handful of cohort nodes are perturbed, then
+    meets an evaluation graph where a quarter of the sensors have never been
+    observed -- and its synthetic Join events sit on nodes it has seen in other
+    windows, so they are not really unseen. With it, every window hides a
+    rotating subset of the graph for its whole length, Join and ZeroHistory
+    cohorts are drawn from that hidden subset, and Steady and Fault cohorts from
+    the visible remainder. Set it to the evaluation hidden rate so the training
+    and evaluation graphs are equally sparse.
 
     ``stratify_by_evidence`` controls how finely cohort size and topology are
     balanced. Training has thousands of samples per stratum, so balancing them
@@ -410,16 +422,51 @@ def build_lcbt_schedule(
     graph_degree = _weighted_degree(topology)
     graph_hops = _hop_distances(topology)
 
+    hidden_fraction = float(hidden_fraction)
+    if hidden_fraction and scenario_node_pools is not None:
+        raise ValueError(
+            "hidden_fraction builds its own per-window pools; it cannot be combined "
+            "with fixed scenario_node_pools"
+        )
+    if not 0.0 <= hidden_fraction < 1.0:
+        raise ValueError("hidden_fraction must be in [0, 1)")
+    all_nodes = np.arange(adjacency.shape[0], dtype=np.int64)
+    hidden_size = int(round(hidden_fraction * adjacency.shape[0]))
+    # A separate exposure counter so held-out duty rotates evenly over the graph
+    # rather than repeatedly falling on the same sensors.
+    hidden_exposure = np.zeros(adjacency.shape[0], dtype=np.int64)
+    all_strata = _degree_strata_for(graph_degree, topology_ids[all_nodes])
+
     schedule = []
     for sample_index in range(num_samples):
         scenario = str(assignments[sample_index])
         cohort_fraction = float(fractions[sample_index])
         topology_mode = str(topology_modes[sample_index])
-        pool = (
-            scenario_node_pools[scenario]
-            if scenario_node_pools is not None
-            else np.arange(adjacency.shape[0], dtype=np.int64)
-        )
+
+        hidden_nodes = []
+        if hidden_size > 0:
+            hidden_local = _select_scattered_nodes(
+                all_strata,
+                hidden_exposure,
+                rng,
+                hidden_size,
+            )
+            hidden_nodes = sorted(int(all_nodes[index]) for index in hidden_local)
+            hidden_exposure[np.asarray(hidden_nodes, dtype=np.int64)] += 1
+
+        if scenario_node_pools is not None:
+            pool = scenario_node_pools[scenario]
+        elif hidden_nodes:
+            # Join and ZeroHistory must land on sensors this window never showed
+            # the model; Steady and Fault on sensors it did.
+            hidden_array = np.asarray(hidden_nodes, dtype=np.int64)
+            pool = (
+                hidden_array
+                if scenario in {"join", "zero_history"}
+                else np.setdiff1d(all_nodes, hidden_array, assume_unique=True)
+            )
+        else:
+            pool = all_nodes
         cohort_size = min(
             len(pool),
             max(1, int(round(size_base * cohort_fraction))),
@@ -454,6 +501,7 @@ def build_lcbt_schedule(
                 "evidence_steps": evidence,
                 "phase_id": _phase_id(scenario, evidence, input_len),
                 "changed_nodes": changed_nodes,
+                "hidden_nodes": hidden_nodes,
                 "cohort_fraction": cohort_fraction,
                 "topology_mode": topology_mode,
                 "calendar_regime": calendar_regimes[sample_index],
