@@ -48,10 +48,11 @@ def _read_yaml(relative_path):
         return yaml.safe_load(stream)
 
 
-# rf_l3s is the incumbent; fg1 is the slimmed main plan and rg2 its low-risk
-# fallback. The surface stays closed -- a fourth file must be a deliberate edit
-# here, not an accidental leftover.
-ALFNET_VARIANTS = {"rf_l3s": "rf_l3s", "fg1": "fg1", "rg2": "rg2"}
+# rf_l3s is the incumbent, fg1 the FiLM-conditioned plan, fg1r the same plus an
+# FS-only residual. The surface stays closed: a rejected candidate's YAML is
+# deleted in the same round it is rejected, so a fourth file here must be a
+# deliberate edit rather than a leftover.
+ALFNET_VARIANTS = {"rf_l3s": "rf_l3s", "fg1": "fg1", "fg1r": "fg1r"}
 
 
 def test_streamlined_yaml_surface_has_one_alfnet_mainline():

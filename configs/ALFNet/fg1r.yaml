@@ -1,6 +1,6 @@
 runtime:
   model: ALFNet
-  model_variant: rg2
+  model_variant: fg1r
   model_recipe: lifecycle_fusion
   mode: train
   t_mark: true
@@ -80,7 +80,7 @@ family:
       load_checkpoint: false
     patch:
       model: ALFTemporal
-      config_path: ./configs/ALFTemporal/METRLA_lite2.yaml
+      config_path: ./configs/ALFTemporal/METRLA_cond1.yaml
       checkpoint_path: ""
       load_checkpoint: false
   model:
@@ -92,17 +92,17 @@ family:
     graph_expert_lr: 0.0005
     patch_expert_lr: 0.0001
     gate_lr: 0.00005
-    # nas is the Join role; validation sweep is {0.10, 0.20, 0.35}.
-    # vs opened from 0.00: the branch is a spatial module, and zero-history
-    # nodes have nothing but spatial information. At 0.00 the Unseen group
-    # paid the shared-imputer cost and got none of the benefit.
-    patch_residual_role_scale: {aas: 0.20, nas: 0.20, vs: 0.20, fs: 0.35}
+    # Prediction is the graph expert's; the patch branch only conditions the
+    # DCRNN encoder state. lambda_route / lambda_regret / patch_residual_role_scale
+    # describe a blend of two forecasts that no longer exists and are rejected
+    # by the model if set here.
+    fusion_mode: film
+    # FS-only bounded additive residual on top of the FiLM-conditioned forecast.
+    # 0.35 is A2's already-validated fs budget, reused rather than searched.
+    # 0.0 reproduces fg1 exactly.
+    fault_residual_scale: 0.35
     forecast_loss_mode: role_balanced_mix
     forecast_role_balanced_beta: 0.10
-    fusion_mode: residual_gate
-    lambda_route: 0.05
-    route_target: hard_bce
-    lambda_regret: 0.03
     graph_diffusion_steps: 1
     graph_diffusion_scale: 0.05
     graph_diffusion_role_scale: {aas: 0.0, nas: 1.0, vs: 1.0, fs: 0.25}

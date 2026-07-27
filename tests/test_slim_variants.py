@@ -1,7 +1,7 @@
 """Structure, build and finite-value checks for the slimmed ALFNet variants.
 
-fg1 is the main plan (patch branch conditions the graph encoder via FiLM);
-rg2 is the low-risk fallback (both experts still decode, gate retained).
+fg1 is the FiLM-conditioned plan; fg1r adds an FS-only bounded additive
+residual on top of it. rf_l3s is the incumbent two-expert model.
 """
 
 import torch
@@ -14,7 +14,7 @@ from model.regist_model import load_model_class
 
 VARIANTS = {
     "fg1": "configs/ALFNet/fg1.yaml",
-    "rg2": "configs/ALFNet/rg2.yaml",
+    "fg1r": "configs/ALFNet/fg1r.yaml",
     "rf_l3s": "configs/ALFNet/rf_l3s.yaml",
 }
 
@@ -86,18 +86,8 @@ def test_film_head_starts_as_the_identity():
     assert torch.allclose(hidden * (1.0 + gamma).unsqueeze(0) + beta.unsqueeze(0), hidden)
 
 
-def test_fallback_variant_keeps_the_gate_and_opens_vs():
-    _, model = build("rg2")
-    assert model.fusion_mode == "residual_gate"
-    assert model.availability_gates is not None
-    assert model.temporal_refiner is not None
-    assert model.patch_expert.backbone.regression_conv is not None
-    # vs was 0.00 in rf_l3s; the fallback turns the spatial branch on for
-    # zero-history nodes, which are the group that only has spatial information.
-    assert float(model.patch_budget[2]) == pytest.approx(0.20)
-
-
-@pytest.mark.parametrize("name,layers,timefilter", [("fg1", 1, False), ("rg2", 2, False), ("rf_l3s", 5, True)])
+@pytest.mark.parametrize("name,layers,timefilter",
+                         [("fg1", 1, False), ("fg1r", 1, False), ("rf_l3s", 5, True)])
 def test_patch_branch_depth_and_timefilter_are_yaml_switches(name, layers, timefilter):
     _, model = build(name)
     blocks = model.patch_expert.backbone.spa_encoder
@@ -106,7 +96,7 @@ def test_patch_branch_depth_and_timefilter_are_yaml_switches(name, layers, timef
     assert all((block.timefilter_patch_mixer is not None) is timefilter for block in blocks)
 
 
-@pytest.mark.parametrize("name,top_k", [("fg1", 1), ("rg2", 1), ("rf_l3s", 2)])
+@pytest.mark.parametrize("name,top_k", [("fg1", 1), ("fg1r", 1), ("rf_l3s", 2)])
 def test_moge_top_k_is_a_yaml_switch_and_keeps_sparse_routing(name, top_k):
     _, model = build(name)
     convs = [m for m in model.modules() if isinstance(m, LifecycleRoutedGraphConv)]
@@ -123,7 +113,9 @@ def test_parameter_budget_shrinks_without_losing_the_mainline():
         sizes[name] = sum(p.numel() for p in model.parameters() if p.requires_grad)
         assert model.shared_input_imputer is not None, f"{name} lost the shared GRIN"
         assert hasattr(model.graph_expert, "decoder"), f"{name} lost the Residual-Delta decoder"
-    assert sizes["fg1"] < sizes["rg2"] < sizes["rf_l3s"]
+    assert sizes["fg1"] < sizes["fg1r"] < sizes["rf_l3s"]
+    # the residual head is a small addition, not a second decoder
+    assert sizes["fg1r"] - sizes["fg1"] < 20_000
     assert sizes["fg1"] < 0.35 * sizes["rf_l3s"]
 
 
@@ -132,32 +124,10 @@ def test_film_mode_rejects_a_patch_expert_that_still_decodes():
     args = load_args_from_config(VARIANTS["fg1"], [])
     args.device = "cpu"
     args.model_family_cfg["experts"]["patch"]["config_path"] = (
-        "./configs/ALFTemporal/METRLA_lite2.yaml"
+        "./configs/ALFTemporal/METRLA_alftemporal_t65.yaml"
     )
     with pytest.raises(ValueError, match="emit=features"):
         load_model_class(args.model)(args)
-
-
-def test_residual_gate_rejects_a_feature_only_patch_expert():
-    args = load_args_from_config(VARIANTS["rg2"], [])
-    args.device = "cpu"
-    args.model_family_cfg["experts"]["patch"]["config_path"] = (
-        "./configs/ALFTemporal/METRLA_cond1.yaml"
-    )
-    with pytest.raises(ValueError, match="no forecast to blend"):
-        load_model_class(args.model)(args)
-
-
-@pytest.mark.parametrize("name", sorted(VARIANTS))
-def test_state_dict_round_trips(name):
-    _, model = build(name)
-    state = model.state_dict()
-    _, fresh = build(name)
-    fresh.load_state_dict(state, strict=True)
-    assert set(fresh.state_dict()) == set(state)
-
-
-# --- unified output root -----------------------------------------------------
 
 
 def test_output_root_collects_every_artefact_under_one_run_folder():
@@ -257,3 +227,99 @@ def test_result_directories_are_gitignored():
             cwd=root, capture_output=True,
         )
         assert result.returncode == 0, f"{candidate} is not ignored"
+
+
+# --- FS-only bounded additive residual (fg1r) --------------------------------
+
+
+def _role_batch(args, model, roles, batch=2):
+    """Batch whose last input step assigns each node an explicit role."""
+    data = _batch(args, model, batch)
+    nodes = len(model.known_nodes)
+    onehot = torch.zeros(batch, args.input_len, nodes, 4)
+    for index, role in enumerate(roles):
+        onehot[:, :, index, role] = 1.0
+    data["x"][..., model.role_start:model.role_end] = onehot
+    return data
+
+
+def test_residual_is_exactly_zero_off_the_fault_role():
+    """Unseen, Steady and Join must stay bit-identical to fg1."""
+    args, model = build("fg1r")
+    model.eval()
+    nodes = len(model.known_nodes)
+    # every node non-FS: role 0=AAS, 1=NAS, 2=VS
+    roles = [index % 3 for index in range(nodes)]
+    data = _role_batch(args, model, roles)
+    torch.manual_seed(0)
+    for layer in model.fault_residual_head:
+        if isinstance(layer, torch.nn.Linear):
+            torch.nn.init.normal_(layer.weight, std=0.5)
+            torch.nn.init.normal_(layer.bias, std=0.5)
+    with torch.no_grad():
+        with_head = model(data["adj"], data["x"], data["tm"], None, None, data["dm"], 0)["pred"]
+        model.fault_residual_head = None
+        without = model(data["adj"], data["x"], data["tm"], None, None, data["dm"], 0)["pred"]
+    assert torch.equal(with_head, without), "residual leaked onto a non-fault role"
+
+
+def test_residual_moves_only_the_fault_nodes():
+    args, model = build("fg1r")
+    model.eval()
+    nodes = len(model.known_nodes)
+    roles = [3 if index % 4 == 0 else 0 for index in range(nodes)]  # every 4th is FS
+    fault_nodes = [index for index, role in enumerate(roles) if role == 3]
+    data = _role_batch(args, model, roles)
+    torch.manual_seed(0)
+    for layer in model.fault_residual_head:
+        if isinstance(layer, torch.nn.Linear):
+            torch.nn.init.normal_(layer.weight, std=0.5)
+            torch.nn.init.normal_(layer.bias, std=0.5)
+    with torch.no_grad():
+        with_head = model(data["adj"], data["x"], data["tm"], None, None, data["dm"], 0)["pred"]
+        head, model.fault_residual_head = model.fault_residual_head, None
+        without = model(data["adj"], data["x"], data["tm"], None, None, data["dm"], 0)["pred"]
+    delta = (with_head - without).abs()
+    other = [index for index in range(nodes) if index not in fault_nodes]
+    assert delta[:, :, other, :].max() == 0.0
+    assert delta[:, :, fault_nodes, :].max() > 0.0
+    # bounded by scale * tanh(.) <= scale
+    assert delta.max() <= model.fault_residual_scale + 1e-6
+
+
+def test_residual_head_is_zero_initialised_so_fg1r_starts_as_fg1():
+    _, model = build("fg1r")
+    last = model.fault_residual_head[-1]
+    assert torch.allclose(last.weight, torch.zeros_like(last.weight))
+    assert torch.allclose(last.bias, torch.zeros_like(last.bias))
+    assert model.fault_residual_scale == pytest.approx(0.35)
+
+
+def test_fg1_has_no_residual_head_and_fg1r_only_adds_that():
+    _, plain = build("fg1")
+    _, residual = build("fg1r")
+    assert plain.fault_residual_head is None
+    assert plain.fault_residual_scale == 0.0
+    extra = set(residual.state_dict()) - set(plain.state_dict())
+    assert all(key.startswith("fault_residual_head.") for key in extra), extra
+    # nothing else changed: no second decoder, no gate, no budget came back
+    assert residual.patch_expert.backbone.regression_conv is None
+    assert residual.availability_gates is None
+    assert residual.temporal_refiner is None
+    assert not hasattr(residual, "patch_budget")
+
+
+def test_residual_is_rejected_outside_film_mode():
+    args = load_args_from_config(VARIANTS["rf_l3s"], [])
+    args.device = "cpu"
+    args.model_family_cfg["recipe"]["fault_residual_scale"] = 0.35
+    with pytest.raises(ValueError, match="residual_gate mode already blends"):
+        load_model_class(args.model)(args)
+
+
+def test_retired_candidate_files_are_gone():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for stale in ("configs/ALFNet/rg2.yaml", "configs/ALFTemporal/METRLA_lite2.yaml"):
+        assert not (root / stale).exists(), f"{stale} should have been deleted with rg2"

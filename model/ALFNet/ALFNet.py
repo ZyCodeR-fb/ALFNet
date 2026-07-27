@@ -11,6 +11,8 @@ from utils.model_output import unpack_model_output
 
 
 AVAILABILITY_COUNT = 4
+# Availability one-hot order, fixed by _role_tensor and the loader.
+ROLE_FS = 3
 
 
 def _role_tensor(values, defaults):
@@ -267,6 +269,29 @@ class Model(nn.Module):
             )
             nn.init.zeros_(self.film_head[-1].weight)
             nn.init.zeros_(self.film_head[-1].bias)
+
+        # FiLM is multiplicative: it can reweight the encoder state but cannot
+        # inject a forecast component the graph expert never produced. Measured
+        # cost of that on seed 32: Fault MAE 3.8337 (two-expert blend) -> 4.3613
+        # (fg1). This head restores an additive correction on failed sensors
+        # only, reusing the patch condition features rather than rebuilding the
+        # second decoder. tanh bounds it and the zero-initialised output layer
+        # makes an untrained model identical to fg1.
+        self.fault_residual_scale = float(recipe.get("fault_residual_scale", 0.0))
+        if self.fault_residual_scale and not self.film_fusion:
+            raise ValueError(
+                "fault_residual_scale corrects a FiLM-conditioned forecast; "
+                "residual_gate mode already blends a second forecast"
+            )
+        self.fault_residual_head = None
+        if self.fault_residual_scale:
+            self.fault_residual_head = nn.Sequential(
+                nn.Linear(int(self.patch_expert.feature_dim), gate_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(gate_hidden_dim, int(configs.pred_len) * self.output_dim),
+            )
+            nn.init.zeros_(self.fault_residual_head[-1].weight)
+            nn.init.zeros_(self.fault_residual_head[-1].bias)
         # NAS is the role every Join node carries at the last input step. A zero
         # budget makes beta identically zero there, which switches the patch
         # expert (and the route/regret gradients) off for the whole Join track.
@@ -371,14 +396,14 @@ class Model(nn.Module):
         )
         if self.film_fusion:
             # One forecast, one decoder. The patch branch only conditions it.
-            condition = self.film_head(patch_output["features"])
-            gamma, beta = condition.chunk(2, dim=-1)
+            features = patch_output["features"]
+            gamma, beta = self.film_head(features).chunk(2, dim=-1)
             graph_output = self.graph_expert(
                 adjacency, graph_input, x_t_mark, pos_mark, decoder, dec_t_mark,
                 epoch, film=(1.0 + gamma, beta),
             )
             y_graph, graph_meta = unpack_model_output(graph_output)
-            return y_graph, None, graph_meta.get("aux_losses")
+            return y_graph, features, graph_meta.get("aux_losses")
         graph_output = self.graph_expert(
             adjacency, graph_input, x_t_mark, pos_mark, decoder, dec_t_mark, epoch
         )
@@ -408,8 +433,19 @@ class Model(nn.Module):
         state, last_availability = self._state(x_enc)
         y_graph = self.graph_refiner(y_graph, adjacency, last_availability)
         if self.film_fusion:
+            prediction = y_graph
+            if self.fault_residual_head is not None:
+                # One-hot, so the gate is exactly 0 on AAS/NAS/VS nodes and the
+                # Unseen, Steady and Join paths stay bit-identical to fg1.
+                fault_gate = last_availability[..., ROLE_FS].unsqueeze(1).unsqueeze(-1)
+                correction = self.fault_residual_head(y_patch).reshape(
+                    y_graph.shape[0], y_graph.shape[2], y_graph.shape[1], self.output_dim
+                ).permute(0, 2, 1, 3)
+                prediction = y_graph + (
+                    self.fault_residual_scale * fault_gate * torch.tanh(correction)
+                )
             return {
-                "pred": y_graph,
+                "pred": prediction,
                 "aux_losses": expert_aux_losses,
                 "forecast_loss_mode": "role_balanced_mix",
                 "forecast_role_balanced_beta": self.forecast_role_balanced_beta,
