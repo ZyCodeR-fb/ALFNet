@@ -378,6 +378,7 @@ def _async_lifecycle_inference(model, dataset, args):
         samples=int(getattr(args, "ples_bootstrap_samples", 2000)),
         seed=int(getattr(args, "ples_bootstrap_seed", 2026)),
         main_cohort_ids=main_cohort_ids,
+        trajectory_span=pre_steps + int(args.input_len) + post_steps + int(args.pred_len),
     )
     training_trace = _load_training_trace(args)
     required_training_hash = manifest.get("training_protocol_hash")

@@ -1,10 +1,17 @@
 import argparse
 import csv
 import json
+import sys
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from data_provider.ples_protocol import PLES_PROTOCOL_VERSION  # noqa: E402
 
 
 PAIR_KEYS = ("origin_id", "cohort_id", "track", "tau", "phase")
@@ -71,7 +78,9 @@ def _read_result_bundle(value):
     with summary_path.open("r", encoding="utf-8") as handle:
         summary = json.load(handle)
     version = int(summary.get("schema_version", version))
-    rows_filename = "ples_paired_rows.csv" if version == 2 else "paired_event_rows.csv"
+    # v2 and v3 both write ples_paired_rows.csv; only the original v1 export
+    # used the older filename.
+    rows_filename = "paired_event_rows.csv" if version < 2 else "ples_paired_rows.csv"
     return summary, summary_path, _read_rows(summary_path, rows_filename), version
 
 
@@ -461,10 +470,15 @@ def main():
         raise ValueError("PLES comparison requires both models to use the same protocol version")
     if ours_summary["protocol_hash"] != baseline_summary["protocol_hash"]:
         raise ValueError("PLES comparison requires identical protocol_manifest.json hashes")
+    if ours_version < PLES_PROTOCOL_VERSION:
+        raise ValueError(
+            f"PLES schema v{ours_version} predictions predate the maintained protocol "
+            f"(v{PLES_PROTOCOL_VERSION}); re-run inference instead of replotting them"
+        )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    if ours_version == 2:
+    if ours_version >= 2:
         curves = compare_rows_v2(ours_rows, baseline_rows)
         intervals = bootstrap_advantages_v2(
             ours_rows,
@@ -473,7 +487,7 @@ def main():
             seed=args.bootstrap_seed,
         )
         summary = {
-            "schema_version": 2,
+            "schema_version": 3,
             "protocol": "PLES v3 paired model comparison",
             "protocol_hash": ours_summary["protocol_hash"],
             "definitions": {
@@ -520,7 +534,7 @@ def main():
         json.dump(summary, handle, ensure_ascii=False, indent=2)
     for key in print_keys:
         interval = intervals[key]
-        label = key if ours_version == 2 else f"{key} AttenuationGain"
+        label = key if ours_version >= 2 else f"{key} AttenuationGain"
         if interval["low"] is None or interval["high"] is None:
             print(f"{label}={interval['point']:.4f} | 95% CI=NA")
         else:

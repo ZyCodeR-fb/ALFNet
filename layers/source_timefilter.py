@@ -33,6 +33,11 @@ class MaskMoE(nn.Module):
         self.softplus = nn.Softplus()
         self.softmax = nn.Softmax(2)
         self.top_p = top_p
+        # The region masks depend only on (L, n_vars), never on the input, and the
+        # reference builds them once outside the model. Rebuilding them per call
+        # ran a 256-iteration Python loop inside every layer of every forward:
+        # 28 ms x 5 layers x 268 steps = 38 s of every epoch, for a constant.
+        self._mask_cache = {}
 
     def cv_squared(self, x):
         eps = 1e-10
@@ -73,15 +78,21 @@ class MaskMoE(nn.Module):
         return top_p_mask, loss_importance + 0.1 * loss_dynamic
 
     def _build_masks(self, L, device, dtype):
+        key = (int(L), str(device), str(dtype))
+        cached = self._mask_cache.get(key)
+        if cached is not None:
+            return cached
         N = max(1, L // self.n_vars)
-        masks = []
-        base_index = torch.arange(L, device=device)
-        for k in range(L):
-            S = ((base_index % N == k % N) & (base_index != k)).to(dtype)
-            T = ((base_index >= k // N * N) & (base_index < k // N * N + N)).to(dtype)
-            ST = torch.ones(L, dtype=dtype, device=device) - S - T
-            masks.append(torch.stack([S, T, ST], dim=0))
-        return torch.stack(masks, dim=0)
+        # Vectorised over k; the reference's Python loop produced the same tensor.
+        index = torch.arange(L, device=device)
+        rows, cols = index.unsqueeze(1), index.unsqueeze(0)
+        same_position = ((cols % N == rows % N) & (cols != rows)).to(dtype)
+        block_start = (rows // N) * N
+        same_patch = ((cols >= block_start) & (cols < block_start + N)).to(dtype)
+        remainder = torch.ones(L, L, dtype=dtype, device=device) - same_position - same_patch
+        masks = torch.stack([same_position, same_patch, remainder], dim=1)
+        self._mask_cache[key] = masks
+        return masks
 
     def forward(self, x, masks=None, is_training=None):
         B, H, L, _ = x.shape

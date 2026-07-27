@@ -123,8 +123,13 @@ def _add_arguments(parser):
     parser.add_argument("--lcbt_validation_origins_per_stratum", type=int, default=3)
     parser.add_argument("--lcbt_episode_hidden_fraction", type=float, default=None,
                         help="share of known sensors held out per training window; defaults to the evaluation hidden rate")
+    parser.add_argument("--lcbt_include_stress_cohort", action="store_true",
+                        help="train on the pool-saturating cohort tier too; it is excluded from the main tables")
     parser.add_argument("--lcbt_context_loss_weight", type=float, default=0.10,
                         help="weight of the visible non-cohort context term in the forecast loss")
+    parser.add_argument("--lcbt_stratum_balanced_loss", type=float, default=0.0,
+                        help="blend the forecast loss towards the LCE/PLES calendar-stratum weights; "
+                             "0 keeps the plain batch mean (default), 1 uses the evaluation weighting")
     parser.add_argument("--family_override", action="append", default=[],
                         metavar="PATH=VALUE",
                         help="override one leaf of model_family_cfg, e.g. recipe.patch_residual_role_scale.nas=0.35")

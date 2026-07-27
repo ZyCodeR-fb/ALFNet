@@ -211,6 +211,7 @@ class LifecycleCoveragePEMS(Dataset):
         lcbt_validation_origins_per_stratum=3,
         lcbt_min_observed_fraction=0.30,
         lcbt_episode_hidden_fraction=None,
+        lcbt_include_stress_cohort=False,
     ):
         if flag not in {"train", "val"}:
             raise ValueError("LifecycleCoveragePEMS only supports train/val splits")
@@ -243,6 +244,7 @@ class LifecycleCoveragePEMS(Dataset):
         self.validation_origins_per_stratum = int(lcbt_validation_origins_per_stratum)
         self.min_observed_fraction = float(lcbt_min_observed_fraction)
         self.requested_hidden_fraction = lcbt_episode_hidden_fraction
+        self.include_stress_cohort = bool(lcbt_include_stress_cohort)
         self.validation_origins = []
         self.validation_origin_summary = {}
         if self.lifecycle_training_strategy != "lcbt_v3":
@@ -268,6 +270,18 @@ class LifecycleCoveragePEMS(Dataset):
         self.clustered_ratio = float(lcbt_clustered_ratio)
         self.current_epoch = 0
         self._read_data(input_features, target_features)
+        self._train_plan = (
+            {
+                "fractions": tuple(self.cohort_fractions),
+                "weights": tuple(self.cohort_weights),
+                "realised_weights": {},
+                "dropped": [],
+                "pool_saturation_limit": None,
+                "stress_cohort_included": True,
+            }
+            if self.include_stress_cohort
+            else {**self.training_cohort_plan, "stress_cohort_included": False}
+        )
         self.protocol_manifest = self._ensure_protocol_manifest()
         self.training_protocol_hash = self.protocol_manifest["protocol_hash"]
         self._refresh_schedule()
@@ -410,8 +424,11 @@ class LifecycleCoveragePEMS(Dataset):
             seed=seed,
             epoch=epoch,
             scenario_ratios=self.scenario_ratios,
-            cohort_fractions=self.cohort_fractions,
-            cohort_weights=self.cohort_weights,
+            # Same tiers validation and the LCE main table pool, so the objective
+            # and the headline metric score the same conditions. The saturated
+            # tier is a stress setting, reachable via lcbt_include_stress_cohort.
+            cohort_fractions=self._train_plan["fractions"],
+            cohort_weights=self._train_plan["weights"],
             clustered_ratio=self.clustered_ratio,
             cohort_size_base=self.full_num_nodes,
             topology_adjacency=self.full_adjacency,
@@ -431,6 +448,24 @@ class LifecycleCoveragePEMS(Dataset):
         if self.requested_hidden_fraction is not None:
             return float(self.requested_hidden_fraction)
         return len(self.master_unseen_nodes) / float(self.full_num_nodes)
+
+    @property
+    def training_cohort_plan(self):
+        """Cohort tiers the training objective optimises.
+
+        Training used to include the 10% tier while validation and the LCE main
+        table exclude it, so the objective was tuned on a condition the headline
+        metric never scores. The pools are the per-window episode split: the
+        hidden set feeds join/zero_history, the visible remainder feeds
+        steady/fault.
+        """
+        hidden = max(1, int(round(self.episode_hidden_fraction * len(self.known_nodes))))
+        return main_table_cohort_plan(
+            self.full_num_nodes,
+            [hidden, len(self.known_nodes) - hidden],
+            cohort_fractions=self.cohort_fractions,
+            cohort_weights=self.cohort_weights,
+        )
 
     @property
     def validation_cohort_plan(self):
@@ -575,7 +610,7 @@ class LifecycleCoveragePEMS(Dataset):
             "event_clock": "input_end=event_time+tau+1",
             "effects": ["JoinLift", "FaultPenalty", "OutageFaultPenalty"],
             "effect_metrics": ["MAPE", "MAE"],
-            "bootstrap": "stratified_origin_then_cohort",
+            "bootstrap": "overlap-block outer resample, crossed cohort draw; see the evaluation manifest",
         }
         payload = {
             "schema_version": 3,
@@ -660,6 +695,12 @@ class LifecycleCoveragePEMS(Dataset):
             "episode_hidden_nodes_per_window": int(
                 round(self.episode_hidden_fraction * len(self.known_nodes))
             ),
+            "training_cohort_plan": {
+                "fractions": list(self._train_plan["fractions"]),
+                "weights": [float(w) for w in self._train_plan["weights"]],
+                "dropped_for_pool_saturation": self._train_plan["dropped"],
+                "stress_cohort_included": self._train_plan["stress_cohort_included"],
+            },
             "validation_cohort_plan": {
                 "fractions": list(plan["fractions"]),
                 "weights": list(plan["weights"]),

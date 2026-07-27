@@ -138,6 +138,7 @@ def data_provider(args, flag):
             lcbt_validation_origins_per_stratum=args.lcbt_validation_origins_per_stratum,
             lcbt_min_observed_fraction=args.lcbt_min_observed_fraction,
             lcbt_episode_hidden_fraction=args.lcbt_episode_hidden_fraction,
+            lcbt_include_stress_cohort=args.lcbt_include_stress_cohort,
         )
     data_set = Dataset(**dataset_kwargs)
     if flag == "train" and args.lifecycle_training_strategy == "lcbt_v3":

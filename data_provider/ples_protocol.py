@@ -478,8 +478,9 @@ def build_protocol_manifest(
         "outage_definition": "FaultPenalty at tau=input_len-1",
         "bootstrap": {
             "design": "origins and cohorts are crossed, not nested",
-            "outer_unit": "calendar_day block, stratified by day_type",
-            "outer_reason": "PLES trajectories of neighbouring origins overlap, so origins are not independent; whole days are",
+            "outer_unit": "overlap-connected origin block, stratified by day_type",
+            "outer_reason": "origins whose pre+input+post+horizon spans touch are chained into one block; day blocking missed 24 of 175 adjacent pairs that overlap across midnight",
+            "trajectory_span": int(pre_steps) + int(input_len) + int(post_steps) + int(pred_len),
             "cohort_resampling": "one global draw per bootstrap sample, applied to every sampled block",
             "samples": int(bootstrap_samples),
             "seed": int(bootstrap_seed),
@@ -788,28 +789,57 @@ def summarize_paired_rows(rows, input_len, main_cohort_ids=None):
     }
 
 
-def bootstrap_units(rows):
-    """Resampling units that match how the design was actually sampled.
+def overlap_blocks(origin_times, span):
+    """Group origins whose trajectories overlap into transitively closed blocks.
 
-    Origins are spaced so their LCE episodes are disjoint, but a PLES trajectory
-    runs to ``post_steps`` and does overlap its neighbours, so origins are not
-    independent. Whole calendar days are, and a day is the natural block: it
-    contains a full set of time-of-day bins. Blocks are stratified by day type
-    so a draw cannot change the Weekday/Weekend mix.
+    Calendar days are the intuitive block, but they do not contain the
+    dependence: with origins spaced ``lce_episode_span`` apart and a PLES tail
+    reaching ``pre + input + post + horizon``, neighbouring origins share data
+    across midnight too. On METR-LA 24 of the 175 adjacent origin pairs overlap
+    across a day boundary, so day blocking would treat correlated origins as
+    independent and shrink the interval. Chaining any pair closer than ``span``
+    into one block is the unit the data actually supports.
+    """
+    ordered = sorted(origin_times.items(), key=lambda item: item[1])
+    assignment, block_index = {}, 0
+    previous = None
+    for origin_id, time_index in ordered:
+        if previous is not None and time_index - previous >= int(span):
+            block_index += 1
+        assignment[origin_id] = block_index
+        previous = time_index
+    return assignment
+
+
+def bootstrap_units(rows, span=None):
+    """Resampling units that match how the design was actually sampled.
 
     Cohorts are *crossed* with origins, not nested inside them: the same frozen
     cohorts are replayed at every origin. They therefore have to be resampled
     once per draw and applied to every sampled block, not redrawn inside each
     origin, which would treat one factor as if it were nested in the other.
     """
-    blocks = defaultdict(list)
-    block_stratum = {}
-    cohort_ids = set()
+    origin_times, origin_stratum, cohort_ids = {}, {}, set()
     for row in rows:
-        block = str(row.get("calendar_day", "all"))
-        blocks[block].append(row)
-        block_stratum[block] = str(row.get("regime", "all")).split("/")[0]
+        origin = int(row["origin_id"])
+        origin_times[origin] = int(row.get("event_time_index", origin))
+        origin_stratum[origin] = str(row.get("regime", "all")).split("/")[0]
         cohort_ids.add(int(row["cohort_id"]))
+
+    if span:
+        assignment = overlap_blocks(origin_times, span)
+        label = {origin: f"overlap-{index:04d}" for origin, index in assignment.items()}
+    else:  # no trajectory span given: fall back to calendar days
+        label = {
+            int(row["origin_id"]): str(row.get("calendar_day", "all")) for row in rows
+        }
+
+    blocks, block_stratum = defaultdict(list), {}
+    for row in rows:
+        block = label[int(row["origin_id"])]
+        blocks[block].append(row)
+        # A block spanning midnight is labelled by its first origin's day type.
+        block_stratum.setdefault(block, origin_stratum[int(row["origin_id"])])
     by_stratum = defaultdict(list)
     for block, stratum in sorted(block_stratum.items()):
         by_stratum[stratum].append(block)
@@ -843,7 +873,8 @@ def collections_counter(values):
     return counts
 
 
-def bootstrap_paired_effects(rows, input_len, samples=2000, seed=2026, main_cohort_ids=None):
+def bootstrap_paired_effects(rows, input_len, samples=2000, seed=2026, main_cohort_ids=None,
+                             trajectory_span=None):
     rows = _main_cohort_rows(rows, main_cohort_ids)
     point = summarize_paired_rows(rows, input_len)["paired_effects"]
     metrics = ("MAPE", "MAE")
@@ -856,7 +887,7 @@ def bootstrap_paired_effects(rows, input_len, samples=2000, seed=2026, main_coho
             for metric in metrics
         }
 
-    units = bootstrap_units(rows)
+    units = bootstrap_units(rows, span=trajectory_span)
     if not units["blocks"]:
         raise ValueError("cannot bootstrap empty PLES rows")
 

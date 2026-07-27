@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 
+from data_provider.calendar_strata import STRATA, stratum_weights
 from data_provider.lcbt_protocol import (
     accumulate_lifecycle_mae,
     finalize_lifecycle_validation_mae,
@@ -54,6 +55,35 @@ def _context_loss(y_hat, y, cohort_valid, last_role, loss_name):
     if not selected.any():
         return None
     return _element_loss(y_hat, y, loss_name)[selected].mean()
+
+
+def _stratum_balanced_loss(y_hat, y, valid_mask, calendar_ids, loss_name):
+    """Re-weight the batch onto the *evaluation* calendar-stratum weights.
+
+    LCBT draws training windows from whatever the schedule offers, so the
+    empirical stratum mix does not match the equal-over-tod / 5:7 day-type
+    weighting LCE and PLES score with: measured training-to-evaluation weight
+    ratios run 0.62 (AM/PM peak, under-weighted) to 1.55 (EarlyAM,
+    over-weighted). This makes the training objective an unbiased estimate of
+    the reported one. It is off by default because turning it on changes the
+    optimisation target, which is a model decision, not a protocol fix.
+    """
+    element_loss = _element_loss(y_hat, y, loss_name)
+    weights = stratum_weights()
+    terms, total = [], 0.0
+    ids = calendar_ids.reshape(-1)
+    for index, name in enumerate(STRATA):
+        weight = float(weights.get(name, 0.0))
+        if weight <= 0:
+            continue
+        sample_mask = (ids == index).view(-1, *([1] * (valid_mask.dim() - 1)))
+        selected = valid_mask & sample_mask.expand_as(valid_mask)
+        if selected.any():
+            terms.append(weight * element_loss[selected].mean())
+            total += weight
+    if not terms or total <= 0:
+        return None
+    return torch.stack(terms).sum() / total
 
 
 def _route_loss(route, y, valid_mask, last_role, epoch):
@@ -187,6 +217,21 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
 
             base_loss = criterions[args.loss](y_hat[valid_mask], y_for_loss[valid_mask])
             optimize_loss = base_loss
+            # Off by default (0.0): the training objective stays exactly the
+            # unweighted batch mean unless the run explicitly opts in.
+            stratum_weight = float(getattr(args, "lcbt_stratum_balanced_loss", 0.0))
+            if stratum_weight > 0:
+                stratum_loss = _stratum_balanced_loss(
+                    y_hat,
+                    y_for_loss,
+                    valid_mask,
+                    calendar_ids,
+                    args.loss,
+                )
+                if stratum_loss is not None:
+                    optimize_loss = (
+                        1.0 - stratum_weight
+                    ) * optimize_loss + stratum_weight * stratum_loss
             last_role = _last_role(x_enc, args)
             # Supervising only the event cohort leaves ~6% of nodes carrying the
             # gradient, so ordinary forecasting on the rest of the graph is never
