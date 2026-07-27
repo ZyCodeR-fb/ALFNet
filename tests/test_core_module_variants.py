@@ -48,17 +48,26 @@ def _read_yaml(relative_path):
         return yaml.safe_load(stream)
 
 
+# rf_l3s is the incumbent; fg1 is the slimmed main plan and rg2 its low-risk
+# fallback. The surface stays closed -- a fourth file must be a deliberate edit
+# here, not an accidental leftover.
+ALFNET_VARIANTS = {"rf_l3s": "rf_l3s", "fg1": "fg1", "rg2": "rg2"}
+
+
 def test_streamlined_yaml_surface_has_one_alfnet_mainline():
-    assert [path.name for path in (ROOT / "configs/ALFNet").glob("*.yaml")] == [
-        "rf_l3s.yaml"
-    ]
-    config = _read_yaml("configs/ALFNet/rf_l3s.yaml")
-    assert config["runtime"]["model"] == "ALFNet"
-    assert config["runtime"]["model_variant"] == "rf_l3s"
-    assert config["lifecycle"]["lifecycle_training_strategy"] == "lcbt_v3"
-    assert config["async_test"]["lce_protocol_version"] == 3
-    assert config["async_test"]["ples_protocol_version"] == 3
-    assert set(config["family"]["experts"]) == {"graph", "patch"}
+    assert sorted(path.stem for path in (ROOT / "configs/ALFNet").glob("*.yaml")) == sorted(
+        ALFNET_VARIANTS
+    )
+    for stem, variant in ALFNET_VARIANTS.items():
+        config = _read_yaml(f"configs/ALFNet/{stem}.yaml")
+        assert config["runtime"]["model"] == "ALFNet"
+        assert config["runtime"]["model_variant"] == variant
+        assert config["lifecycle"]["lifecycle_training_strategy"] == "lcbt_v3"
+        assert config["async_test"]["lce_protocol_version"] == 3
+        assert config["async_test"]["ples_protocol_version"] == 3
+        assert set(config["family"]["experts"]) == {"graph", "patch"}
+        # short variant names keep the experiment directory inside path limits
+        assert len(variant) <= 8
 
     for model in COMPARISON_MODELS:
         config_paths = [

@@ -95,6 +95,11 @@ class Model(nn.Module):
         # Ablation switch: with lifecycle_input off the expert sees only the raw
         # series, which is the pre-fix behaviour.
         self.lifecycle_input = bool(model_cfg.get("lifecycle_input", True))
+        # "features": the branch stops decoding its own forecast and emits one
+        # condition vector per node instead. "prediction" is the original
+        # two-expert behaviour, kept for the fallback variant.
+        self.emit = str(model_cfg.get("emit", "prediction"))
+        self.use_timefilter = bool(model_cfg.get("use_timefilter", True))
         self.expert_input_dim = int(configs.raw_enc_in) + (
             LIFECYCLE_CHANNELS if self.lifecycle_input else 0
         )
@@ -153,7 +158,10 @@ class Model(nn.Module):
             timefilter_residual_scale=float(
                 model_cfg.get("timefilter_residual_scale", 0.10)
             ),
+            use_timefilter=self.use_timefilter,
+            emit=self.emit,
         )
+        self.feature_dim = self.backbone.feature_dim
 
     def _resolve_current_node_ids(self, current_num_nodes):
         if current_num_nodes == len(self.known_nodes):
@@ -207,7 +215,11 @@ class Model(nn.Module):
         current_node_ids = self._resolve_current_node_ids(x_enc.shape[2])
         full_x = self._scatter_to_full_nodes(x_enc, current_node_ids)
         full_te = self._build_temporal_features(full_x, x_t_mark)
-        pred = self.backbone(full_x, full_te).contiguous()
+        out = self.backbone(full_x, full_te).contiguous()
+        if self.emit == "features":
+            if x_enc.shape[2] != self.full_num_nodes:
+                out = out[:, current_node_ids, :]
+            return {"features": out}
         if x_enc.shape[2] != self.full_num_nodes:
-            pred = pred[..., current_node_ids, :]
-        return {"pred": pred}
+            out = out[..., current_node_ids, :]
+        return {"pred": out}

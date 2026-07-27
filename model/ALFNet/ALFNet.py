@@ -197,8 +197,30 @@ class Model(nn.Module):
         self.forecast_role_balanced_beta = float(
             recipe.get("forecast_role_balanced_beta", 0.10)
         )
-        self.lambda_route = float(recipe.get("lambda_route", 0.05))
-        self.lambda_regret = float(recipe.get("lambda_regret", 0.03))
+        # "residual_gate": both experts decode, an availability gate blends them
+        #   (original, kept as the low-risk fallback).
+        # "film": the patch branch emits a per-node condition vector that
+        #   modulates the ALFGraph encoder state; the prediction is the graph
+        #   expert's. The gate, the route BCE and the regret term all describe a
+        #   two-forecast blend that no longer exists, so they are switched off
+        #   together rather than left dangling at weight zero.
+        self.fusion_mode = str(recipe.get("fusion_mode", "residual_gate"))
+        if self.fusion_mode not in {"residual_gate", "film"}:
+            raise ValueError(f"unsupported ALFNet fusion_mode: {self.fusion_mode}")
+        self.film_fusion = self.fusion_mode == "film"
+        if self.film_fusion and getattr(self.patch_expert, "emit", "prediction") != "features":
+            raise ValueError(
+                "fusion_mode=film requires the patch expert to run with "
+                "family.model.emit=features; otherwise it still builds a "
+                "regression head whose output nothing consumes"
+            )
+        if not self.film_fusion and getattr(self.patch_expert, "emit", "prediction") == "features":
+            raise ValueError(
+                "the patch expert emits features but fusion_mode is "
+                f"{self.fusion_mode!r}, which has no forecast to blend"
+            )
+        self.lambda_route = 0.0 if self.film_fusion else float(recipe.get("lambda_route", 0.05))
+        self.lambda_regret = 0.0 if self.film_fusion else float(recipe.get("lambda_regret", 0.03))
         self.route_warmup_epoch = int(recipe.get("route_warmup_epoch", 0))
         self.route_role_balanced = bool(recipe.get("route_role_balanced", False))
         self.graph_expert_lr = float(recipe.get("graph_expert_lr", configs.lr))
@@ -220,7 +242,7 @@ class Model(nn.Module):
             nn.ReLU(),
         )
         gate_input_dim = state_dim + 3 * self.output_dim
-        self.availability_gates = nn.ModuleList(
+        self.availability_gates = None if self.film_fusion else nn.ModuleList(
             [
                 nn.Sequential(
                     nn.Linear(gate_input_dim, gate_hidden_dim),
@@ -230,17 +252,38 @@ class Model(nn.Module):
                 for _ in range(AVAILABILITY_COUNT)
             ]
         )
+        # The FiLM head is the only module this plan adds: two affine maps from
+        # the patch branch's per-node condition vector to (gamma, beta) over the
+        # DCRNN hidden state. gamma is centred at 1 and beta at 0 so an
+        # untrained head is the identity and cannot destabilise the graph
+        # expert at initialisation.
+        self.film_head = None
+        if self.film_fusion:
+            hidden_size = int(self.graph_args.d_model)
+            self.film_head = nn.Sequential(
+                nn.Linear(int(self.patch_expert.feature_dim), gate_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(gate_hidden_dim, 2 * hidden_size),
+            )
+            nn.init.zeros_(self.film_head[-1].weight)
+            nn.init.zeros_(self.film_head[-1].bias)
         # NAS is the role every Join node carries at the last input step. A zero
         # budget makes beta identically zero there, which switches the patch
         # expert (and the route/regret gradients) off for the whole Join track.
-        self.register_buffer(
-            "patch_budget",
-            _role_tensor(
-                recipe.get("patch_residual_role_scale", {}),
-                {"aas": 0.20, "nas": 0.20, "vs": 0.0, "fs": 0.35},
-            ),
-            persistent=False,
-        )
+        if not self.film_fusion:
+            self.register_buffer(
+                "patch_budget",
+                _role_tensor(
+                    recipe.get("patch_residual_role_scale", {}),
+                    {"aas": 0.20, "nas": 0.20, "vs": 0.0, "fs": 0.35},
+                ),
+                persistent=False,
+            )
+        elif recipe.get("patch_residual_role_scale"):
+            raise ValueError(
+                "patch_residual_role_scale gates a residual that fusion_mode=film "
+                "does not produce; remove it from the recipe"
+            )
         self.graph_refiner = GraphOutputRefiner(
             self.output_dim,
             int(model_cfg.get("graph_refiner_hidden_dim", gate_hidden_dim)),
@@ -250,7 +293,7 @@ class Model(nn.Module):
             bool(recipe.get("graph_diffusion_use_backward", True)),
             bool(recipe.get("graph_diffusion_add_self_loop", True)),
         )
-        self.temporal_refiner = TemporalOutputRefiner(
+        self.temporal_refiner = None if self.film_fusion else TemporalOutputRefiner(
             self.output_dim,
             int(model_cfg.get("temporal_refiner_hidden_dim", gate_hidden_dim)),
             int(recipe.get("temporal_refiner_kernel_size", 3)),
@@ -323,11 +366,21 @@ class Model(nn.Module):
         if hasattr(self.graph_expert, "set_current_node_ids"):
             self.graph_expert.set_current_node_ids(self._current_node_ids(filled.size(2)))
         decoder = None if x_dec is None else x_dec[..., :self.output_dim]
-        graph_output = self.graph_expert(
-            adjacency, graph_input, x_t_mark, pos_mark, decoder, dec_t_mark, epoch
-        )
         patch_output = self.patch_expert(
             adjacency, patch_input, x_t_mark, pos_mark, decoder, dec_t_mark, epoch
+        )
+        if self.film_fusion:
+            # One forecast, one decoder. The patch branch only conditions it.
+            condition = self.film_head(patch_output["features"])
+            gamma, beta = condition.chunk(2, dim=-1)
+            graph_output = self.graph_expert(
+                adjacency, graph_input, x_t_mark, pos_mark, decoder, dec_t_mark,
+                epoch, film=(1.0 + gamma, beta),
+            )
+            y_graph, graph_meta = unpack_model_output(graph_output)
+            return y_graph, None, graph_meta.get("aux_losses")
+        graph_output = self.graph_expert(
+            adjacency, graph_input, x_t_mark, pos_mark, decoder, dec_t_mark, epoch
         )
         y_graph, graph_meta = unpack_model_output(graph_output)
         y_patch, _ = unpack_model_output(patch_output)
@@ -354,6 +407,13 @@ class Model(nn.Module):
         )
         state, last_availability = self._state(x_enc)
         y_graph = self.graph_refiner(y_graph, adjacency, last_availability)
+        if self.film_fusion:
+            return {
+                "pred": y_graph,
+                "aux_losses": expert_aux_losses,
+                "forecast_loss_mode": "role_balanced_mix",
+                "forecast_role_balanced_beta": self.forecast_role_balanced_beta,
+            }
         y_patch = self.temporal_refiner(y_patch, last_availability)
         state = state.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)
         gate_input = torch.cat(

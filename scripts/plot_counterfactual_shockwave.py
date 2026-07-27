@@ -11,7 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data_provider.ples_protocol import PLES_PROTOCOL_VERSION  # noqa: E402
+from data_provider.ples_protocol import (  # noqa: E402
+    PLES_PROTOCOL_VERSION,
+    overlap_blocks,
+    trajectory_span_from_manifest,
+)
 
 
 PAIR_KEYS = ("origin_id", "cohort_id", "track", "tau", "phase")
@@ -82,6 +86,51 @@ def _read_result_bundle(value):
     # used the older filename.
     rows_filename = "paired_event_rows.csv" if version < 2 else "ples_paired_rows.csv"
     return summary, summary_path, _read_rows(summary_path, rows_filename), version
+
+
+def _trajectory_span(summary, summary_path):
+    """PLES trajectory length as declared by the run that produced the rows.
+
+    Read the effects summary first, then the manifest written beside it. Older
+    exports carry the span in neither, and silently treating every origin as an
+    independent draw is exactly the interval-shrinking mistake this function
+    exists to prevent -- so that case raises instead of degrading. The
+    reconstruction uses pred_len for the horizon, not a second copy of
+    input_len, which is only equivalent when the two happen to match.
+    """
+    declared = summary.get("bootstrap")
+    if isinstance(declared, dict) and declared.get("trajectory_span"):
+        return int(declared["trajectory_span"])
+    manifest_path = Path(summary_path).parent / "protocol_manifest.json"
+    if manifest_path.exists():
+        with manifest_path.open("r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        span = trajectory_span_from_manifest(manifest)
+        if span:
+            return int(span)
+    raise ValueError(
+        f"{summary_path} declares no PLES trajectory span, and no manifest beside "
+        "it supplies one. Refusing to fall back to independent per-origin "
+        "resampling, which would report intervals that are too narrow."
+    )
+
+
+def _paired_trajectory_span(ours, ours_path, baseline, baseline_path):
+    """Both sides must agree on the resampling unit, and both must declare it.
+
+    Resolving only one side and assuming the other matches is not safe: the
+    protocol hash covers the evaluation design, not the horizon a particular
+    export was written with, so two bundles can share a hash and still disagree.
+    """
+    ours_span = _trajectory_span(ours, ours_path)
+    baseline_span = _trajectory_span(baseline, baseline_path)
+    if ours_span != baseline_span:
+        raise ValueError(
+            f"PLES trajectory spans differ between the two models: "
+            f"{ours_span} ({ours_path}) vs {baseline_span} ({baseline_path}); "
+            "the paired bootstrap has no common resampling unit"
+        )
+    return ours_span
 
 
 def _index_rows(rows):
@@ -305,45 +354,78 @@ def _advantages_v2(curves):
     }
 
 
-def bootstrap_advantages_v2(ours_rows, baseline_rows, samples=2000, seed=2026):
+def bootstrap_advantages_v2(ours_rows, baseline_rows, samples=2000, seed=2026,
+                            trajectory_span=None):
+    """Paired advantage intervals on the PLES v3 resampling unit.
+
+    This used to draw each origin independently and nest the cohort draw inside
+    it. Both parts disagreed with the design the manifest declares: adjacent
+    origins share trajectory data, so they are not independent draws, and the
+    frozen cohorts are replayed at every origin, so they are crossed with
+    origins rather than nested in them. Independent origins shrink the interval;
+    nesting a crossed factor distorts it.
+    """
     point = _advantages_v2(compare_rows_v2(ours_rows, baseline_rows))
     if samples <= 0:
         return {name: {"point": value, "low": None, "high": None} for name, value in point.items()}
 
     ours_units = defaultdict(lambda: defaultdict(list))
     baseline_units = defaultdict(lambda: defaultdict(list))
+    origin_times, origin_stratum = {}, {}
     for row in ours_rows:
-        ours_units[int(row["origin_id"])][int(row["cohort_id"])].append(row)
+        origin = int(row["origin_id"])
+        ours_units[origin][int(row["cohort_id"])].append(row)
+        origin_times[origin] = int(row.get("event_time_index", origin))
+        origin_stratum[origin] = str(row.get("regime", "all")).split("/")[0]
     for row in baseline_rows:
         baseline_units[int(row["origin_id"])][int(row["cohort_id"])].append(row)
     if set(ours_units) != set(baseline_units):
         raise ValueError("PLES v3 model exports do not share bootstrap origins")
 
+    if not trajectory_span:
+        raise ValueError(
+            "bootstrap_advantages_v2 needs the PLES trajectory span; without it "
+            "each origin would be resampled independently even though adjacent "
+            "origins share data, and the interval would come out too narrow"
+        )
+    assignment = overlap_blocks(origin_times, trajectory_span)
+    blocks = defaultdict(list)
+    for origin, block in assignment.items():
+        blocks[block].append(origin)
+    block_stratum = {block: origin_stratum[min(members)] for block, members in blocks.items()}
+    blocks_by_stratum = defaultdict(list)
+    for block, stratum in sorted(block_stratum.items()):
+        blocks_by_stratum[stratum].append(block)
+
     rng = np.random.default_rng(seed)
-    origin_ids = sorted(ours_units)
+    cohort_ids = sorted({int(row["cohort_id"]) for row in ours_rows})
     draws = {name: np.empty(int(samples), dtype=np.float64) for name in point}
     for sample_index in range(int(samples)):
         sampled_ours = []
         sampled_baseline = []
-        for sampled_origin_id, origin_id in enumerate(
-            rng.choice(origin_ids, size=len(origin_ids), replace=True), start=1
-        ):
-            cohort_ids = sorted(ours_units[int(origin_id)])
-            for sampled_cohort_id, cohort_id in enumerate(
-                rng.choice(cohort_ids, size=len(cohort_ids), replace=True), start=1
-            ):
-                replacement_ids = {
-                    "origin_id": sampled_origin_id,
-                    "cohort_id": sampled_cohort_id,
-                }
-                sampled_ours.extend(
-                    {**row, **replacement_ids}
-                    for row in ours_units[int(origin_id)][int(cohort_id)]
-                )
-                sampled_baseline.extend(
-                    {**row, **replacement_ids}
-                    for row in baseline_units[int(origin_id)][int(cohort_id)]
-                )
+        # One global cohort draw per sample, applied to every sampled block.
+        cohort_repeats = defaultdict(int)
+        for cohort_id in rng.choice(cohort_ids, size=len(cohort_ids), replace=True):
+            cohort_repeats[int(cohort_id)] += 1
+        slot = 0
+        for _stratum, stratum_blocks in sorted(blocks_by_stratum.items()):
+            for block in rng.choice(stratum_blocks, size=len(stratum_blocks), replace=True):
+                for origin_id in blocks[int(block)]:
+                    slot += 1
+                    for cohort_id, repeats in sorted(cohort_repeats.items()):
+                        for copy in range(repeats):
+                            replacement_ids = {
+                                "origin_id": slot,
+                                "cohort_id": cohort_id * 1000 + copy,
+                            }
+                            sampled_ours.extend(
+                                {**row, **replacement_ids}
+                                for row in ours_units[origin_id][cohort_id]
+                            )
+                            sampled_baseline.extend(
+                                {**row, **replacement_ids}
+                                for row in baseline_units[origin_id][cohort_id]
+                            )
         values = _advantages_v2(compare_rows_v2(sampled_ours, sampled_baseline))
         for name, value in values.items():
             draws[name][sample_index] = value
@@ -485,6 +567,9 @@ def main():
             baseline_rows,
             samples=args.bootstrap_samples,
             seed=args.bootstrap_seed,
+            trajectory_span=_paired_trajectory_span(
+                ours_summary, ours_path, baseline_summary, baseline_path
+            ),
         )
         summary = {
             "schema_version": 3,

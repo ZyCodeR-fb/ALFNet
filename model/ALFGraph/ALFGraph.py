@@ -195,6 +195,7 @@ class Model(nn.Module):
         x_dec=None,
         dec_t_mark=None,
         epoch=0,
+        film=None,
     ):
         forward_support = calculate_random_walk_matrix(adjacency)
         backward_support = calculate_random_walk_matrix(adjacency.T)
@@ -216,6 +217,15 @@ class Model(nn.Module):
             supports,
             state_sequence,
         )
+        if film is not None:
+            # Feature-wise linear modulation of the encoder state handed to the
+            # decoder (Perez et al., AAAI 2018; GNN-FiLM, ICML 2020). Lifecycle
+            # events change which sensors are observable, which is an encoding-
+            # stage condition, so the modulation lands here rather than in the
+            # decoder. gamma/beta are [batch, nodes, hidden] and broadcast over
+            # the encoder layers.
+            gamma, beta = film
+            hidden = hidden * gamma.unsqueeze(0) + beta.unsqueeze(0)
         initial_input = x_enc[:, -1, :, :self.output_dim]
         teacher_forcing_ratio = 1.0 - float(epoch) / 40.0
         prediction = self.decoder(

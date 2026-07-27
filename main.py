@@ -8,7 +8,7 @@ import torch
 from omegaconf import OmegaConf
 from torch import nn
 
-from args import initialize_args
+from args import apply_output_root, initialize_args
 from data_provider.data_factory import data_provider
 from experiments import async_lifecycle_inference, train_model
 from model.regist_model import load_model_class
@@ -17,6 +17,13 @@ from utils.logtool import print_config, print_header, print_train, set_wandb
 
 
 MAX_EXP_ID_COMPONENT_LEN = 250
+
+# name -> value that reproduces the historical experiment id
+TRAINING_OBJECTIVE_KNOBS = {
+    "lcbt_context_loss_weight": 0.10,
+    "lcbt_stratum_balanced_loss": 0.0,
+    "lcbt_include_stress_cohort": False,
+}
 
 
 def _shorten_exp_id_component(exp_id):
@@ -61,6 +68,16 @@ def _build_train_signature(args):
         "expert_bits": expert_bits,
         "train_init_checkpoint_path": warm_start_path,
     }
+    # Knobs that change what the model is optimising. The LCBT manifest hash
+    # covers the protocol-shaped ones (cohort tiers, ratios, hidden fraction),
+    # but the loss weights live only on the command line, so two runs with
+    # different objectives used to land in the same experiment directory and
+    # overwrite each other's checkpoint. Only non-default values are folded in,
+    # which keeps every existing run's signature byte-identical.
+    for name, default in TRAINING_OBJECTIVE_KNOBS.items():
+        value = getattr(args, name, default)
+        if value != default:
+            signature_payload[name] = value
     signature_hash = hashlib.md5(json.dumps(signature_payload, sort_keys=True).encode("utf-8")).hexdigest()[:8]
     readable = (
         f"dm{args.d_model}-kh{args.k_hop}-"
@@ -221,7 +238,14 @@ def _checkpoint_run_metadata(checkpoint, checkpoint_dir, checkpoint_file):
 
 
 def load_pretrained_model(model, args):
-    checkpoint_dir = os.path.join(args.best_checkpoint_path, args.exp_id)
+    # Run-scoped output paths already identify the experiment via ``run_id``.
+    # Appending the long exp_id again would make test_async look in a directory
+    # that training never created.
+    checkpoint_dir = (
+        args.best_checkpoint_path
+        if getattr(args, "paths_are_run_scoped", False)
+        else os.path.join(args.best_checkpoint_path, args.exp_id)
+    )
     if args.pretrained_model_path is None:
         checkpoint, checkpoint_dir, checkpoint_file = _load_checkpoint_from_dir(args, checkpoint_dir)
         args.loaded_checkpoint_metadata = _checkpoint_run_metadata(checkpoint, checkpoint_dir, checkpoint_file)
@@ -246,6 +270,8 @@ def initialize_training_from_checkpoint(model, args):
 if __name__ == "__main__":
     args = initialize_args()
     args.exp_id = build_exp_id(args)
+    # Must run after exp_id exists: the default run folder is the experiment id.
+    apply_output_root(args)
     wandb = set_wandb(args)
     configs = OmegaConf.create(vars(args))
     pl.seed_everything(args.seed)

@@ -1,4 +1,5 @@
 import argparse
+import os
 from copy import deepcopy
 
 from omegaconf import OmegaConf
@@ -156,6 +157,15 @@ def _add_arguments(parser):
     # save and logging settings
     parser.add_argument("--wandb", action="store_true", help="enable wandb logging")
     parser.add_argument("--wandb_entity", type=str, default="zeng699304-xidian-university", help="user name of wandb")
+    parser.add_argument("--output_root", type=str, default=None,
+                        help="single root for every artefact of a run: "
+                             "<root>/<model>/<run_id>/{checkpoints,predictions,manifests,"
+                             "logs,reports,profiles}. Set it and the five path flags below "
+                             "plus the two manifest roots are derived from it, so results "
+                             "stop scattering across check_points/, predictions/, run_v*/ "
+                             "and friends. Leave unset to keep the legacy flat layout.")
+    parser.add_argument("--run_id", type=str, default=None,
+                        help="run folder under --output_root; defaults to the experiment id")
     parser.add_argument("--best_checkpoint_path", type=str, default="./check_points/", help="best val checkpoint path")
     parser.add_argument("--best_prediction_path", type=str, default="./predictions/", help="results path")
     parser.add_argument("--best_metrics_path", type=str, default="./", help="results path")
@@ -287,6 +297,41 @@ def _apply_family_overrides(args):
             )
         node[keys[-1]] = OmegaConf.to_object(OmegaConf.create(f"value: {raw}"))["value"]
     args.model_family_cfg = family
+
+
+OUTPUT_SUBDIRS = {
+    "best_checkpoint_path": "checkpoints",
+    "best_prediction_path": "predictions",
+    "best_fig_path": "figures",
+    "log_dir": "logs",
+    "best_metrics_path": "reports",
+    "lcbt_manifest_root": "manifests",
+    "ples_manifest_root": "manifests",
+}
+
+
+def apply_output_root(args):
+    """Derive every artefact path from one root.
+
+    Results used to land in ``check_points/``, ``predictions/``, ``logs/``,
+    ``figures/`` and ``protocol_manifests/`` at the repo root, so a run's pieces
+    were scattered and each new experiment grew another sibling directory
+    (``run_bs64``, ``run_v5``, ``_smoke``, ``_prof``). One root per run keeps a
+    run together and makes ignoring results a single .gitignore entry.
+
+    ``profiles`` is created too, so profiling output has a home inside the run
+    instead of a throwaway sibling directory.
+    """
+    root = getattr(args, "output_root", None)
+    if not root:
+        return
+    run_id = getattr(args, "run_id", None) or args.exp_id
+    base = os.path.join(root, str(args.model), str(run_id))
+    for name, sub in OUTPUT_SUBDIRS.items():
+        setattr(args, name, os.path.join(base, sub))
+    args.profile_dir = os.path.join(base, "profiles")
+    args.run_output_dir = base
+    args.paths_are_run_scoped = True
 
 
 def finalize_args(args):

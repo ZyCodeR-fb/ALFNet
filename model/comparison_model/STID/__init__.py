@@ -35,6 +35,9 @@ class Model(nn.Module):
             if_T_i_D=model_cfg["if_T_i_D"],
             if_D_i_W=model_cfg["if_D_i_W"],
             if_node=model_cfg["if_node"],
+            # _build_stid_input appends tod then dow after the raw x_enc block.
+            tid_index=int(configs.enc_in),
+            diw_index=int(configs.enc_in) + int(self.use_time_of_day),
         )
 
     def _resolve_current_node_ids(self, current_num_nodes):

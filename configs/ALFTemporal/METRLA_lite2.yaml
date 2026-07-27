@@ -1,0 +1,44 @@
+runtime:
+  model: ALFTemporal
+  model_variant: lite2
+  model_recipe: filtered_patch
+  t_mark: true
+
+dataset:
+  dloader_name: METRLA
+  data_path: ./data/METR-LA/raw_data.pkl
+  unknown_nodes_path: ./data/METR-LA/unknown_nodes.npy
+  input_len: 12
+  pred_len: 12
+  look_back: 0
+  input_features: v
+  target_features: v
+
+training:
+  device: cuda:0
+  seed: 32
+  loss: mse
+  lr: 0.0001
+  d_model: 64
+
+family:
+  model:
+    # Availability one-hot, state_age and observation mask reach the patch
+    # expert. Set false for the lifecycle-input ablation.
+    lifecycle_input: true
+    emit: prediction
+    use_timefilter: false
+    layers: 2
+    tem_patchsize: 12
+    tem_patchnum: 1
+    recur_times: 5
+    spa_patchsize: 8
+    factors: 1
+    crossformer_router_factor: 4
+    crossformer_dropout: 0.1
+    input_dims: 64
+    node_dims: 32
+    tod_dims: 32
+    dow_dims: 32
+    tod: 288
+    dow: 7

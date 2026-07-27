@@ -34,8 +34,10 @@ from data_provider.calendar_strata import stratum_weights  # noqa: E402
 from data_provider.ples_protocol import (  # noqa: E402
     PHASE_ORDER,
     PLES_EFFECT_NAMES,
+    overlap_blocks,
     summarize_lce_rows,
     summarize_paired_rows,
+    trajectory_span_from_manifest,
 )
 from scripts.collect_lifecycle_results import (  # noqa: E402
     HASH_FIELDS,
@@ -113,6 +115,24 @@ def _read_rows(result_dir):
     if not rows:
         raise ValueError(f"PLES paired rows are empty: {path}")
     return rows, path
+
+
+def _trajectory_span(result_dir, input_len):
+    """PLES trajectory length, read from the frozen evaluation manifest.
+
+    The manifest records the span the single-model bootstrap used; reading it
+    back is what keeps the paired bootstrap on the same resampling unit instead
+    of quietly drifting to a different one. ``input_len`` is only a fallback for
+    manifests that predate ``resolved.input_len``; the horizon always comes from
+    ``resolved.pred_len``.
+    """
+    path = Path(result_dir) / "protocol_manifest.json"
+    with path.open("r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    span = trajectory_span_from_manifest(manifest, default_input_len=input_len)
+    if not span:
+        raise ValueError(f"manifest declares no PLES trajectory span: {path}")
+    return int(span)
 
 
 def _main_cohort_ids(result_dir):
@@ -205,8 +225,9 @@ def assert_pre_event_identity(rows, model):
 class RowTensor:
     """Row-level metrics plus the (track, tau, regime) cell map used by every statistic."""
 
-    def __init__(self, rows, keys, input_len):
+    def __init__(self, rows, keys, input_len, trajectory_span=None):
         self.input_len = int(input_len)
+        self.trajectory_span = None if trajectory_span is None else int(trajectory_span)
         counts = np.array([row["count"] for row in rows], dtype=np.float64)
         if np.any(counts <= 0):
             raise ValueError("rows with non-positive count must be absent from the frozen CSV")
@@ -256,16 +277,32 @@ class RowTensor:
             units[(origin_id, cohort_id)].append(index)
         self.origin_ids = sorted({origin for origin, _ in units})
         # Neighbouring origins share PLES trajectory data, so they are not
-        # independent; whole calendar days are. Blocks are stratified by day type
-        # so a draw cannot change the Weekday/Weekend mix. Cohorts are crossed
-        # with origins rather than nested in them, so they get one global draw
-        # per sample. This mirrors ples_protocol.bootstrap_units exactly.
+        # independent. Calendar days do not contain that dependence -- 24 of the
+        # 175 adjacent origin pairs overlap across midnight -- so origins whose
+        # pre+input+post+horizon spans touch are chained into one block instead.
+        # Blocks are stratified by day type so a draw cannot change the
+        # Weekday/Weekend mix. Cohorts are crossed with origins rather than
+        # nested in them, so they get one global draw per sample. This must
+        # mirror ples_protocol.bootstrap_units exactly, and the evaluation
+        # manifest names this script as the paired implementation of it.
+        origin_times = {}
+        for row in rows:
+            origin_times[int(row["origin_id"])] = int(
+                row.get("event_time_index", row["origin_id"])
+            )
+        if self.trajectory_span:
+            assignment = overlap_blocks(origin_times, self.trajectory_span)
+            label = {origin: f"overlap-{index:04d}" for origin, index in assignment.items()}
+        else:  # no span available: fall back to calendar days
+            label = {
+                int(row["origin_id"]): str(row.get("calendar_day", "all")) for row in rows
+            }
         block_rows = defaultdict(list)
         block_stratum = {}
         for index, row in enumerate(rows):
-            block = str(row.get("calendar_day", "all"))
+            block = label[int(row["origin_id"])]
             block_rows[block].append(index)
-            block_stratum[block] = str(row.get("regime", "all")).split("/")[0]
+            block_stratum.setdefault(block, str(row.get("regime", "all")).split("/")[0])
         self.block_rows = {name: np.array(items, dtype=np.int64)
                            for name, items in sorted(block_rows.items())}
         by_stratum = defaultdict(list)
@@ -426,7 +463,7 @@ def verify_against_production(tensor, rows, run, tolerance, main_cohort_ids=None
 
 
 def draw_weights(tensor, rng):
-    """One stratified calendar-day block draw crossed with one cohort draw."""
+    """One stratified overlap-block draw crossed with one cohort draw."""
     cohort_multiplicity = np.zeros(int(max(tensor.cohort_ids)) + 1, dtype=np.float64)
     for cohort_id in rng.choice(tensor.cohort_ids, size=len(tensor.cohort_ids), replace=True):
         cohort_multiplicity[int(cohort_id)] += 1.0
@@ -536,8 +573,12 @@ def main():
     main_a = [row for row in rows_a if int(row["cohort_id"]) in wanted]
     main_b = [row for row in rows_b if int(row["cohort_id"]) in wanted]
     main_keys = _pair_keys(main_a)
-    tensor_a = RowTensor(main_a, main_keys, args.input_len)
-    tensor_b = RowTensor(main_b, main_keys, args.input_len)
+    span_a = _trajectory_span(args.model_a, args.input_len)
+    span_b = _trajectory_span(args.model_b, args.input_len)
+    if span_a != span_b:
+        raise ValueError(f"PLES trajectory spans differ: {span_a} vs {span_b}")
+    tensor_a = RowTensor(main_a, main_keys, args.input_len, span_a)
+    tensor_b = RowTensor(main_b, main_keys, args.input_len, span_a)
     stats_a = verify_against_production(
         tensor_a, rows_a, run_a, args.recompute_tolerance, main_cohort_ids
     )
@@ -580,12 +621,15 @@ def main():
         writer.writeheader()
         writer.writerows(records)
     payload = {
-        "analysis": "stage-0 offline paired origin->cohort bootstrap",
+        "analysis": "stage-0 offline paired overlap-block x cohort bootstrap",
         "model_a": {key: run_a[key] for key in ("model", "model_variant", "seed", "result_dir")},
         "model_b": {key: run_b[key] for key in ("model", "model_variant", "seed", "result_dir")},
         "hashes": run_a["hashes"],
         "bootstrap": {"samples": args.bootstrap_samples, "seed": args.bootstrap_seed,
-                      "levels": ["origin", "cohort"], "paired_across_models": True},
+                      "outer_unit": "overlap-connected origin block, stratified by day_type",
+                      "trajectory_span": span_a,
+                      "design": "origins and cohorts are crossed, not nested",
+                      "paired_across_models": True},
         "pre_event_rows_checked": {run_a["model"]: pre_a, run_b["model"]: pre_b},
         "primary_endpoint_family": [f"{name}/{metric}" for name, metric in PRIMARY_FAMILY],
         "single_seed_diagnostic_only": True,

@@ -134,10 +134,12 @@ class WindowAttBlock(nn.Module):
         timefilter_alpha=0.1,
         timefilter_dropout=0.1,
         timefilter_residual_scale=0.10,
+        use_timefilter=True,
     ):
         super().__init__()
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.num, self.size = num, size
+        self.use_timefilter = bool(use_timefilter)
         self.tsa = CrossformerTwoStageAttentionLayer(
             seg_num=num,
             factor=int(crossformer_router_factor),
@@ -146,7 +148,12 @@ class WindowAttBlock(nn.Module):
             d_ff=mlp_hidden_dim,
             dropout=float(crossformer_dropout),
         )
-        self.timefilter_patch_mixer = TimeFilterPatchMixer(
+        # Measured at B=64: 30.8 ms of the block's 44.7 ms for 23.6% of its
+        # parameters, and its top-p mask is built by index assignment into a
+        # zeros tensor, so the router is trained only by the auxiliary balance
+        # loss and never by forecast error. Switchable so the ablation is one
+        # YAML key rather than a code edit.
+        self.timefilter_patch_mixer = None if not self.use_timefilter else TimeFilterPatchMixer(
             hidden_dim=hidden_size,
             patch_num=num,
             patch_size=size,
@@ -186,7 +193,8 @@ class WindowAttBlock(nn.Module):
             self.num,
             hidden_dim,
         ).permute(0, 1, 3, 2, 4).contiguous()
-        x = self.timefilter_patch_mixer(x)
+        if self.timefilter_patch_mixer is not None:
+            x = self.timefilter_patch_mixer(x)
         return x.reshape(batch, time_steps, token_count, hidden_dim)
 
 
@@ -220,8 +228,13 @@ class PatchSTG(nn.Module):
         timefilter_alpha=0.1,
         timefilter_dropout=0.1,
         timefilter_residual_scale=0.10,
+        use_timefilter=True,
+        emit="prediction",
     ):
         super(PatchSTG, self).__init__()
+        if emit not in {"prediction", "features"}:
+            raise ValueError(f"unsupported PatchSTG emit mode: {emit}")
+        self.emit = emit
         self.node_num = node_num
         self.ori_parts_idx, self.reo_parts_idx = ori_parts_idx, reo_parts_idx
         self.reo_all_idx = reo_all_idx
@@ -262,15 +275,19 @@ class PatchSTG(nn.Module):
                 timefilter_alpha=timefilter_alpha,
                 timefilter_dropout=timefilter_dropout,
                 timefilter_residual_scale=timefilter_residual_scale,
+                use_timefilter=use_timefilter,
             )
             for _ in range(layers)
         ])
-        self.regression_conv = nn.Conv2d(
+        # In "features" mode the branch never decodes its own forecast, so the
+        # regression head and the whole downstream fusion gate disappear.
+        self.regression_conv = None if emit == "features" else nn.Conv2d(
             in_channels=tem_patchnum * dims,
             out_channels=tem_patchsize * tem_patchnum,
             kernel_size=(1, 1),
             bias=True,
         )
+        self.feature_dim = tem_patchnum * dims
 
     def forward(self, x, te):
         embedded_x = self.embedding(x, te)
@@ -289,6 +306,11 @@ class PatchSTG(nn.Module):
         original[:, :, self.ori_parts_idx, :] = (
             reordered[:, :, self.reo_parts_idx, :]
         )
+        if self.emit == "features":
+            # [B, node, tem_patchnum * dims] -- one condition vector per node.
+            return original.permute(0, 2, 1, 3).reshape(
+                original.shape[0], original.shape[2], -1
+            )
         return self.regression_conv(
             original.transpose(2, 3).reshape(
                 original.shape[0],

@@ -789,6 +789,38 @@ def summarize_paired_rows(rows, input_len, main_cohort_ids=None):
     }
 
 
+def trajectory_span(pre_steps, input_len, post_steps, pred_len):
+    """Steps of data one PLES trajectory touches: pre + input + post + horizon.
+
+    Single definition on purpose. It used to be spelled out at each call site,
+    and one of those spellings used ``input_len`` twice, which is only correct
+    when input_len == pred_len -- true for the current 12->12 setting and wrong
+    the moment the horizon changes.
+    """
+    return int(pre_steps) + int(input_len) + int(post_steps) + int(pred_len)
+
+
+def trajectory_span_from_manifest(manifest, default_input_len=None):
+    """Read a span from a frozen manifest, declared or reconstructed."""
+    declared = manifest.get("ples", {}).get("bootstrap", {})
+    if isinstance(declared, dict) and declared.get("trajectory_span"):
+        return int(declared["trajectory_span"])
+    requested = manifest.get("requested", {})
+    resolved = manifest.get("resolved", {})
+    input_len = resolved.get("input_len", default_input_len)
+    pred_len = resolved.get("pred_len")
+    if (
+        "pre_steps" in requested
+        and "post_steps" in requested
+        and input_len is not None
+        and pred_len is not None
+    ):
+        return trajectory_span(
+            requested["pre_steps"], input_len, requested["post_steps"], pred_len
+        )
+    return None
+
+
 def overlap_blocks(origin_times, span):
     """Group origins whose trajectories overlap into transitively closed blocks.
 

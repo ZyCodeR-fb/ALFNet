@@ -13,6 +13,7 @@ from data_provider.ples_protocol import (
     phase_for_tau_v2,
     summarize_lce_rows,
     summarize_paired_rows,
+    trajectory_span,
 )
 from utils.model_output import unpack_model_output
 
@@ -171,6 +172,89 @@ def _format_training_trace(training_trace):
 
 
 
+# Which of the seven input channels each model's forward actually consumes,
+# audited against the code on 2026-07-27. Every model receives the same
+# [raw, role x4, age, mask] tensor, but receiving is not using: half the
+# comparison models slice the raw channel straight back off. Recording it makes
+# the comparison auditable instead of leaving "same tensor" to imply "same
+# information". Update this table whenever an adapter's forward changes; the
+# regression test in tests/test_input_contract.py pins the current values.
+MODEL_INPUT_CONTRACT = {
+    "ALFNet": "all",
+    "ALFGraph": "all",
+    "ALFTemporal": "all",
+    "FCLSTM": "all",
+    "GWNET": "all",
+    "STGCN": "all",
+    "STGODE": "all",
+    "STID": "all+calendar",
+    "MoGERNN": "raw",
+    "STFiT": "raw",
+    "HA": "raw",
+    "MCPST_FSL": "raw",
+    "PatchSTG": "raw+calendar",
+    "SLPF": "raw+calendar",
+    "STBP": "raw",
+}
+CHANNEL_NAMES = ("raw", "role_AAS", "role_NAS", "role_VS", "role_FS", "age", "obs_mask")
+
+
+def _bootstrap_contract(manifest, span):
+    """The resampling unit, travelling with the numbers it produced.
+
+    Without this a downstream paired script cannot tell an overlap-blocked run
+    from a per-origin one and quietly falls back to the wrong, interval-
+    shrinking design -- which is exactly what happened before it was added.
+    """
+    declared = dict(manifest.get("ples", {}).get("bootstrap", {}))
+    declared["trajectory_span"] = int(span)
+    return declared
+
+
+def _objective_contract(args):
+    """What the training loss optimised, versus what the tables report.
+
+    Deliberate asymmetry, recorded so the paper cannot describe it wrongly: the
+    training loss is the plain batch mean over whatever windows the LCBT
+    schedule produced, while every reported number is re-weighted onto the
+    calendar strata. Measured training-to-evaluation weight ratios run 0.62
+    (AM/PM peak, under-weighted) to 1.55 (EarlyAM, over-weighted). Estimating
+    the reported quantity directly is available via --lcbt_stratum_balanced_loss
+    but is off by default: changing the objective is a modelling decision, and
+    turning it on would make the training loss non-comparable with every run
+    recorded so far. This lives in the result manifest rather than the canonical
+    one because it is run-level, not protocol-level.
+    """
+    weight = float(getattr(args, "lcbt_stratum_balanced_loss", 0.0))
+    return {
+        "training_loss_weighting": (
+            "unweighted batch mean over scheduled windows" if weight <= 0
+            else f"blended {weight:g} towards the calendar-stratum weighting"
+        ),
+        "evaluation_weighting": "calendar-stratum weighted (equal over tod within day_type; 5/7 and 2/7)",
+        "training_matches_evaluation_weighting": weight >= 1.0,
+        "lcbt_stratum_balanced_loss": weight,
+        "lcbt_context_loss_weight": float(getattr(args, "lcbt_context_loss_weight", 0.0)),
+        "lcbt_include_stress_cohort": bool(getattr(args, "lcbt_include_stress_cohort", False)),
+    }
+
+
+def _input_contract(args):
+    model = str(getattr(args, "model", ""))
+    consumed = MODEL_INPUT_CONTRACT.get(model, "undeclared")
+    return {
+        "model": model,
+        "tensor_channels": list(CHANNEL_NAMES),
+        "consumed": consumed,
+        "consumes_lifecycle_channels": consumed.startswith("all"),
+        "note": (
+            "models marked 'raw' slice x_enc[..., :raw_enc_in] and never see the "
+            "role/age/mask channels; 'calendar' means the adapter appends "
+            "time-of-day and day-of-week from x_t_mark"
+        ),
+    }
+
+
 def _write_manifest(dataset, args, output_dir):
     manifest = dataset.get_protocol_manifest()
     root = os.path.abspath(getattr(args, "ples_manifest_root", "./protocol_manifests"))
@@ -187,8 +271,14 @@ def _write_manifest(dataset, args, output_dir):
     if existing.get("protocol_hash") != manifest.get("protocol_hash"):
         raise ValueError(f"Lifecycle v3 manifest mismatch at {canonical_path}")
     result_path = os.path.join(output_dir, "protocol_manifest.json")
+    # The result copy carries the model-specific input contract; the canonical
+    # manifest must stay byte-identical across models or the hash check above
+    # would reject every pairing.
+    result_manifest = dict(_jsonable(manifest))
+    result_manifest["model_input_contract"] = _input_contract(args)
+    result_manifest["training_objective_contract"] = _objective_contract(args)
     with open(result_path, "w", encoding="utf-8") as handle:
-        json.dump(_jsonable(manifest), handle, ensure_ascii=False, indent=2)
+        json.dump(result_manifest, handle, ensure_ascii=False, indent=2)
     return canonical_path, result_path
 
 
@@ -219,7 +309,7 @@ def _async_lifecycle_inference(model, dataset, args):
     protocol_token = manifest["protocol_hash"][:10]
     output_dir = os.path.join(
         args.best_prediction_path,
-        args.exp_id,
+        *([] if getattr(args, "paths_are_run_scoped", False) else [args.exp_id]),
         f"lifecycle-v3-{protocol_token}",
     )
     os.makedirs(output_dir, exist_ok=True)
@@ -372,13 +462,14 @@ def _async_lifecycle_inference(model, dataset, args):
             "PLES v3 pre-event paired MAPE difference is non-zero: "
             f"max_abs={pre_metric_difference:.6g}"
         )
+    span = trajectory_span(pre_steps, args.input_len, post_steps, args.pred_len)
     bootstrap = bootstrap_paired_effects(
         rows,
         input_len=args.input_len,
         samples=int(getattr(args, "ples_bootstrap_samples", 2000)),
         seed=int(getattr(args, "ples_bootstrap_seed", 2026)),
         main_cohort_ids=main_cohort_ids,
-        trajectory_span=pre_steps + int(args.input_len) + post_steps + int(args.pred_len),
+        trajectory_span=span,
     )
     training_trace = _load_training_trace(args)
     required_training_hash = manifest.get("training_protocol_hash")
@@ -434,6 +525,10 @@ def _async_lifecycle_inference(model, dataset, args):
     effects_payload = {
         **common,
         "table": "PLES v3 paired effects",
+        # The resampling unit travels with the numbers. Without it a downstream
+        # paired script cannot tell an overlap-blocked run from a per-origin one
+        # and quietly falls back to the wrong, interval-shrinking design.
+        "bootstrap": _bootstrap_contract(manifest, span),
         "paired_effects": ples_summary["paired_effects"],
         "paired_effect_intervals": bootstrap,
         "pre_event_max_abs_input_difference": 0.0,

@@ -214,9 +214,15 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
     if set(data_loaders) != {"train", "val"}:
         raise ValueError("Training must receive only train and validation loaders")
 
-    args.best_checkpoint_path = os.path.join(args.best_checkpoint_path, args.exp_id)
-    args.best_prediction_path = os.path.join(args.best_prediction_path, args.exp_id)
-    args.fig_path = os.path.join(args.best_fig_path, args.exp_id)
+    # With --output_root the run folder already identifies the run, so appending
+    # the 176-character exp_id again would double the path length for no gain.
+    if not getattr(args, "paths_are_run_scoped", False):
+        args.best_checkpoint_path = os.path.join(args.best_checkpoint_path, args.exp_id)
+        args.best_prediction_path = os.path.join(args.best_prediction_path, args.exp_id)
+    if getattr(args, "paths_are_run_scoped", False):
+        args.fig_path = args.best_fig_path
+    else:
+        args.fig_path = os.path.join(args.best_fig_path, args.exp_id)
     for path in (args.best_checkpoint_path, args.best_prediction_path, args.fig_path):
         os.makedirs(path, exist_ok=True)
 

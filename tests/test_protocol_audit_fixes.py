@@ -252,3 +252,91 @@ def test_evaluator_requires_the_maintained_lce_version():
 
     with pytest.raises(ValueError, match="LCE v3"):
         _async_lifecycle_inference(None, _Dataset(), SimpleNamespace(lce_protocol_version=2))
+
+
+# --- 2026-07 round 2: the paired scripts must use the PLES v3 resampling unit --
+
+
+def test_paired_bootstrap_blocks_by_overlap_not_calendar_day():
+    from scripts.paired_model_bootstrap import RowTensor
+
+    rows, keys = [], []
+    # origins 1 and 2 are 43 steps apart across midnight; 3 is far away.
+    spec = [(1, 280, "2026-01-01"), (2, 323, "2026-01-02"), (3, 900, "2026-01-04")]
+    for origin, time_index, day in spec:
+        for cohort in (1, 2):
+            for track in ("join", "fault"):
+                for tau in range(2):
+                    rows.append({
+                        "origin_id": origin, "event_time_index": time_index,
+                        "calendar_day": day, "cohort_id": cohort, "track": track,
+                        "tau": tau, "regime": "Weekday/Midday", "count": 4,
+                        **{f"{arm}_{stat}_sum": 1.0
+                           for arm in ("treated", "control")
+                           for stat in ("ape", "ae", "se")},
+                    })
+                    keys.append((origin, cohort, track, tau))
+
+    by_day = RowTensor(rows, keys, input_len=12)
+    assert len(by_day.block_rows) == 3
+
+    overlapping = RowTensor(rows, keys, input_len=12, trajectory_span=72)
+    assert len(overlapping.block_rows) == 2
+    assert overlapping.cohort_ids == [1, 2]
+
+
+def test_paired_bootstrap_reads_the_span_from_the_manifest(tmp_path):
+    import json
+
+    from scripts.paired_model_bootstrap import _trajectory_span
+
+    directory = tmp_path / "run"
+    directory.mkdir()
+    payload = {"ples": {"bootstrap": {"trajectory_span": 72}},
+               "requested": {"pre_steps": 12, "post_steps": 36},
+               "resolved": {"input_len": 12, "pred_len": 12}}
+    (directory / "protocol_manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+    assert _trajectory_span(directory, 12) == 72
+
+    # falls back to reconstructing it when an older manifest omits the field
+    payload["ples"]["bootstrap"] = {}
+    (directory / "protocol_manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+    assert _trajectory_span(directory, 12) == 72
+
+
+def test_plot_script_crossmodel_bootstrap_uses_overlap_blocks():
+    import inspect
+
+    from scripts import plot_counterfactual_shockwave as plot
+
+    source = inspect.getsource(plot.bootstrap_advantages_v2)
+    assert "overlap_blocks" in source
+    # cohorts are crossed with origins, so they get one global draw per sample
+    assert "cohort_repeats" in source
+    assert "trajectory_span" in inspect.signature(plot.bootstrap_advantages_v2).parameters
+
+
+# --- issue 5: objective knobs must reach the experiment signature ------------
+
+
+def test_training_objective_knobs_change_the_experiment_signature():
+    from types import SimpleNamespace
+
+    from main import TRAINING_OBJECTIVE_KNOBS, _build_train_signature
+
+    base = dict(
+        model_variant="v", model_recipe="r", model_config_path="", model_family_cfg={},
+        d_model=64, k_hop=1, e_layers=2, d_layers=1, activation="gelu", loss="mse",
+        optimizer="adamw", scheduler="None", scheduler_patience=1, lr=5e-5,
+        weight_decay=1e-4, batch_size=64, max_epoch=100, patience=10,
+        stop_based="val_lifecycle", num_used_experts=3, mean_expert=True,
+        weight_expert=True, max_expert=True, min_expert=True, diffusion_expert=True,
+        train_init_checkpoint_path=None,
+    )
+    default = _build_train_signature(SimpleNamespace(**base, **TRAINING_OBJECTIVE_KNOBS))
+    # omitting the knobs entirely must reproduce the historical signature
+    assert _build_train_signature(SimpleNamespace(**base)) == default
+    for name, value in TRAINING_OBJECTIVE_KNOBS.items():
+        changed = dict(TRAINING_OBJECTIVE_KNOBS)
+        changed[name] = 0.42 if isinstance(value, float) else not value
+        assert _build_train_signature(SimpleNamespace(**base, **changed)) != default, name

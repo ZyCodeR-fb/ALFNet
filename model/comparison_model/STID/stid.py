@@ -11,7 +11,7 @@ class STID(BaseModel):
     Official Code: https://github.com/zezhishao/STID
     """
 
-    def __init__(self, node_dim, input_len, input_dim, embed_dim, output_len, num_layer, temp_dim_tid, temp_dim_diw, time_of_day_size, day_of_week_size, if_T_i_D, if_D_i_W, if_node, **args):
+    def __init__(self, node_dim, input_len, input_dim, embed_dim, output_len, num_layer, temp_dim_tid, temp_dim_diw, time_of_day_size, day_of_week_size, if_T_i_D, if_D_i_W, if_node, tid_index=1, diw_index=2, **args):
         super(STID, self).__init__(**args)   
         
         # attributes
@@ -27,6 +27,13 @@ class STID(BaseModel):
         self.day_of_week_size = day_of_week_size
         self.if_time_in_day = if_T_i_D
         self.if_day_in_week = if_D_i_W
+        # The reference stacks [speed, tod, dow], so the calendar channels are at
+        # 1 and 2. Under the lifecycle layout the input is
+        # [raw, role x4, age, mask, tod, dow] and those slots hold role one-hots,
+        # so the embeddings were indexed off "is this sensor AAS" instead of the
+        # clock. The adapter passes the real positions.
+        self.tid_index = int(tid_index)
+        self.diw_index = int(diw_index)
         self.if_spatial = if_node
 
         # spatial embeddings
@@ -61,7 +68,7 @@ class STID(BaseModel):
         input_data = input[..., range(self.input_dim)]
 
         if self.if_time_in_day:
-            t_i_d_data = input[..., 1]  # [b, t, n, f] -> [b, t, n]
+            t_i_d_data = input[..., self.tid_index]  # [b, t, n, f] -> [b, t, n]
             # In the datasets used in STID, the time_of_day feature is normalized to [0, 1]. We multiply it by 288 to get the index.
             # If you use other datasets, you may need to change this line.
             time_index = (t_i_d_data[:, -1, :] * self.time_of_day_size).long().clamp(0, self.time_of_day_size - 1).to(self.time_in_day_emb.device)
@@ -70,7 +77,7 @@ class STID(BaseModel):
             time_in_day_emb = None
         
         if self.if_day_in_week:
-            d_i_w_data = input[..., 2]  # [b, t, n, f] -> [b, t, n]
+            d_i_w_data = input[..., self.diw_index]  # [b, t, n, f] -> [b, t, n]
             day_index = (d_i_w_data[:, -1, :] * self.day_of_week_size).long().clamp(0, self.day_of_week_size - 1).to(self.day_in_week_emb.device)
             day_in_week_emb = self.day_in_week_emb[day_index]  # [b, t, n] -> [b, n] -> [b, n, week_emb]
         else:
