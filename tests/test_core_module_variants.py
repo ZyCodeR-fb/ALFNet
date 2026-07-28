@@ -65,6 +65,8 @@ ALFNET_VARIANTS = {
         # R: protected directly-supervised temporal residual, TCN / DLinear,
         # and the TCN variant with the worst-group training switch.
         "rt", "rd", "rtg",
+        # K: the residual learns a teacher gap instead of the anchor error.
+        "kt", "kd",
     )},
 }
 
