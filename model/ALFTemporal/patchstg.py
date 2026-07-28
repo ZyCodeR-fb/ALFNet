@@ -3,6 +3,8 @@ import torch.nn as nn
 from einops import rearrange, repeat
 
 from layers.source_timefilter import TimeFilterPatchMixer
+from layers.source_tokenlearner import NodeTokenizer
+from layers.source_tsmixer import TSMixerBlock
 
 
 class CrossformerFullAttention(nn.Module):
@@ -135,12 +137,24 @@ class WindowAttBlock(nn.Module):
         timefilter_dropout=0.1,
         timefilter_residual_scale=0.10,
         use_timefilter=True,
+        mixer="crossformer",
+        time_steps=1,
     ):
         super().__init__()
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.num, self.size = num, size
         self.use_timefilter = bool(use_timefilter)
-        self.tsa = CrossformerTwoStageAttentionLayer(
+        self.mixer_kind = str(mixer)
+        if self.mixer_kind not in {"crossformer", "tsmixer"}:
+            raise ValueError(f"unsupported patch mixer: {mixer}")
+        self.tsmixer = None if self.mixer_kind != "tsmixer" else TSMixerBlock(
+            time_steps=int(time_steps),
+            num_tokens=int(num) * int(size),
+            hidden_dim=hidden_size,
+            ff_dim=int(hidden_size * mlp_ratio),
+            dropout=float(crossformer_dropout),
+        )
+        self.tsa = None if self.mixer_kind != "crossformer" else CrossformerTwoStageAttentionLayer(
             seg_num=num,
             factor=int(crossformer_router_factor),
             d_model=hidden_size,
@@ -180,19 +194,25 @@ class WindowAttBlock(nn.Module):
             self.size,
             hidden_dim,
         )
-        tsa_in = x.permute(0, 1, 3, 2, 4).reshape(
-            batch * time_steps,
-            self.size,
-            self.num,
-            hidden_dim,
-        )
-        x = self.tsa(tsa_in).reshape(
-            batch,
-            time_steps,
-            self.size,
-            self.num,
-            hidden_dim,
-        ).permute(0, 1, 3, 2, 4).contiguous()
+        if self.mixer_kind == "tsmixer":
+            # [B, T, tokens, D]: time mixing runs on the real T axis.
+            x = self.tsmixer(
+                x.reshape(batch, time_steps, self.num * self.size, hidden_dim)
+            ).reshape(batch, time_steps, self.num, self.size, hidden_dim)
+        else:
+            tsa_in = x.permute(0, 1, 3, 2, 4).reshape(
+                batch * time_steps,
+                self.size,
+                self.num,
+                hidden_dim,
+            )
+            x = self.tsa(tsa_in).reshape(
+                batch,
+                time_steps,
+                self.size,
+                self.num,
+                hidden_dim,
+            ).permute(0, 1, 3, 2, 4).contiguous()
         if self.timefilter_patch_mixer is not None:
             x = self.timefilter_patch_mixer(x)
         return x.reshape(batch, time_steps, token_count, hidden_dim)
@@ -230,6 +250,9 @@ class PatchSTG(nn.Module):
         timefilter_residual_scale=0.10,
         use_timefilter=True,
         emit="prediction",
+        mixer="crossformer",
+        spatial_tokenizer="kdtree",
+        token_bottleneck=64,
     ):
         super(PatchSTG, self).__init__()
         if emit not in {"prediction", "features"}:
@@ -259,6 +282,17 @@ class PatchSTG(nn.Module):
         self.day_in_week_emb = nn.Parameter(torch.empty(dow, dow_dims))
         nn.init.xavier_uniform_(self.day_in_week_emb)
 
+        # A: content-adaptive tokens replace the fixed coordinate blocks. The
+        # KD-tree cannot react to traffic state, to which sensors are missing,
+        # or to a lifecycle event; TokenLearner derives the groups from the
+        # features and TokenFuser maps them back to every node, which node-level
+        # forecasting needs.
+        self.spatial_tokenizer = str(spatial_tokenizer)
+        if self.spatial_tokenizer not in {"kdtree", "tokenlearner"}:
+            raise ValueError(f"unsupported spatial tokenizer: {spatial_tokenizer}")
+        self.tokenizer = None if self.spatial_tokenizer != "tokenlearner" else NodeTokenizer(
+            dims, spa_patchnum * spa_patchsize, bottleneck_dim=int(token_bottleneck)
+        )
         self.spa_encoder = nn.ModuleList([
             WindowAttBlock(
                 dims,
@@ -276,6 +310,8 @@ class PatchSTG(nn.Module):
                 timefilter_dropout=timefilter_dropout,
                 timefilter_residual_scale=timefilter_residual_scale,
                 use_timefilter=use_timefilter,
+                mixer=mixer,
+                time_steps=tem_patchnum,
             )
             for _ in range(layers)
         ])
@@ -291,21 +327,28 @@ class PatchSTG(nn.Module):
 
     def forward(self, x, te):
         embedded_x = self.embedding(x, te)
-        reordered = embedded_x[:, :, self.reo_all_idx, :]
-        for block in self.spa_encoder:
-            reordered = block(reordered)
-
-        original = torch.zeros(
-            reordered.shape[0],
-            reordered.shape[1],
-            self.node_num,
-            reordered.shape[-1],
-            device=x.device,
-            dtype=reordered.dtype,
-        )
-        original[:, :, self.ori_parts_idx, :] = (
-            reordered[:, :, self.reo_parts_idx, :]
-        )
+        if self.tokenizer is not None:
+            tokens = self.tokenizer.tokenize(embedded_x)
+            for block in self.spa_encoder:
+                tokens = block(tokens)
+            # Every node gets a value back; nothing is dropped, unlike pooling
+            # methods that discard nodes outright.
+            original = self.tokenizer.fuse(tokens, embedded_x)
+        else:
+            reordered = embedded_x[:, :, self.reo_all_idx, :]
+            for block in self.spa_encoder:
+                reordered = block(reordered)
+            original = torch.zeros(
+                reordered.shape[0],
+                reordered.shape[1],
+                self.node_num,
+                reordered.shape[-1],
+                device=x.device,
+                dtype=reordered.dtype,
+            )
+            original[:, :, self.ori_parts_idx, :] = (
+                reordered[:, :, self.reo_parts_idx, :]
+            )
         if self.emit == "features":
             # [B, node, tem_patchnum * dims] -- one condition vector per node.
             return original.permute(0, 2, 1, 3).reshape(

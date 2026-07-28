@@ -160,6 +160,9 @@ class Model(nn.Module):
             ),
             use_timefilter=self.use_timefilter,
             emit=self.emit,
+            mixer=str(model_cfg.get("mixer", "crossformer")),
+            spatial_tokenizer=str(model_cfg.get("spatial_tokenizer", "kdtree")),
+            token_bottleneck=int(model_cfg.get("token_bottleneck", 64)),
         )
         self.feature_dim = self.backbone.feature_dim
 

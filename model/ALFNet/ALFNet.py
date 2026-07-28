@@ -5,6 +5,14 @@ import torch
 import torch.nn as nn
 
 from args import load_args_from_config
+from layers.evidence_router import (
+    EvidenceRouter,
+    ObservedNLinear,
+    mask_shape,
+    neighbour_evidence,
+    routing_diagnostics,
+    self_evidence,
+)
 from layers.source_grin import GRINInputImputer
 from lib.utils import load_project_adjacency, resolve_known_unknown_nodes
 from utils.model_output import unpack_model_output
@@ -277,6 +285,53 @@ class Model(nn.Module):
         # only, reusing the patch condition features rather than rebuilding the
         # second decoder. tanh bounds it and the zero-initialised output layer
         # makes an untrained model identical to fg1.
+        # C: evidence-aware router. Off -> fg1's FiLM path is untouched.
+        self.evidence_router_enabled = bool(recipe.get("evidence_router", False))
+        self.detach_imputer_for_temporal = bool(
+            recipe.get("detach_imputer_for_temporal", True)
+        )
+        # D: observed-history NLinear residual. Usable with or without C.
+        self.observed_nlinear_enabled = bool(recipe.get("observed_nlinear", False))
+        self.observed_residual_scale = float(recipe.get("observed_residual_scale", 0.35))
+        self.pred_len = int(configs.pred_len)
+        self.input_len = int(configs.input_len)
+        if (self.evidence_router_enabled or self.observed_nlinear_enabled) and not self.film_fusion:
+            raise ValueError(
+                "evidence_router and observed_nlinear extend the FiLM-conditioned "
+                "path; enable fusion_mode=film first"
+            )
+        self.observed_nlinear = None
+        if self.observed_nlinear_enabled:
+            self.observed_nlinear = ObservedNLinear(
+                self.input_len, self.pred_len, self.output_dim
+            )
+        self.patch_projection = None
+        self.evidence_router = None
+        if self.evidence_router_enabled:
+            # C must run without D: a light projection turns the existing patch
+            # condition features into Y_patch.
+            self.patch_projection = nn.Sequential(
+                nn.Linear(int(self.patch_expert.feature_dim), gate_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(gate_hidden_dim, self.pred_len * self.output_dim),
+            )
+            nn.init.zeros_(self.patch_projection[-1].weight)
+            nn.init.zeros_(self.patch_projection[-1].bias)
+            self.evidence_router = EvidenceRouter(
+                self.output_dim,
+                self.pred_len,
+                AVAILABILITY_COUNT,
+                hidden_dim=gate_hidden_dim,
+                self_evidence_floor=float(recipe.get("self_evidence_floor", 0.02)),
+            )
+        self.last_routing_diagnostics = None
+        self._last_temporal = None
+        # film mode zeroes lambda_route because there was no second forecast to
+        # route between; the evidence router restores one, so it gets its own.
+        self.lambda_route_evidence = (
+            float(recipe.get("lambda_route", 0.05)) if self.evidence_router_enabled else 0.0
+        )
+
         self.fault_residual_scale = float(recipe.get("fault_residual_scale", 0.0))
         if self.fault_residual_scale and not self.film_fusion:
             raise ValueError(
@@ -366,6 +421,63 @@ class Model(nn.Module):
         )
         return state, last_availability
 
+    def _evidence_context(self, x_enc, adjacency, last_availability, state):
+        """Everything the router reads, all of it known at prediction time."""
+        observation_mask = x_enc[..., self.mask_index:self.mask_index + 1]
+        e_self = self_evidence(observation_mask)
+        e_nbr = neighbour_evidence(adjacency, observation_mask)
+        return {
+            "availability": last_availability,
+            "state_age": x_enc[:, -1, :, self.age_index:self.age_index + 1],
+            "visibility": observation_mask.mean(dim=1),
+            "e_self": e_self,
+            "e_nbr": e_nbr,
+            "mask_shape": mask_shape(observation_mask),
+        }, observation_mask, e_self
+
+    def _evidence_fusion(self, y_graph, patch_features, x_enc, adjacency,
+                         last_availability, state):
+        """Yt = Y_patch + g_self * Y_self, then one beta over the graph anchor.
+
+        `Y_self` is gated by the node's own evidence -- with no measurements the
+        NLinear has nothing to project. `Y_patch` deliberately is not: Unseen
+        and Outage both have e_self = 0, and gating the patch path on e_self
+        would switch off exactly the correction that the fault track shows is
+        worth up to -2.35 MAE. The router separates the two cases from the
+        availability context, state_age and the neighbourhood evidence instead.
+        """
+        context, observation_mask, e_self = self._evidence_context(
+            x_enc, adjacency, last_availability, state
+        )
+        y_temporal = y_graph
+        if self.patch_projection is not None:
+            projected = self.patch_projection(patch_features)
+            y_temporal = y_graph + projected.reshape(
+                y_graph.shape[0], y_graph.shape[2], self.pred_len, self.output_dim
+            ).permute(0, 2, 1, 3)
+        if self.observed_nlinear is not None:
+            raw = x_enc[..., :self.output_dim]
+            y_self = self.observed_nlinear(raw, observation_mask)
+            gate = (
+                self.evidence_router.self_gate(e_self)
+                if self.evidence_router is not None
+                else (e_self / 0.02).clamp(0.0, 1.0)
+            ).unsqueeze(1)
+            y_temporal = y_temporal + gate * (y_self - y_graph) * (
+                1.0 if self.evidence_router is not None else self.observed_residual_scale
+            )
+        self._last_temporal = y_temporal
+        if self.evidence_router is None:
+            # D alone: a bounded observed-history residual on the graph output.
+            return y_temporal, None
+        prediction, beta = self.evidence_router(y_graph, y_temporal, context)
+        if not self.training:
+            self.last_routing_diagnostics = {
+                "beta_mean": float(beta.mean()),
+                "beta_std": float(beta.std()),
+            }
+        return prediction, beta
+
     def _current_node_ids(self, node_count):
         if node_count == len(self.known_nodes):
             return self.known_nodes
@@ -387,7 +499,14 @@ class Model(nn.Module):
         # filled is [imputed_raw, availability(4), state_age, observation_mask];
         # each expert takes the prefix it declares.
         graph_input = filled[..., :self.graph_input_dim]
-        patch_input = filled[..., :self.patch_input_dim]
+        # The shared GRIN is in the graph parameter group. Letting the temporal
+        # branch push gradients back into it is the mechanism that cost fg1 its
+        # Unseen accuracy relative to the two-expert model; detaching keeps the
+        # imputer optimised for the path that depends on it.
+        patch_source = filled.detach() if (
+            self.evidence_router_enabled and self.detach_imputer_for_temporal
+        ) else filled
+        patch_input = patch_source[..., :self.patch_input_dim]
         if hasattr(self.graph_expert, "set_current_node_ids"):
             self.graph_expert.set_current_node_ids(self._current_node_ids(filled.size(2)))
         decoder = None if x_dec is None else x_dec[..., :self.output_dim]
@@ -434,6 +553,31 @@ class Model(nn.Module):
         y_graph = self.graph_refiner(y_graph, adjacency, last_availability)
         if self.film_fusion:
             prediction = y_graph
+            if self.evidence_router_enabled or self.observed_nlinear_enabled:
+                prediction, beta = self._evidence_fusion(
+                    prediction, y_patch, x_enc, adjacency, last_availability, state
+                )
+                if self.evidence_router_enabled:
+                    return {
+                        "pred": prediction,
+                        "aux_losses": expert_aux_losses,
+                        "forecast_loss_mode": "role_balanced_mix",
+                        "forecast_role_balanced_beta": self.forecast_role_balanced_beta,
+                        "route_routing": {
+                            "alpha": 1.0 - beta,
+                            "y_graph": y_graph.detach(),
+                            "y_patch": self._last_temporal.detach(),
+                            "lambda_route": float(self.lambda_route_evidence),
+                            "warmup_epoch": self.route_warmup_epoch,
+                            "role_balanced": self.route_role_balanced,
+                        },
+                    }
+                return {
+                    "pred": prediction,
+                    "aux_losses": expert_aux_losses,
+                    "forecast_loss_mode": "role_balanced_mix",
+                    "forecast_role_balanced_beta": self.forecast_role_balanced_beta,
+                }
             if self.fault_residual_head is not None:
                 # One-hot, so the gate is exactly 0 on AAS/NAS/VS nodes and the
                 # Unseen, Steady and Join paths stay bit-identical to fg1.

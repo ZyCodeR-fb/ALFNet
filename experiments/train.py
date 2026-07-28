@@ -120,6 +120,17 @@ def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch
         args.seconds_to_best = sum(
             entry["train"] + entry["val"] for entry in args.epoch_seconds
         )
+    routing = metrics["val"].get("routing") or {}
+    if routing:
+        # Printed every epoch so router collapse is caught while it is happening
+        # rather than after a full run: a flat beta across availability groups
+        # or a route accuracy stuck at the base rate is the signature.
+        args.last_routing = routing
+        if improved:
+            args.best_routing = dict(routing)
+        print("-> routing: " + " | ".join(
+            f"{name}={value:.4f}" for name, value in sorted(routing.items())
+        ))
     monitored = metrics["val"]["lifecycle"]["mae"]
     if args.scheduler == "plateau":
         scheduler.step(monitored)
@@ -184,6 +195,7 @@ def _write_training_summary(args, finished_epoch, stop_reason, data_loaders):
         ),
         "best_val_lifecycle_metrics": args.best_val_lifecycle_metrics,
         "validation_group_volatility": args.validation_group_volatility,
+        "routing_diagnostics": getattr(args, "best_routing", {}),
         "efficiency": _efficiency_report(args, data_loaders),
         "training_protocol_hash": args.training_protocol_hash,
     }

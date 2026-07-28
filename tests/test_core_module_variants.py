@@ -52,7 +52,15 @@ def _read_yaml(relative_path):
 # FS-only residual. The surface stays closed: a rejected candidate's YAML is
 # deleted in the same round it is rejected, so a fourth file here must be a
 # deliberate edit rather than a leftover.
-ALFNET_VARIANTS = {"rf_l3s": "rf_l3s", "fg1": "fg1", "fg1r": "fg1r"}
+ALFNET_VARIANTS = {
+    "rf_l3s": "rf_l3s",   # incumbent two-expert model, kept for mechanism analysis
+    "fg1": "fg1",         # reproducible reference line
+    "fg1r": "fg1r",       # retired candidate, switch retained but default off
+    "a": "a",             # TokenLearner replaces the KD-tree blocks
+    "b": "b",             # TSMixer replaces Crossformer, 3 time segments
+    "c": "c",             # evidence-aware graph/temporal router
+    "d": "d",             # observed-history NLinear residual
+}
 
 
 def test_streamlined_yaml_surface_has_one_alfnet_mainline():

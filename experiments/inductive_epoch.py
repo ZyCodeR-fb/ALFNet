@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 
 from data_provider.calendar_strata import STRATA, stratum_weights
+from layers.evidence_router import routing_diagnostics
 from data_provider.lcbt_protocol import (
     accumulate_lifecycle_mae,
     finalize_lifecycle_validation_mae,
@@ -160,6 +161,7 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
     metric_sums = {}
     valid_batches = 0
     lifecycle_cells = {}
+    routing_sums, routing_batches = {}, 0
 
     with torch.set_grad_enabled(training):
         for batch in dataloader:
@@ -308,6 +310,24 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                 metric_sums[name] = metric_sums.get(name, 0.0) + value
             valid_batches += 1
 
+            routing = meta.get("route_routing")
+            if mode == "val" and isinstance(routing, dict) and "alpha" in routing:
+                # Collapse is only visible if it is measured: a router that
+                # always picks one branch shows a flat beta across availability
+                # groups and a route accuracy pinned at the base rate.
+                report = routing_diagnostics(
+                    1.0 - routing["alpha"],
+                    routing["y_graph"],
+                    routing["y_patch"],
+                    y_for_loss,
+                    valid_mask,
+                    last_role,
+                )
+                for name, value in report.items():
+                    if value == value:                       # skip NaN
+                        routing_sums[name] = routing_sums.get(name, 0.0) + value
+                routing_batches += 1
+
             if mode == "val":
                 accumulate_lifecycle_mae(
                     lifecycle_cells,
@@ -331,4 +351,9 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
         if mode == "val"
         else {}
     )
-    return model, {"total": metrics, "lifecycle": lifecycle}
+    routing = (
+        {name: value / routing_batches for name, value in routing_sums.items()}
+        if routing_batches
+        else {}
+    )
+    return model, {"total": metrics, "lifecycle": lifecycle, "routing": routing}
