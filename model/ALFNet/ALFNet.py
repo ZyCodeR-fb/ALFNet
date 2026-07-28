@@ -1,3 +1,4 @@
+import contextlib
 import importlib
 import os
 
@@ -16,6 +17,24 @@ from layers.evidence_router import (
 from layers.source_grin import GRINInputImputer
 from lib.utils import load_project_adjacency, resolve_known_unknown_nodes
 from utils.model_output import unpack_model_output
+
+
+_RNG_OFFSET_EVIDENCE_ROUTER = 10_007
+_RNG_OFFSET_OBSERVED_NLINEAR = 20_011
+
+
+@contextlib.contextmanager
+def _isolated_rng(seed, offset):
+    """Draw this module's initialisation from its own stream.
+
+    Optional modules are built in the middle of __init__, so any random number
+    they consume shifts every module constructed after them. That made a
+    candidate's shared weights differ from its base under the same seed, which
+    turns an ablation into two unrelated runs.
+    """
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(int(seed) + int(offset))
+        yield
 
 
 AVAILABILITY_COUNT = 4
@@ -236,6 +255,7 @@ class Model(nn.Module):
         self.graph_expert_lr = float(recipe.get("graph_expert_lr", configs.lr))
         self.patch_expert_lr = float(recipe.get("patch_expert_lr", configs.lr))
         self.gate_lr = float(recipe.get("gate_lr", configs.lr))
+        self.router_lr = float(recipe.get("router_lr", 5e-4))
 
         graph_recipe = (getattr(self.graph_args, "model_family_cfg", {}) or {}).get(
             "recipe", {}
@@ -302,28 +322,26 @@ class Model(nn.Module):
             )
         self.observed_nlinear = None
         if self.observed_nlinear_enabled:
-            self.observed_nlinear = ObservedNLinear(
-                self.input_len, self.pred_len, self.output_dim
-            )
+            # Every optional module draws from its own forked stream. Built on
+            # the shared stream they shift every later module's initialisation:
+            # measured, enabling C moved graph_refiner.input_proj by up to 1.01
+            # under the same seed, so a candidate and its base were no longer
+            # comparable at step 0. The offsets are fixed per module, so turning
+            # one switch on never perturbs another.
+            with _isolated_rng(configs.seed, _RNG_OFFSET_OBSERVED_NLINEAR):
+                self.observed_nlinear = ObservedNLinear(
+                    self.input_len, self.pred_len, self.output_dim
+                )
         self.patch_projection = None
         self.evidence_router = None
+        self.patch_residual_scale = 1.0
         if self.evidence_router_enabled:
             # C must run without D: a light projection turns the existing patch
             # condition features into Y_patch.
-            self.patch_projection = nn.Sequential(
-                nn.Linear(int(self.patch_expert.feature_dim), gate_hidden_dim),
-                nn.ReLU(),
-                nn.Linear(gate_hidden_dim, self.pred_len * self.output_dim),
-            )
-            nn.init.zeros_(self.patch_projection[-1].weight)
-            nn.init.zeros_(self.patch_projection[-1].bias)
-            self.evidence_router = EvidenceRouter(
-                self.output_dim,
-                self.pred_len,
-                AVAILABILITY_COUNT,
-                hidden_dim=gate_hidden_dim,
-                self_evidence_floor=float(recipe.get("self_evidence_floor", 0.02)),
-            )
+            with _isolated_rng(configs.seed, _RNG_OFFSET_EVIDENCE_ROUTER):
+                self._build_evidence_modules(
+                    gate_hidden_dim, recipe
+                )
         self.last_routing_diagnostics = None
         self._last_temporal = None
         # film mode zeroes lambda_route because there was no second forecast to
@@ -399,17 +417,33 @@ class Model(nn.Module):
             self.shared_input_imputer.parameters()
         )
         patch_params = list(self.patch_expert.parameters())
+        # The router has to travel: its bias starts at -2 and has to move by
+        # O(1) for beta to change meaningfully. AdamW's step is ~lr regardless
+        # of gradient size, so at the gate group's 5e-5 that is 20k steps, or
+        # 75 epochs -- far past where these runs early-stop. Measured over 20
+        # real steps the bias moved 1.004e-3, i.e. exactly 20 x lr. It gets its
+        # own configurable group instead.
+        routing_params = [
+            parameter
+            for module in (self.evidence_router, self.patch_projection)
+            if module is not None
+            for parameter in module.parameters()
+        ]
+        routing_ids = {id(parameter) for parameter in routing_params}
         expert_ids = {id(parameter) for parameter in graph_params + patch_params}
         fusion_params = [
             parameter
             for parameter in self.parameters()
-            if id(parameter) not in expert_ids
+            if id(parameter) not in expert_ids and id(parameter) not in routing_ids
         ]
-        return [
+        groups = [
             {"params": graph_params, "lr": self.graph_expert_lr},
             {"params": patch_params, "lr": self.patch_expert_lr},
             {"params": fusion_params, "lr": self.gate_lr or float(base_lr)},
         ]
+        if routing_params:
+            groups.append({"params": routing_params, "lr": self.router_lr})
+        return groups
 
     def _state(self, x_enc):
         availability = x_enc[..., self.role_start:self.role_end]
@@ -420,6 +454,30 @@ class Model(nn.Module):
             torch.cat([last_availability, last_age, visibility], dim=-1)
         )
         return state, last_availability
+
+    def _build_evidence_modules(self, gate_hidden_dim, recipe):
+        """C's modules. Called inside a forked RNG so the switch is isolating."""
+        # Not zero: with Yt == Yg exactly, dYhat/dbeta = (Yt - Yg) = 0 and the
+        # router receives no gradient from the forecast loss at all. A small
+        # non-zero init breaks that degeneracy while keeping the perturbation
+        # tiny, and the tanh bound below keeps it that way during training.
+        self.patch_projection = nn.Sequential(
+            nn.Linear(int(self.patch_expert.feature_dim), gate_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(gate_hidden_dim, self.pred_len * self.output_dim),
+        )
+        nn.init.normal_(self.patch_projection[-1].weight, std=1e-3)
+        nn.init.zeros_(self.patch_projection[-1].bias)
+        self.patch_residual_scale = float(recipe.get("patch_residual_scale", 1.0))
+        self.evidence_router = EvidenceRouter(
+            self.output_dim,
+            self.pred_len,
+            AVAILABILITY_COUNT,
+            hidden_dim=gate_hidden_dim,
+            self_evidence_floor=float(recipe.get("self_evidence_floor", 0.02)),
+            initial_beta_logit=float(recipe.get("initial_beta_logit", -2.0)),
+            router_weight_std=float(recipe.get("router_weight_std", 1e-2)),
+        )
 
     def _evidence_context(self, x_enc, adjacency, last_availability, state):
         """Everything the router reads, all of it known at prediction time."""
@@ -451,20 +509,25 @@ class Model(nn.Module):
         )
         y_temporal = y_graph
         if self.patch_projection is not None:
-            projected = self.patch_projection(patch_features)
-            y_temporal = y_graph + projected.reshape(
+            projected = self.patch_projection(patch_features).reshape(
                 y_graph.shape[0], y_graph.shape[2], self.pred_len, self.output_dim
             ).permute(0, 2, 1, 3)
+            # Bounded so an early large activation cannot throw the forecast:
+            # the correction is at most patch_residual_scale in normalised units.
+            y_temporal = y_graph + self.patch_residual_scale * torch.tanh(projected)
         if self.observed_nlinear is not None:
             raw = x_enc[..., :self.output_dim]
-            y_self = self.observed_nlinear(raw, observation_mask)
+            self_residual, _anchor = self.observed_nlinear(raw, observation_mask)
             gate = (
                 self.evidence_router.self_gate(e_self)
                 if self.evidence_router is not None
                 else (e_self / 0.02).clamp(0.0, 1.0)
             ).unsqueeze(1)
-            y_temporal = y_temporal + gate * (y_self - y_graph) * (
-                1.0 if self.evidence_router is not None else self.observed_residual_scale
+            # A residual, not a blend towards persistence: zero at
+            # initialisation, gated to nodes that actually have measurements,
+            # and bounded by the configured scale.
+            y_temporal = y_temporal + self.observed_residual_scale * gate * torch.tanh(
+                self_residual
             )
         self._last_temporal = y_temporal
         if self.evidence_router is None:

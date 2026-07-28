@@ -3,7 +3,6 @@ runtime:
   model_variant: cond1b
   model_recipe: filtered_patch
   t_mark: true
-
 dataset:
   dloader_name: METRLA
   data_path: ./data/METR-LA/raw_data.pkl
@@ -13,31 +12,17 @@ dataset:
   look_back: 0
   input_features: v
   target_features: v
-
 training:
   device: cuda:0
   seed: 32
   loss: mse
   lr: 0.0001
   d_model: 64
-
 family:
   model:
-    # Availability one-hot, state_age and observation mask reach the patch
-    # expert. Set false for the lifecycle-input ablation.
     lifecycle_input: true
-    # Emit a per-node condition vector instead of a second forecast.
     emit: features
-    # TimeFilter off: 69% of block time, 23.6% of block params, and its
-    # top-p router is non-differentiable in the forward path.
     use_timefilter: false
-    # B: TSMixer instead of Crossformer two-stage attention. The time axis
-    # is restored to three segments so the time-mixing Dense has something
-    # to mix -- at tem_patchnum=1 a stride-12 conv collapsed T before any
-    # temporal module could see it.
-    mixer: tsmixer
-    # One block: the KD-tree geometric patch prior is the contribution;
-    # five copies of it were buying repeats, not new structure.
     layers: 1
     tem_patchsize: 4
     tem_patchnum: 3
@@ -52,3 +37,4 @@ family:
     dow_dims: 32
     tod: 288
     dow: 7
+    mixer: tsmixer

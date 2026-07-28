@@ -56,10 +56,13 @@ ALFNET_VARIANTS = {
     "rf_l3s": "rf_l3s",   # incumbent two-expert model, kept for mechanism analysis
     "fg1": "fg1",         # reproducible reference line
     "fg1r": "fg1r",       # retired candidate, switch retained but default off
-    "a": "a",             # TokenLearner replaces the KD-tree blocks
-    "b": "b",             # TSMixer replaces Crossformer, 3 time segments
-    "c": "c",             # evidence-aware graph/temporal router
-    "d": "d",             # observed-history NLinear residual
+    # A/B/C/D single switches and the combinations generated from them by
+    # scripts/build_ablation_configs.py. Combination files are derived, not
+    # hand-written, so the surface stays closed by construction.
+    **{stem: stem for stem in (
+        "a", "b", "c", "d",
+        "ac", "ad", "bc", "bd", "cd", "acd", "bcd", "abc", "abcd",
+    )},
 }
 
 

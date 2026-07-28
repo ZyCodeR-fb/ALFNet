@@ -39,14 +39,23 @@ import torch.nn.functional as F
 
 
 class ObservedNLinear(nn.Module):
-    """D: NLinear over the *real* observed history, never the imputed one.
+    """D: NLinear's de-trending projection, adapted into a bounded residual.
 
-    Copied from references/LTSF-Linear/models/NLinear.py: subtract the last
-    value, one Linear over the sequence axis, add it back. The adaptation is
-    the mask -- "last value" becomes "last *effective* value", and steps that
-    were never observed are held at that value instead of feeding zeros into
-    the projection. Reading GRIN's output here would defeat the purpose: the
-    point is a residual grounded in measurements that actually happened.
+    What is kept from references/LTSF-Linear/models/NLinear.py: the last
+    observed value is subtracted, a single Linear maps the de-trended sequence
+    axis to the horizon. What is *not* kept: the reference then adds the anchor
+    back and returns a complete forecast. Returning that here made an untrained
+    head emit naive persistence, and blending 35% of it into the graph forecast
+    moved the prediction by up to 0.93 before any training -- the `d` run never
+    recovered from it. So this returns the projection and the anchor separately
+    and the caller uses the projection as a bounded residual, which is zero at
+    initialisation. Calling it "the original NLinear output" would be wrong.
+
+    Two further adaptations for lifecycle data: "last value" means last
+    *effective* value, and unobserved steps are held at that value rather than
+    feeding zeros into the projection. The input is the raw measurement window,
+    never GRIN's imputed one -- the point is a residual grounded in
+    measurements that actually happened.
 
     Paper: Are Transformers Effective for Time Series Forecasting? (AAAI 2023).
     """
@@ -59,7 +68,11 @@ class ObservedNLinear(nn.Module):
         nn.init.zeros_(self.projection.bias)
 
     def forward(self, observed, mask):
-        """observed/mask: [B, L, N, 1] raw measurements and effective mask."""
+        """observed/mask: [B, L, N, 1]. Returns (residual, persistence anchor).
+
+        `residual` is exactly zero for an untrained head, so enabling D cannot
+        move the prediction before it has learned anything.
+        """
         observed = torch.nan_to_num(observed, nan=0.0, posinf=0.0, neginf=0.0)
         valid = mask > 0.5
         # index of the last observed step per node, 0 when never observed
@@ -69,7 +82,14 @@ class ObservedNLinear(nn.Module):
         last_value = last_value * valid.any(dim=1, keepdim=True)
         series = torch.where(valid, observed, last_value.expand_as(observed)) - last_value
         projected = self.projection(series.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
-        return projected + last_value
+        # The reference returns `projected + seq_last`, i.e. a full forecast whose
+        # untrained value is persistence. Blending 35% of persistence into the
+        # graph forecast from epoch 0 is a large perturbation, not a residual --
+        # measured as mean |delta| 0.081 / max 0.931 against the graph-only
+        # prediction before any training, and it cost the d run its Unseen
+        # accuracy. Returning the anchor separately lets the caller add a
+        # residual that really is zero at initialisation.
+        return projected, last_value
 
 
 def self_evidence(mask, half_life=4.0):
@@ -122,7 +142,8 @@ class EvidenceRouter(nn.Module):
     """
 
     def __init__(self, output_dim, pred_len, availability_count, hidden_dim=32,
-                 self_evidence_floor=0.02):
+                 self_evidence_floor=0.02, initial_beta_logit=-2.0,
+                 router_weight_std=1e-2):
         super().__init__()
         self.output_dim = int(output_dim)
         self.self_evidence_floor = float(self_evidence_floor)
@@ -135,8 +156,17 @@ class EvidenceRouter(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
-        nn.init.zeros_(self.router[-1].weight)
-        nn.init.zeros_(self.router[-1].bias)
+        # Zero-initialising both weight and bias puts beta at exactly sigmoid(0)
+        # = 0.5 for every node -- a symmetric fixed point, and the c run sat on
+        # it (beta_std 0.0017 after 11 epochs, route accuracy 0.488, below
+        # chance). The bias starts negative instead: beta ~ 0.12, so the model
+        # begins graph-dominant and safe, but not at a symmetry point.
+        # A zero weight makes beta a constant regardless of the inputs -- the
+        # bias alone decides it, so beta_std is exactly 0 and the router is not
+        # a router. A small weight keeps the starting point near the bias while
+        # letting the evidence features actually move beta per node.
+        nn.init.normal_(self.router[-1].weight, std=float(router_weight_std))
+        nn.init.constant_(self.router[-1].bias, float(initial_beta_logit))
 
     def self_gate(self, e_self):
         """Gates `Y_self` only. `Y_patch` is deliberately not gated by this."""
@@ -171,13 +201,26 @@ def routing_diagnostics(beta, y_graph, y_temporal, target, valid, availability):
         temporal_error = (y_temporal - target).abs()
         better = (temporal_error < graph_error).float()
         expanded = beta.expand_as(graph_error)
+        if not valid.any():
+            return {}
+        chosen = (expanded > 0.5).float()
+        # Raw accuracy is only interpretable against the base rate: if the
+        # temporal branch is better on 80% of cells, always picking it scores
+        # 0.80 and always picking the graph scores 0.20, and neither is
+        # informative. Balanced accuracy is the number to compare with 0.5.
+        base_rate = float(better[valid].mean())
+        positive = valid & (better > 0.5)
+        negative = valid & (better <= 0.5)
+        recall_temporal = float(chosen[positive].mean()) if positive.any() else float("nan")
+        recall_graph = float((1.0 - chosen)[negative].mean()) if negative.any() else float("nan")
+        balanced = [value for value in (recall_temporal, recall_graph) if value == value]
         report = {
-            "beta_mean": float(expanded[valid].mean()) if valid.any() else float("nan"),
-            "beta_std": float(expanded[valid].std()) if valid.any() else float("nan"),
-            "temporal_activation_ratio": float((expanded[valid] > 0.5).float().mean())
-            if valid.any() else float("nan"),
-            "route_accuracy": float(((expanded > 0.5).float() == better)[valid].float().mean())
-            if valid.any() else float("nan"),
+            "beta_mean": float(expanded[valid].mean()),
+            "beta_std": float(expanded[valid].std()),
+            "temporal_activation_ratio": float(chosen[valid].mean()),
+            "route_accuracy": float((chosen == better)[valid].float().mean()),
+            "route_target_base_rate": base_rate,
+            "route_balanced_accuracy": sum(balanced) / len(balanced) if balanced else float("nan"),
         }
         for index in range(availability.shape[-1]):
             role = availability[..., index].unsqueeze(1).unsqueeze(-1) > 0.5

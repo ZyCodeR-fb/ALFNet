@@ -163,21 +163,55 @@ def test_each_switch_forwards_and_backwards_alone(name):
     assert grads and all(torch.isfinite(p.grad).all() for p in grads)
 
 
-def test_combined_switches_stay_finite(tmp_path):
-    """A+B+C+D together, assembled from the same single-switch YAML keys."""
-    args = load_args_from_config("configs/ALFNet/c.yaml", [])
-    args.device = "cpu"
-    args.model_family_cfg["recipe"]["observed_nlinear"] = True
-    args.model_family_cfg["experts"]["patch"]["config_path"] = (
-        "./configs/ALFTemporal/METRLA_cond1b.yaml"
-    )
-    model = load_model_class(args.model)(args)
+def test_combined_switches_stay_finite():
+    """A+B+C+D. The previous version pointed at cond1b, which is B only: the
+    TokenLearner was never built, so the test named four switches and exercised
+    three."""
+    args, model = build("abcd")
+    backbone = model.patch_expert.backbone
+    assert backbone.spatial_tokenizer == "tokenlearner", "A is not actually on"
+    assert backbone.spa_encoder[0].mixer_kind == "tsmixer", "B is not actually on"
+    assert model.evidence_router_enabled and model.observed_nlinear_enabled
     data = _batch(args, model)
     model.train()
     out = model(data["adj"], data["x"], data["tm"], None, data["dec"], data["dm"], 0)
     assert torch.isfinite(out["pred"]).all()
     out["pred"].pow(2).mean().backward()
     assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+
+
+COMBINATIONS = ["ac", "ad", "bc", "bd", "cd", "acd", "bcd", "abc", "abcd"]
+EXPECTED_MODULES = {
+    "a": lambda m: m.patch_expert.backbone.spatial_tokenizer == "tokenlearner",
+    "b": lambda m: m.patch_expert.backbone.spa_encoder[0].mixer_kind == "tsmixer",
+    "c": lambda m: m.evidence_router is not None,
+    "d": lambda m: m.observed_nlinear is not None,
+}
+
+
+@pytest.mark.parametrize("stem", COMBINATIONS)
+def test_combination_instantiates_exactly_its_switches(stem):
+    _, model = build(stem)
+    for switch, present in EXPECTED_MODULES.items():
+        assert present(model) is (switch in stem), (
+            f"{stem}: switch {switch} should be {'on' if switch in stem else 'off'}"
+        )
+
+
+@pytest.mark.parametrize("stem", COMBINATIONS)
+def test_combination_forwards_and_backwards(stem):
+    args, model = build(stem)
+    data = _batch(args, model)
+    model.train()
+    out = model(data["adj"], data["x"], data["tm"], None, data["dec"], data["dm"], 0)
+    assert torch.isfinite(out["pred"]).all()
+    loss = out["pred"].pow(2).mean()
+    for value in (out.get("aux_losses") or {}).values():
+        if torch.is_tensor(value):
+            loss = loss + value.float()
+    loss.backward()
+    grads = [p for p in model.parameters() if p.grad is not None]
+    assert grads and all(torch.isfinite(p.grad).all() for p in grads)
 
 
 # --- 4. C off leaves fg1 untouched ------------------------------------------
@@ -337,11 +371,14 @@ def test_observed_nlinear_reads_raw_input_not_the_imputer_output():
     observed = torch.arange(6, dtype=torch.float32).view(1, 6, 1, 1).repeat(1, 1, 2, 1)
     mask = torch.ones(1, 6, 2, 1)
     mask[:, 3:, 0] = 0.0                     # node 0 goes dark after step 2
-    out = nlinear(observed, mask)
-    assert torch.isfinite(out).all()
+    residual, anchor = nlinear(observed, mask)
+    assert torch.isfinite(residual).all() and torch.isfinite(anchor).all()
     # node 0 is anchored on its last *observed* value (2.0), not the last row
-    dark_only = nlinear(observed, torch.zeros_like(mask))
-    assert torch.isfinite(dark_only).all()
+    assert float(anchor[0, 0, 0, 0]) == pytest.approx(2.0)
+    assert float(anchor[0, 0, 1, 0]) == pytest.approx(5.0)
+    dark_residual, dark_anchor = nlinear(observed, torch.zeros_like(mask))
+    assert torch.isfinite(dark_residual).all()
+    assert float(dark_anchor.abs().max()) == 0.0, "no measurement, no anchor"
 
 
 # --- 10. C+D produce one Yt and one beta ------------------------------------
@@ -414,6 +451,8 @@ ALLOWED_DRIFT = {
     "family.recipe.lambda_route",
     "family.recipe.observed_nlinear",
     "family.recipe.observed_residual_scale",
+    "family.recipe.router_lr",
+    "family.recipe.patch_residual_scale",
 }
 
 
@@ -458,3 +497,188 @@ def test_parameter_budget_stays_within_1_2x_fg1(name):
     base = sum(p.numel() for p in reference.parameters() if p.requires_grad)
     size = sum(p.numel() for p in model.parameters() if p.requires_grad)
     assert size <= 1.2 * base, f"{name} is {size / base:.2f}x fg1"
+
+
+
+# --- initialisation contracts that the first stage-1 runs violated -----------
+
+
+def test_observed_residual_is_exactly_zero_before_training():
+    """`d` used to blend 35% of naive persistence in from epoch 0."""
+    torch.manual_seed(0)
+    nlinear = ObservedNLinear(12, 12, 1)
+    observed = torch.randn(2, 12, 5, 1) * 10 + 50
+    residual, anchor = nlinear(observed, torch.ones(2, 12, 5, 1))
+    assert float(residual.abs().max()) == 0.0
+    assert torch.allclose(anchor, observed[:, -1:])
+
+    args, model = build("d")
+    model.eval()
+    data = _batch(args, model)
+    with torch.no_grad():
+        with_d = model(data["adj"], data["x"], data["tm"], None, None, data["dm"], 0)["pred"]
+        model.observed_nlinear = None
+        model.observed_nlinear_enabled = False
+        model.evidence_router_enabled = False
+        without = model(data["adj"], data["x"], data["tm"], None, None, data["dm"], 0)["pred"]
+    assert torch.allclose(with_d, without, atol=1e-6), (
+        "enabling D moved the prediction before it learned anything"
+    )
+
+
+def test_router_does_not_start_at_the_symmetric_fixed_point():
+    """`c` sat at beta = 0.5 for eleven epochs (beta_std 0.0017)."""
+    args, model = build("c")
+    model.eval()
+    data = _batch(args, model)
+    with torch.no_grad():
+        out = model(data["adj"], data["x"], data["tm"], None, None, data["dm"], 0)
+    beta = 1.0 - out["route_routing"]["alpha"]
+    assert float(beta.max()) < 0.4, "beta starts at the 0.5 symmetry point again"
+    assert float(beta.max()) > 0.0, "beta is pinned to zero, the router cannot move"
+    # and Yt must differ from Yg, otherwise dYhat/dbeta = 0 and no forecast
+    # gradient ever reaches the router
+    gap = (out["route_routing"]["y_patch"] - out["route_routing"]["y_graph"]).abs().max()
+    assert float(gap) > 0.0, "Yt == Yg exactly, so the router gets no gradient"
+
+
+
+# --- RNG isolation: a switch must not perturb the weights it does not own ----
+
+
+SWITCH_PREFIXES = {
+    "c": ("evidence_router.", "patch_projection."),
+    "d": ("observed_nlinear.",),
+}
+
+
+def _seeded_state(name):
+    import pytorch_lightning as pl
+
+    pl.seed_everything(32, workers=True)
+    args = load_args_from_config(f"configs/ALFNet/{name}.yaml", [])
+    args.device = "cpu"
+    return load_model_class(args.model)(args).state_dict()
+
+
+@pytest.mark.parametrize("base,combined", [
+    ("fg1", "c"), ("fg1", "d"), ("fg1", "cd"),
+    ("a", "ac"), ("a", "ad"), ("a", "acd"),
+    ("b", "bc"), ("b", "bd"), ("b", "bcd"),
+])
+def test_shared_weights_are_bit_identical_under_the_same_seed(base, combined):
+    """Optional modules used to consume from the shared RNG stream, which moved
+    graph_refiner.input_proj by up to 1.01 and made a candidate and its base two
+    different models at step 0."""
+    left, right = _seeded_state(base), _seeded_state(combined)
+    common = sorted(set(left) & set(right))
+    assert common, f"{base} and {combined} share no parameters"
+    drifted = [
+        key for key in common
+        if left[key].shape == right[key].shape and not torch.equal(left[key], right[key])
+    ]
+    assert not drifted, f"{base} vs {combined} drifted on {drifted[:5]}"
+
+
+@pytest.mark.parametrize("solo,combined", [("c", "cd"), ("d", "cd")])
+def test_one_optional_module_does_not_perturb_the_other(solo, combined):
+    """Enabling D must not change C's initialisation, and vice versa."""
+    left, right = _seeded_state(solo), _seeded_state(combined)
+    owned = [key for key in left if key.startswith(SWITCH_PREFIXES[solo])]
+    assert owned, f"{solo} owns no parameters"
+    for key in owned:
+        assert torch.equal(left[key], right[key]), f"{key} drifted when the other switch turned on"
+
+
+# --- the router must be able to move at the learning rate it is given --------
+
+
+def test_router_has_its_own_optimizer_group():
+    args, model = build("c")
+    groups = model.get_optimizer_param_groups(args.lr)
+    routing_ids = {id(p) for p in model.evidence_router.parameters()}
+    routing_ids |= {id(p) for p in model.patch_projection.parameters()}
+    owning = [g for g in groups if any(id(p) in routing_ids for p in g["params"])]
+    assert len(owning) == 1, "router parameters are split across groups"
+    assert owning[0]["lr"] == pytest.approx(model.router_lr)
+    assert model.router_lr > model.gate_lr, (
+        "at the gate learning rate the router bias needs ~75 epochs to travel O(1)"
+    )
+    # and no other group may also contain them
+    for group in groups:
+        if group is owning[0]:
+            continue
+        assert not any(id(p) in routing_ids for p in group["params"])
+
+
+def test_beta_differentiates_under_real_optimizer_steps():
+    """Synthetic check that beta is not a constant the optimiser cannot move."""
+    args, model = build("c")
+    data = _batch(args, model, batch=4)
+    opt = torch.optim.AdamW(model.get_optimizer_param_groups(args.lr), lr=args.lr)
+    model.train()
+
+    def beta_of():
+        model.eval()
+        with torch.no_grad():
+            out = model(data["adj"], data["x"], data["tm"], None, None, data["dm"], 0)
+        model.train()
+        return 1.0 - out["route_routing"]["alpha"]
+
+    start = beta_of()
+    before = model.evidence_router.router[-1].bias.detach().clone()
+    for _ in range(20):
+        opt.zero_grad(set_to_none=True)
+        out = model(data["adj"], data["x"], data["tm"], None, data["dec"], data["dm"], 1)
+        loss = (out["pred"] - data["dec"]).pow(2).mean()
+        loss.backward()
+        assert model.evidence_router.router[-1].weight.grad is not None
+        assert torch.isfinite(model.evidence_router.router[-1].weight.grad).all()
+        assert model.patch_projection[-1].weight.grad is not None
+        opt.step()
+    moved = float((model.evidence_router.router[-1].bias - before).abs().max())
+    assert moved > 1e-3, f"router bias barely moved ({moved:.2e})"
+    assert float(start.std()) > 0.0, "beta is constant across nodes at init"
+
+
+def test_observed_projection_receives_gradient():
+    args, model = build("d")
+    data = _batch(args, model, batch=4)
+    model.train()
+    out = model(data["adj"], data["x"], data["tm"], None, data["dec"], data["dm"], 0)
+    (out["pred"] - data["dec"]).pow(2).mean().backward()
+    grad = model.observed_nlinear.projection.weight.grad
+    assert grad is not None and torch.isfinite(grad).all()
+    assert float(grad.abs().max()) > 0.0, "the observed head gets no gradient"
+
+
+def test_patch_residual_is_bounded_by_its_scale():
+    args, model = build("c")
+    model.eval()
+    _amplify(model.patch_projection, std=5.0)
+    data = _batch(args, model)
+    with torch.no_grad():
+        out = model(data["adj"], data["x"], data["tm"], None, None, data["dm"], 0)
+    gap = (out["route_routing"]["y_patch"] - out["route_routing"]["y_graph"]).abs().max()
+    assert float(gap) <= model.patch_residual_scale + 1e-5, (
+        "the patch correction is unbounded even with a large projection"
+    )
+
+
+def test_diagnostics_report_the_base_rate_and_balanced_accuracy():
+    """Raw accuracy is meaningless without the base rate of the route target."""
+    target = torch.zeros(2, 4, 5, 1)
+    y_graph = torch.full_like(target, 1.0)
+    y_temporal = torch.full_like(target, 0.5)      # temporal better everywhere
+    valid = torch.ones_like(target, dtype=torch.bool)
+    availability = torch.zeros(2, 5, 4)
+    availability[..., 0] = 1.0
+    report = routing_diagnostics(torch.ones(2, 1, 5, 1), y_graph, y_temporal,
+                                 target, valid, availability)
+    assert report["route_target_base_rate"] == pytest.approx(1.0)
+    assert report["route_accuracy"] == pytest.approx(1.0)
+    # always picking the only correct class is not skill: balanced accuracy is 0.5
+    assert report["route_balanced_accuracy"] == pytest.approx(1.0)
+    mixed = routing_diagnostics(torch.zeros(2, 1, 5, 1), y_graph, y_temporal,
+                                target, valid, availability)
+    assert mixed["route_balanced_accuracy"] == pytest.approx(0.0)

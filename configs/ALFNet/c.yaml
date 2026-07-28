@@ -104,6 +104,12 @@ family:
     detach_imputer_for_temporal: true
     self_evidence_floor: 0.02
     lambda_route: 0.05
+    # The router needs its own step size: at the gate group's 5e-5 the
+    # bias moves 20 x lr per 20 steps, which is ~75 epochs to travel O(1).
+    router_lr: 0.0005
+    # Bounds the patch correction; tanh keeps it within this in
+    # normalised units so an early activation cannot throw the forecast.
+    patch_residual_scale: 1.0
     forecast_loss_mode: role_balanced_mix
     forecast_role_balanced_beta: 0.10
     graph_diffusion_steps: 1
