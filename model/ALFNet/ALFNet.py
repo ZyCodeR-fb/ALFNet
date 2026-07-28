@@ -6,6 +6,10 @@ import torch
 import torch.nn as nn
 
 from args import load_args_from_config
+from layers.protected_residual import (
+    ProtectedTemporalResidual,
+    companion_residual_loss,
+)
 from layers.evidence_router import (
     EvidenceRouter,
     ObservedNLinear,
@@ -21,6 +25,7 @@ from utils.model_output import unpack_model_output
 
 _RNG_OFFSET_EVIDENCE_ROUTER = 10_007
 _RNG_OFFSET_OBSERVED_NLINEAR = 20_011
+_RNG_OFFSET_PROTECTED_RESIDUAL = 30_013
 
 
 @contextlib.contextmanager
@@ -256,6 +261,9 @@ class Model(nn.Module):
         self.patch_expert_lr = float(recipe.get("patch_expert_lr", configs.lr))
         self.gate_lr = float(recipe.get("gate_lr", configs.lr))
         self.router_lr = float(recipe.get("router_lr", 5e-4))
+        # The residual is the only thing training in the frozen stage; it
+        # needs a real step size, not the gate group's 5e-5.
+        self.residual_lr = float(recipe.get("residual_lr", 5e-4))
 
         graph_recipe = (getattr(self.graph_args, "model_family_cfg", {}) or {}).get(
             "recipe", {}
@@ -350,6 +358,38 @@ class Model(nn.Module):
             float(recipe.get("lambda_route", 0.05)) if self.evidence_router_enabled else 0.0
         )
 
+        # R: protected, directly-supervised temporal residual over the graph
+        # anchor. Off -> fg1 unchanged.
+        self.temporal_residual_kind = str(recipe.get("temporal_residual", "none"))
+        if self.temporal_residual_kind not in {"none", "tcn", "dlinear"}:
+            raise ValueError(
+                f"unsupported temporal_residual: {self.temporal_residual_kind}"
+            )
+        self.temporal_residual_enabled = self.temporal_residual_kind != "none"
+        if self.temporal_residual_enabled and not self.film_fusion:
+            raise ValueError("temporal_residual extends the FiLM-conditioned anchor")
+        self.companion_loss_weight = float(recipe.get("companion_loss_weight", 1.0))
+        self.freeze_anchor = bool(recipe.get("freeze_anchor", False))
+        self.temporal_residual = None
+        if self.temporal_residual_enabled:
+            with _isolated_rng(configs.seed, _RNG_OFFSET_PROTECTED_RESIDUAL):
+                self.temporal_residual = ProtectedTemporalResidual(
+                    int(configs.input_len),
+                    int(configs.pred_len),
+                    self.output_dim,
+                    AVAILABILITY_COUNT,
+                    graph_hidden_dim=int(self.graph_args.d_model),
+                    hidden=int(model_cfg.get("residual_hidden_dim", 32)),
+                    kind=self.temporal_residual_kind,
+                    kernel_size=int(recipe.get("residual_kernel_size", 3)),
+                    dilation=int(recipe.get("residual_dilation", 1)),
+                    dropout=float(recipe.get("residual_dropout", 0.1)),
+                    residual_scale=float(recipe.get("temporal_residual_scale", 1.0)),
+                    self_evidence_floor=float(recipe.get("self_evidence_floor", 0.02)),
+                )
+        self.last_residual_diagnostics = None
+        self._last_encoder_state = None
+
         self.fault_residual_scale = float(recipe.get("fault_residual_scale", 0.0))
         if self.fault_residual_scale and not self.film_fusion:
             raise ValueError(
@@ -425,7 +465,8 @@ class Model(nn.Module):
         # own configurable group instead.
         routing_params = [
             parameter
-            for module in (self.evidence_router, self.patch_projection)
+            for module in (self.evidence_router, self.patch_projection,
+                           self.temporal_residual)
             if module is not None
             for parameter in module.parameters()
         ]
@@ -443,6 +484,8 @@ class Model(nn.Module):
         ]
         if routing_params:
             groups.append({"params": routing_params, "lr": self.router_lr})
+        if self.temporal_residual is not None:
+            groups[-1]["lr"] = self.residual_lr
         return groups
 
     def _state(self, x_enc):
@@ -478,6 +521,54 @@ class Model(nn.Module):
             initial_beta_logit=float(recipe.get("initial_beta_logit", -2.0)),
             router_weight_std=float(recipe.get("router_weight_std", 1e-2)),
         )
+
+    def _protected_residual(self, y_graph, x_enc, adjacency, last_availability):
+        """Y_hat = Y_g + g(availability, age, visibility) * R.
+
+        The gate is hard zero without own-history, so the zero-history and
+        unseen paths return the anchor bit for bit.
+        """
+        observation_mask = x_enc[..., self.mask_index:self.mask_index + 1]
+        recovered = x_enc[..., :self.output_dim]
+        age = x_enc[:, -1, :, self.age_index:self.age_index + 1]
+        visibility = observation_mask.mean(dim=1)
+        e_self = self_evidence(observation_mask)
+        graph_state = self._last_encoder_state
+        if graph_state is None:
+            graph_state = torch.zeros(
+                y_graph.shape[0], y_graph.shape[2], int(self.graph_args.d_model),
+                device=y_graph.device, dtype=y_graph.dtype,
+            )
+        residual, gate = self.temporal_residual(
+            recovered, observation_mask, last_availability, age, visibility,
+            e_self, graph_state.detach(),
+        )
+        if not self.training:
+            self.last_residual_diagnostics = {
+                "gate_mean": float(gate.mean()),
+                "gate_max": float(gate.max()),
+                "residual_abs_mean": float(residual.abs().mean()),
+            }
+        return y_graph + residual, {"residual": residual, "gate": gate}
+
+    def freeze_anchor_parameters(self):
+        """Stage one: train only the residual, leaving the anchor exactly as is.
+
+        With the anchor frozen the protected groups are constant across
+        candidates, so ranking by validation LifeAvg is ranking by
+        Steady/Join/Fault -- the part of the validation signal whose ordering
+        matches the test set (6/6 per group, against 1/6 for the 20-node
+        validation-unseen group).
+        """
+        trainable = set()
+        if self.temporal_residual is not None:
+            trainable = {id(p) for p in self.temporal_residual.parameters()}
+        frozen = 0
+        for parameter in self.parameters():
+            if id(parameter) not in trainable:
+                parameter.requires_grad_(False)
+                frozen += 1
+        return frozen
 
     def _evidence_context(self, x_enc, adjacency, last_availability, state):
         """Everything the router reads, all of it known at prediction time."""
@@ -585,6 +676,7 @@ class Model(nn.Module):
                 epoch, film=(1.0 + gamma, beta),
             )
             y_graph, graph_meta = unpack_model_output(graph_output)
+            self._last_encoder_state = graph_meta.get("encoder_state")
             return y_graph, features, graph_meta.get("aux_losses")
         graph_output = self.graph_expert(
             adjacency, graph_input, x_t_mark, pos_mark, decoder, dec_t_mark, epoch
@@ -616,6 +708,24 @@ class Model(nn.Module):
         y_graph = self.graph_refiner(y_graph, adjacency, last_availability)
         if self.film_fusion:
             prediction = y_graph
+            if self.temporal_residual is not None:
+                prediction, extras = self._protected_residual(
+                    y_graph, x_enc, adjacency, last_availability
+                )
+                return {
+                    "pred": prediction,
+                    "aux_losses": expert_aux_losses,
+                    "forecast_loss_mode": "role_balanced_mix",
+                    "forecast_role_balanced_beta": self.forecast_role_balanced_beta,
+                    # The residual is supervised directly against the anchor's
+                    # error rather than only through the fused loss.
+                    "companion_residual": {
+                        "residual": extras["residual"],
+                        "anchor": y_graph,
+                        "weight": self.companion_loss_weight,
+                    },
+                    "residual_gate": extras["gate"],
+                }
             if self.evidence_router_enabled or self.observed_nlinear_enabled:
                 prediction, beta = self._evidence_fusion(
                     prediction, y_patch, x_enc, adjacency, last_availability, state

@@ -62,6 +62,9 @@ ALFNET_VARIANTS = {
     **{stem: stem for stem in (
         "a", "b", "c", "d",
         "ac", "ad", "bc", "bd", "cd", "acd", "bcd", "abc", "abcd",
+        # R: protected directly-supervised temporal residual, TCN / DLinear,
+        # and the TCN variant with the worst-group training switch.
+        "rt", "rd", "rtg",
     )},
 }
 

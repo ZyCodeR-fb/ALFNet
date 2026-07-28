@@ -183,11 +183,30 @@ def _validate_checkpoint_shape_compatibility(checkpoint, args):
         raise ValueError(f"Checkpoint model dimensions are incompatible with the current training configuration. {mismatch_text}")
 
 
-def _load_model_state(model, loaded, args, validator):
+def _load_model_state(model, loaded, args, validator, allow_new_modules=False):
+    """Load a checkpoint. Strict unless the caller is warm-starting.
+
+    Warm-starting a candidate from its anchor's checkpoint necessarily has
+    missing keys -- the anchor never had the new module. Those are allowed and
+    reported; unexpected keys never are, because they mean the checkpoint and
+    the model disagree about something that already existed.
+    """
     if not isinstance(loaded, dict) or "state_dict" not in loaded:
         raise TypeError("Checkpoint must be a state_dict payload produced by the LCBT v3 trainer")
     validator(loaded, args)
-    model.load_state_dict(loaded["state_dict"])
+    if not allow_new_modules:
+        model.load_state_dict(loaded["state_dict"])
+        return model
+    missing, unexpected = model.load_state_dict(loaded["state_dict"], strict=False)
+    if unexpected:
+        raise ValueError(
+            f"Checkpoint carries parameters this model does not have: {sorted(unexpected)[:5]}"
+        )
+    if missing:
+        print(
+            f"-> Warm start: {len(missing)} freshly initialised tensors kept "
+            f"(e.g. {sorted(missing)[:3]})"
+        )
     return model
 
 
@@ -262,7 +281,10 @@ def initialize_training_from_checkpoint(model, args):
     if args.train_init_checkpoint_path is None:
         return model
     loaded = torch.load(args.train_init_checkpoint_path, weights_only=False)
-    model = _load_model_state(model, loaded, args, _validate_checkpoint_shape_compatibility)
+    model = _load_model_state(
+        model, loaded, args, _validate_checkpoint_shape_compatibility,
+        allow_new_modules=True,
+    )
     print(f"-> Initialize training weights from {args.train_init_checkpoint_path}")
     return model
 
@@ -286,6 +308,9 @@ if __name__ == "__main__":
     model = load_model_class(args.model)(args).float()
     if not args.test_for_async_lifecycle:
         model = initialize_training_from_checkpoint(model, args)
+    if getattr(model, "freeze_anchor", False):
+        frozen = model.freeze_anchor_parameters()
+        print(f"-> Anchor frozen: {frozen} tensors held fixed, training the residual only")
     model_parameters = filter(lambda p: p.requires_grad, model.parameters())
     args.num_params = sum([np.prod(p.size()) for p in model_parameters])
     if args.verbose:

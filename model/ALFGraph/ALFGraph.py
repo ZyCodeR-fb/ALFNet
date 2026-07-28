@@ -240,7 +240,9 @@ class Model(nn.Module):
             # holds the last observed one rather than inventing a future.
             None if state_sequence is None else state_sequence[:, -1],
         )
-        output = {"pred": prediction}
+        # The last encoder layer's state, detached: the residual branch reads
+        # the anchor's summary without pushing gradients back into it.
+        output = {"pred": prediction, "encoder_state": hidden[-1].detach()}
         if self.routed:
             terms = [
                 loss

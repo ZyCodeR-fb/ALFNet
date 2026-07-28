@@ -3,6 +3,7 @@ import torch.nn.functional as F
 
 from data_provider.calendar_strata import STRATA, stratum_weights
 from layers.evidence_router import routing_diagnostics
+from layers.protected_residual import companion_residual_loss
 from data_provider.lcbt_protocol import (
     accumulate_lifecycle_mae,
     finalize_lifecycle_validation_mae,
@@ -85,6 +86,39 @@ def _stratum_balanced_loss(y_hat, y, valid_mask, calendar_ids, loss_name):
     if not terms or total <= 0:
         return None
     return torch.stack(terms).sum() / total
+
+
+def _group_worst_loss(y_hat, y, valid_mask, group_ids, evidence_steps, loss_name,
+                      weight, temperature=0.1):
+    """Smooth worst-group penalty over the semantic groups and evidence lengths.
+
+    Average loss can improve while a single phase degrades -- the deficits fg1
+    still carries against MoGERNN are Warm +0.046 and Ready +0.031, both inside
+    the Join track, invisible in the mean. A soft maximum over the per-group and
+    per-k means penalises exactly that without the instability of a hard max.
+
+    Group DRO, Sagawa et al., ICLR 2020: https://openreview.net/pdf?id=ryxGuJrFvS
+    """
+    if weight <= 0:
+        return None
+    element = _element_loss(y_hat, y, loss_name)
+    cells = []
+    groups = group_ids.reshape(-1)
+    steps = evidence_steps.reshape(-1)
+    for group in torch.unique(groups):
+        for k in torch.unique(steps):
+            selected = ((groups == group) & (steps == k)).view(
+                -1, *([1] * (valid_mask.dim() - 1))
+            )
+            cell = valid_mask & selected.expand_as(valid_mask)
+            if cell.any():
+                cells.append(element[cell].mean())
+    if len(cells) < 2:
+        return None
+    stacked = torch.stack(cells)
+    # log-sum-exp soft max: -> max as temperature -> 0, -> mean as it grows
+    soft_max = temperature * torch.logsumexp(stacked / temperature, dim=0)
+    return weight * soft_max
 
 
 def _route_loss(route, y, valid_mask, last_role, epoch):
@@ -262,6 +296,24 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                     beta = float(meta.get("forecast_role_balanced_beta", 0.1))
                     optimize_loss = (1.0 - beta) * optimize_loss + beta * role_loss
 
+            companion = meta.get("companion_residual")
+            if companion is not None and float(companion.get("weight", 0.0)) > 0:
+                residual_loss = companion_residual_loss(
+                    companion["residual"], y_for_loss, companion["anchor"],
+                    valid_mask, args.loss,
+                )
+                if residual_loss is not None:
+                    optimize_loss = optimize_loss + float(companion["weight"]) * residual_loss
+            group_weight = float(getattr(args, "lcbt_worst_group_weight", 0.0))
+            if group_weight > 0:
+                group_loss = _group_worst_loss(
+                    y_hat, y_for_loss, valid_mask, group_ids, evidence_steps,
+                    args.loss, group_weight,
+                    float(getattr(args, "lcbt_worst_group_temperature", 0.1)),
+                )
+                if group_loss is not None:
+                    optimize_loss = optimize_loss + group_loss
+
             aux_loss = sum_aux_losses(meta.get("aux_losses"), device=y_hat.device)
             if aux_loss is not None:
                 optimize_loss = optimize_loss + aux_loss
@@ -309,6 +361,15 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
             for name, value in batch_metrics.items():
                 metric_sums[name] = metric_sums.get(name, 0.0) + value
             valid_batches += 1
+
+            gate = meta.get("residual_gate")
+            if mode == "val" and gate is not None:
+                for name, value in (("residual_gate_mean", float(gate.mean())),
+                                    ("residual_gate_max", float(gate.max())),
+                                    ("residual_gate_nonzero",
+                                     float((gate > 1e-6).float().mean()))):
+                    routing_sums[name] = routing_sums.get(name, 0.0) + value
+                routing_batches += 1
 
             routing = meta.get("route_routing")
             if mode == "val" and isinstance(routing, dict) and "alpha" in routing:
