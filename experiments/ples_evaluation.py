@@ -172,22 +172,25 @@ def _format_training_trace(training_trace):
 
 
 
-# Which of the seven input channels each model's forward actually consumes,
-# audited against the code on 2026-07-27. Every model receives the same
-# [raw, role x4, age, mask] tensor, but receiving is not using: half the
-# comparison models slice the raw channel straight back off. Recording it makes
-# the comparison auditable instead of leaving "same tensor" to imply "same
-# information". Update this table whenever an adapter's forward changes; the
-# regression test in tests/test_input_contract.py pins the current values.
+# Which of the seven input channels each model's forward actually consumes.
+# Re-audited 2026-07-29 after the fairness fix: published baselines take the
+# masked traffic series plus whatever calendar features their own paper defines,
+# and nothing else. The lifecycle role/age/mask channels are *this method's*
+# inputs -- handing them to a baseline turns it into a different model and stops
+# the comparison measuring what it claims to. Verified behaviourally in
+# tests/test_input_contract.py by poisoning the non-raw channels and requiring
+# bit-identical output.
 MODEL_INPUT_CONTRACT = {
+    # ALFNet and its experts: the lifecycle channels are the method.
     "ALFNet": "all",
     "ALFGraph": "all",
     "ALFTemporal": "all",
-    "FCLSTM": "all",
-    "GWNET": "all",
-    "STGCN": "all",
-    "STGODE": "all",
-    "STID": "all+calendar",
+    # Published baselines: source-native inputs only.
+    "FCLSTM": "raw",
+    "GWNET": "raw",
+    "STGCN": "raw",
+    "STGODE": "raw",
+    "STID": "raw+calendar",
     "MoGERNN": "raw",
     "STFiT": "raw",
     "HA": "raw",

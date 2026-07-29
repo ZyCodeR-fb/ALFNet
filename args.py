@@ -131,6 +131,10 @@ def _add_arguments(parser):
     parser.add_argument("--lcbt_stratum_balanced_loss", type=float, default=0.0,
                         help="blend the forecast loss towards the LCE/PLES calendar-stratum weights; "
                              "0 keeps the plain batch mean (default), 1 uses the evaluation weighting")
+    parser.add_argument("--lcbt_tail_weight", type=float, default=0.0,
+                        help="average top-q squared error inside each lifecycle group; "
+                             "targets the RMSE tail, 0 disables it (default)")
+    parser.add_argument("--lcbt_tail_quantile", type=float, default=0.1)
     parser.add_argument("--lcbt_worst_group_weight", type=float, default=0.0,
                         help="smooth worst-group penalty over semantic groups x evidence length; "
                              "0 keeps the plain average loss (default)")

@@ -1,8 +1,17 @@
-"""Pins the 2026-07 audit of what each model's forward actually consumes.
+"""Pins what each model's forward actually consumes.
 
-Every model receives the same seven-channel tensor, but half of them slice the
-raw channel straight back off. These tests read the source of each adapter so
-the recorded contract cannot drift away from the code without failing here.
+Every model receives the same seven-channel tensor. Published baselines must
+reduce it to their source-native inputs -- the traffic series plus whatever
+calendar features their own paper defines -- because the lifecycle role, age and
+observation-mask channels are this method's contribution, and feeding them to a
+baseline turns it into a different model.
+
+Two layers of check: a source read, so the recorded contract cannot drift from
+the code silently, and a behavioural one that poisons the non-raw channels and
+requires bit-identical output. The behavioural check is the load-bearing one --
+a baseline can consume the channels through a config-derived `input_dim` with no
+visible slice anywhere in its adapter, which is exactly how five of them were
+reading lifecycle inputs before this was fixed.
 """
 
 import re
@@ -22,8 +31,12 @@ DIRECTORY_TO_MODEL = {
     "MoGERNN": "MoGERNN", "PatchSTG": "PatchSTG", "SLPF": "SLPF", "STBP": "STBP",
     "STFiT": "STFiT", "STGCN": "STGCN", "STID": "STID", "stgode": "STGODE",
 }
-# adapters that reduce x_enc to the raw channel before the backbone sees it
-SLICES_TO_RAW = re.compile(r"x_enc\[\.\.\., ?:\s*self\.(raw_enc_in|output_dim)\]")
+# Adapters that reduce x_enc to the raw channels before the backbone sees it,
+# either by an explicit slice or through the shared helper.
+SLICES_TO_RAW = re.compile(
+    r"x_enc\[\.\.\., ?:\s*self\.(raw_enc_in|output_dim)\]"
+    r"|source_native_input\(\s*x_enc"
+)
 
 
 def _adapter_source(directory):
@@ -42,6 +55,74 @@ def test_recorded_contract_matches_the_adapter_source(directory, model):
     assert slices_to_raw == recorded.startswith("raw"), (
         f"{model}: source slices to raw={slices_to_raw} but contract says {recorded!r}"
     )
+
+
+BASELINES = ["FCLSTM", "GWNET", "STGCN", "STGODE", "STID", "MoGERNN",
+             "PatchSTG", "SLPF", "STBP", "STFiT", "HA", "MCPST_FSL"]
+
+
+@pytest.mark.parametrize("model", BASELINES)
+def test_baseline_output_is_unchanged_by_the_lifecycle_channels(model):
+    """Behavioural: poison every non-raw channel and require identical output.
+
+    Reading the source is not enough -- a baseline can consume the channels
+    through a config-derived `input_dim` without any visible slice. This drives
+    the real forward instead. The seed is reset per call so a stochastic module
+    (STFiT carries a VAE) cannot be mistaken for one that reads the extra
+    channels: that false positive is exactly what this control caught.
+    """
+    import torch
+
+    from args import load_args_from_config
+    from model.regist_model import load_model_class
+
+    args = load_args_from_config(f"configs/{model}/METRLA_lcbt_v3.yaml", [])
+    args.device = "cpu"
+    net = load_model_class(args.model)(args).eval()
+    nodes = len(getattr(net, "known_nodes", range(207)))
+    generator = torch.Generator().manual_seed(1)
+    adjacency = torch.rand(nodes, nodes, generator=generator)
+    clean = torch.randn(2, args.input_len, nodes, args.enc_in, generator=generator)
+    poisoned = clean.clone()
+    poisoned[..., args.raw_enc_in:] = 99.0
+    marks = torch.rand(2, args.input_len, 3, generator=generator) * 5
+    horizon = torch.rand(2, args.pred_len, 3, generator=generator) * 5
+
+    def run(inputs):
+        torch.manual_seed(0)
+        with torch.no_grad():
+            out = net(adjacency, inputs, marks, None, None, horizon, 0)
+        return out["pred"] if isinstance(out, dict) else out
+
+    baseline, repeat = run(clean), run(clean)
+    assert torch.equal(baseline, repeat), "not reproducible; the check below is void"
+    assert torch.equal(baseline, run(poisoned)), (
+        f"{model} reacts to the lifecycle channels it must not consume"
+    )
+
+
+def test_alfnet_does_consume_the_lifecycle_channels():
+    """The mirror image: the method must actually use its own inputs."""
+    import torch
+
+    from args import load_args_from_config
+    from model.regist_model import load_model_class
+
+    args = load_args_from_config("configs/ALFNet/fg1.yaml", [])
+    args.device = "cpu"
+    net = load_model_class(args.model)(args).eval()
+    nodes = len(net.known_nodes)
+    generator = torch.Generator().manual_seed(1)
+    adjacency = torch.rand(nodes, nodes, generator=generator)
+    clean = torch.randn(2, args.input_len, nodes, args.enc_in, generator=generator)
+    poisoned = clean.clone()
+    poisoned[..., args.raw_enc_in:] = 99.0
+    marks = torch.rand(2, args.input_len, 3, generator=generator) * 5
+    horizon = torch.rand(2, args.pred_len, 3, generator=generator) * 5
+    with torch.no_grad():
+        base = net(adjacency, clean, marks, None, None, horizon, 0)["pred"]
+        other = net(adjacency, poisoned, marks, None, None, horizon, 0)["pred"]
+    assert not torch.allclose(base, other)
 
 
 def test_every_registered_model_declares_a_contract():

@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 from lib.utils import load_project_adjacency
-from model.comparison_model.family_utils import build_gwnet_cfg, normalize_adj_mx
+from model.comparison_model.family_utils import build_gwnet_cfg, normalize_adj_mx, source_native_input
 from .gwnet import GWNET as GWNETBackbone
 
 
@@ -11,6 +11,7 @@ class Model(nn.Module):
     def __init__(self, configs):
         super().__init__()
         self.cfg = build_gwnet_cfg(configs)
+        self.raw_enc_in = int(getattr(configs, "raw_enc_in", configs.enc_in))
         self.pred_len = configs.pred_len
         self.output_dim = configs.c_out
         self.full_num_nodes = self.cfg["node_num"]
@@ -49,7 +50,8 @@ class Model(nn.Module):
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, x_dec=None, dec_t_mark=None, epoch=0):
         current_node_ids = self._resolve_current_node_ids(x_enc.shape[2])
         self.backbone.current_node_ids = current_node_ids
-        pred = self.backbone(x_enc)
+        # Source-native: Graph-WaveNet takes the traffic series.
+        pred = self.backbone(source_native_input(x_enc, self.raw_enc_in))
         if pred.shape[-1] != 1:
             pred = pred[..., -1:]
         pred = pred.squeeze(-1).reshape(pred.shape[0], self.output_dim, self.pred_len, pred.shape[2]).permute(0, 2, 3, 1).contiguous()

@@ -67,6 +67,9 @@ ALFNET_VARIANTS = {
         "rt", "rd", "rtg",
         # K: the residual learns a teacher gap instead of the anchor error.
         "kt", "kd",
+        # Training-only switches chosen from the diagnostics: tail (T),
+        # worst-cell (W), and both.
+        "tq", "wg", "tw",
     )},
 }
 

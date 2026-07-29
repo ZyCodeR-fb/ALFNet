@@ -30,6 +30,28 @@ def load_yaml_dict(path):
     return raw
 
 
+
+# Baselines published before this benchmark existed take the traffic series and
+# whatever calendar features their own paper defines. The lifecycle role, age
+# and observation-mask channels are *this method's* inputs; handing them to a
+# baseline silently upgrades it into a different model and stops the comparison
+# measuring what it claims to. Every original baseline therefore slices back to
+# the raw channels here, and only ALFNet's own modules read the rest.
+def source_native_input(x_enc, raw_enc_in):
+    """`[B, L, N, enc_in] -> [B, L, N, raw_enc_in]`, the masked traffic series."""
+    raw = int(raw_enc_in)
+    if x_enc.shape[-1] < raw:
+        raise ValueError(
+            f"input has {x_enc.shape[-1]} channels, fewer than the {raw} raw ones"
+        )
+    return x_enc[..., :raw]
+
+
+def source_native_dim(args):
+    """Channel count a source-native baseline actually consumes."""
+    return int(getattr(args, "raw_enc_in", args.enc_in))
+
+
 def build_project_family_context(args):
     num_nodes = infer_project_num_nodes({"data_path": args.data_path})
     known_nodes, unknown_nodes = resolve_known_unknown_nodes(
@@ -82,7 +104,7 @@ def build_stfit_like_cfg(args, recipe_defaults):
     model_cfg = deep_merge_dict(model_cfg, family_cfg.get("model", {}))
     model_cfg.setdefault("hidden_channels", args.d_model)
     model_cfg["num_nodes"] = project_ctx["num_nodes"]
-    model_cfg["in_channels"] = args.enc_in
+    model_cfg["in_channels"] = source_native_dim(args)
     model_cfg["out_channels"] = args.pred_len
     model_cfg.setdefault("kernel_size", 3)
     model_cfg.setdefault("K", 3)
@@ -129,7 +151,7 @@ def build_stfit_like_cfg(args, recipe_defaults):
     cfg.setdefault(
         "vae",
         {
-            "input_dim": args.enc_in,
+            "input_dim": source_native_dim(args),
             "hidden_dim": args.d_model,
             "latent_dim": args.d_model,
             "num_layers": 2,
@@ -150,7 +172,7 @@ def build_stgode_cfg(args):
     model_cfg = cfg.get("model", {})
     model_cfg = deep_merge_dict(model_cfg, family_cfg.get("model", {}))
     model_cfg["num_nodes"] = project_ctx["num_nodes"]
-    model_cfg["num_features"] = args.enc_in
+    model_cfg["num_features"] = source_native_dim(args)
     model_cfg["window_size"] = args.input_len + args.pred_len
     model_cfg["horizon"] = args.pred_len
     cfg["model"] = model_cfg
@@ -183,7 +205,9 @@ def build_ha_cfg(args):
 def build_lstm_cfg(args, recipe_defaults):
     cfg = build_stfit_like_cfg(args, recipe_defaults)
     model_cfg = cfg.get("model", {})
-    model_cfg.setdefault("input_dim", args.enc_in)
+    # Not setdefault: a leftover input_dim in a YAML would silently re-admit
+    # the lifecycle channels this baseline is not supposed to see.
+    model_cfg["input_dim"] = source_native_dim(args)
     model_cfg.setdefault("embed_dim", args.d_model)
     model_cfg.setdefault("hidden_dim", args.d_model)
     model_cfg.setdefault("end_dim", args.pred_len)
@@ -283,7 +307,7 @@ def build_gwnet_cfg(args):
     cfg["known_nodes"] = project_ctx["known_nodes"]
     cfg["unknown_nodes_list"] = project_ctx["unknown_nodes"]
     cfg["node_num"] = project_ctx["num_nodes"]
-    cfg["input_dim"] = args.enc_in
+    cfg["input_dim"] = source_native_dim(args)
     cfg["output_dim"] = args.c_out
     cfg["seq_len"] = args.input_len
     cfg["horizon"] = args.pred_len
@@ -315,7 +339,9 @@ def build_stid_cfg(args):
     model_cfg.setdefault("if_node", True)
     model_cfg["input_len"] = args.input_len
     model_cfg["output_len"] = args.pred_len
-    model_cfg["input_dim"] = args.enc_in + int(model_cfg["if_T_i_D"]) + int(model_cfg["if_D_i_W"])
+    model_cfg["input_dim"] = (
+        source_native_dim(args) + int(model_cfg["if_T_i_D"]) + int(model_cfg["if_D_i_W"])
+    )
     cfg["model"] = model_cfg
     cfg["dataset_name"] = project_ctx["dataset_name"]
     cfg["known_nodes"] = project_ctx["known_nodes"]
@@ -349,7 +375,7 @@ def build_patchstg_cfg(args):
     cfg["known_nodes"] = project_ctx["known_nodes"]
     cfg["unknown_nodes_list"] = project_ctx["unknown_nodes"]
     cfg["node_num"] = project_ctx["num_nodes"]
-    cfg["input_dim"] = args.enc_in
+    cfg["input_dim"] = source_native_dim(args)
     cfg["output_dim"] = args.c_out
     cfg["seq_len"] = args.input_len
     cfg["horizon"] = args.pred_len

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from model.comparison_model.family_utils import build_stid_cfg
+from model.comparison_model.family_utils import build_stid_cfg, source_native_input
 from .stid import STID as STIDBackbone
 
 
@@ -10,6 +10,7 @@ class Model(nn.Module):
     def __init__(self, configs):
         super().__init__()
         self.cfg = build_stid_cfg(configs)
+        self.raw_enc_in = int(getattr(configs, "raw_enc_in", configs.enc_in))
         self.full_num_nodes = self.cfg["node_num"]
         self.known_nodes = self.cfg["known_nodes"]
         model_cfg = self.cfg["model"]
@@ -36,8 +37,10 @@ class Model(nn.Module):
             if_D_i_W=model_cfg["if_D_i_W"],
             if_node=model_cfg["if_node"],
             # _build_stid_input appends tod then dow after the raw x_enc block.
-            tid_index=int(configs.enc_in),
-            diw_index=int(configs.enc_in) + int(self.use_time_of_day),
+            # The slice keeps only the raw channels, so tod/dow now sit
+            # immediately after them rather than after all seven.
+            tid_index=self.raw_enc_in,
+            diw_index=self.raw_enc_in + int(self.use_time_of_day),
         )
 
     def _resolve_current_node_ids(self, current_num_nodes):
@@ -48,7 +51,8 @@ class Model(nn.Module):
         return list(range(current_num_nodes))
 
     def _build_stid_input(self, x_enc, x_t_mark):
-        features = [x_enc]
+        # Source-native: STID takes [speed, tod, dow], nothing else.
+        features = [source_native_input(x_enc, self.raw_enc_in)]
         if self.use_time_of_day:
             if x_t_mark is None or x_t_mark.shape[-1] < 2:
                 raise ValueError("STID requires x_t_mark with at least minute/hour features when if_T_i_D=True")

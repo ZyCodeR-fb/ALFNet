@@ -23,6 +23,12 @@ TRAINING_OBJECTIVE_KNOBS = {
     "lcbt_context_loss_weight": 0.10,
     "lcbt_stratum_balanced_loss": 0.0,
     "lcbt_include_stress_cohort": False,
+    # Tail and worst-group terms change what is optimised, so two runs that
+    # differ only in these must not share an experiment directory.
+    "lcbt_tail_weight": 0.0,
+    "lcbt_tail_quantile": 0.1,
+    "lcbt_worst_group_weight": 0.0,
+    "lcbt_worst_group_temperature": 0.1,
 }
 
 

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from model.comparison_model.family_utils import build_stgode_cfg
+from model.comparison_model.family_utils import build_stgode_cfg, source_native_input
 from model.comparison_model.stgode.stgode import STGODE as STGODEBackbone
 
 
@@ -10,12 +10,15 @@ class Model(nn.Module):
     def __init__(self, configs):
         super().__init__()
         self.cfg = build_stgode_cfg(configs)
+        self.raw_enc_in = int(getattr(configs, "raw_enc_in", configs.enc_in))
         self.pred_len = configs.pred_len
         self.output_dim = configs.c_out
         self.backbone = STGODEBackbone(self.cfg)
 
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, x_dec=None, dec_t_mark=None, epoch=0):
-        history_data = x_enc.permute(0, 2, 3, 1).contiguous()
+        # Source-native input: the traffic series only. Lifecycle channels are
+        # ALFNet's method inputs, not this baseline's.
+        history_data = source_native_input(x_enc, self.raw_enc_in).permute(0, 2, 3, 1).contiguous()
         if x_dec is None:
             future_data = torch.zeros(
                 history_data.shape[0],

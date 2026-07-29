@@ -122,6 +122,39 @@ def _group_worst_loss(y_hat, y, valid_mask, group_ids, evidence_steps, loss_name
     return weight * soft_max
 
 
+def _group_tail_loss(y_hat, y, valid_mask, group_ids, loss_name, weight, quantile=0.1):
+    """Average top-q squared error, computed inside each lifecycle group.
+
+    Measured on fg1's Ready phase, the cell it fails against MoGERNN on RMSE:
+    the worst 1% of cells carry 35.7% of the squared error, the worst 5% carry
+    67.9%, and MAE 0.192 against RMSE 0.339 is a ratio of 1.77. RMSE there is a
+    tail statistic, so a mean loss has almost no leverage on it while a tail
+    loss does.
+
+    Kept per group so a small group cannot be drowned out by a large one, and
+    squared regardless of the main loss because RMSE is the target.
+
+    Average Top-k loss, Fan et al., NeurIPS 2017: https://arxiv.org/abs/1705.08826
+    """
+    if weight <= 0:
+        return None
+    squared = (y_hat - torch.nan_to_num(y, nan=0.0)).pow(2)
+    ids = group_ids.reshape(-1)
+    terms = []
+    for group in torch.unique(ids):
+        cell = valid_mask & (ids == group).view(
+            -1, *([1] * (valid_mask.dim() - 1))
+        ).expand_as(valid_mask)
+        if not cell.any():
+            continue
+        errors = squared[cell]
+        k = max(1, int(quantile * errors.numel()))
+        terms.append(torch.topk(errors, k).values.mean())
+    if not terms:
+        return None
+    return weight * torch.stack(terms).mean()
+
+
 def _route_loss(route, y, valid_mask, last_role, epoch):
     weight = float(route.get("lambda_route", 0.0))
     if weight <= 0 or epoch <= int(route.get("warmup_epoch", 0)):
@@ -321,6 +354,15 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                 )
                 if residual_loss is not None:
                     optimize_loss = optimize_loss + float(companion["weight"]) * residual_loss
+            tail_weight = float(getattr(args, "lcbt_tail_weight", 0.0))
+            if tail_weight > 0:
+                tail_loss = _group_tail_loss(
+                    y_hat, y_for_loss, valid_mask, group_ids, args.loss, tail_weight,
+                    float(getattr(args, "lcbt_tail_quantile", 0.1)),
+                )
+                if tail_loss is not None:
+                    optimize_loss = optimize_loss + tail_loss
+
             group_weight = float(getattr(args, "lcbt_worst_group_weight", 0.0))
             if group_weight > 0:
                 group_loss = _group_worst_loss(
