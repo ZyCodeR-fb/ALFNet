@@ -4,7 +4,6 @@ import torch.nn.functional as F
 from data_provider.calendar_strata import STRATA, stratum_weights
 from layers.evidence_router import routing_diagnostics
 from layers.protected_residual import companion_residual_loss
-from layers.teacher_gap import distillation_loss
 from data_provider.lcbt_protocol import (
     accumulate_lifecycle_mae,
     finalize_lifecycle_validation_mae,
@@ -329,22 +328,6 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                 if role_loss is not None:
                     beta = float(meta.get("forecast_role_balanced_beta", 0.1))
                     optimize_loss = (1.0 - beta) * optimize_loss + beta * role_loss
-
-            distillation = meta.get("distillation")
-            if distillation is not None:
-                # forecast loss + lambda_kd * distillation, never distillation
-                # alone: the residual still has to help the actual forecast.
-                kd_loss, kd_report = distillation_loss(
-                    distillation["residual"], distillation["teacher"],
-                    distillation["anchor"], valid_mask, distillation["gate"],
-                    args.loss,
-                )
-                if kd_loss is not None:
-                    optimize_loss = optimize_loss + float(distillation["weight"]) * kd_loss
-                    if mode == "val":
-                        for name, value in kd_report.items():
-                            routing_sums[name] = routing_sums.get(name, 0.0) + value
-                        routing_batches += 1
 
             companion = meta.get("companion_residual")
             if companion is not None and float(companion.get("weight", 0.0)) > 0:

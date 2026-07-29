@@ -368,7 +368,8 @@ def test_jr_carries_no_stage_two_mechanism():
     assert model.temporal_residual is not None
     assert model.freeze_anchor is False, "JR must not freeze the anchor"
     assert model.companion_loss_weight == 0.0, "JR must not use direct supervision"
-    assert model.lambda_kd == 0.0 and model._teacher is None, "JR must not use a teacher"
+    # distillation is retired outright, so the machinery must not even exist
+    assert not hasattr(model, "_teacher") and not hasattr(model, "lambda_kd")
 
 
 def test_jr_yaml_loads_no_pretrained_expert():
@@ -404,7 +405,7 @@ def test_jr_emits_a_zero_weight_companion_term():
     data = _batch(args, model)
     out = model(data["adj"], data["x"], data["tm"], None, data["dec"], data["dm"], 0)
     assert float(out["companion_residual"]["weight"]) == 0.0
-    assert out["distillation"] is None
+    assert "distillation" not in out
 
 
 def test_jr_trains_the_anchor_and_the_residual_together():
@@ -452,168 +453,97 @@ def test_rtg_differs_from_rt_only_in_its_name():
     assert drift == {"runtime.model_variant"}, sorted(drift)
 
 
-# --- K: distillation from a frozen teacher ----------------------------------
+# --- distillation is gone, and must stay gone -------------------------------
+#
+# The deliverable is trained from random initialisation in one stage. A teacher
+# makes that impossible: it needs a second trained model on disk and a frozen
+# schedule around it. `kt` reached 35/36 that way and is kept only as a recorded
+# upper bound in outputs/ALFNet/kt-s32 -- the code, configs and the checkpoint
+# it depended on are all retired.
+#
+# These tests are the lock. They assert absence behaviourally rather than by
+# reading source, and none of them touches a file outside the working tree --
+# which is what the old teacher tests did, and why they broke the moment the
+# run_v5 tree was cleaned up.
 
 
-DISTILL = ["kt", "kd"]
+# fg1 is the METR-LA mainline, jr the end-to-end candidate, fg1_bay and the
+# PEMS-BAY MoGERNN the cross-dataset pair. None may build a teacher.
+NO_TEACHER_CONFIGS = [
+    "configs/ALFNet/fg1.yaml",
+    "configs/ALFNet/jr.yaml",
+    "configs/ALFNet/fg1_bay.yaml",
+    "configs/MoGERNN/PEMSBAY_lcbt_v3.yaml",
+]
 
 
-def test_teacher_stays_out_of_the_shipped_model():
-    """The teacher trains nothing, ships nothing, and is never checkpointed."""
-    _, model = build("kt")
-    assert model._teacher is not None
-    assert not any(p.requires_grad for p in model._teacher.parameters())
-    assert not any("teacher" in key for key in model.state_dict()), (
-        "the teacher leaked into the checkpoint"
-    )
-    optimised = {id(p) for g in model.get_optimizer_param_groups(1e-3) for p in g["params"]}
-    assert not any(id(p) in optimised for p in model._teacher.parameters())
-    # and it stays in eval even when the parent is put in train mode
-    model.train()
-    assert model._teacher.training is False
+def test_the_distillation_module_is_gone():
+    with pytest.raises(ImportError):
+        import layers.teacher_gap  # noqa: F401
 
 
-def test_teacher_protocol_hash_mismatch_is_refused():
-    from layers.teacher_gap import FrozenTeacher
-
-    stub = torch.nn.Linear(1, 1)
-    provenance = {"sha256": "x", "training_protocol_hash": "aaa"}
-    FrozenTeacher(stub, provenance, required_protocol_hash="aaa")
-    with pytest.raises(ValueError, match="different LCBT protocol"):
-        FrozenTeacher(stub, provenance, required_protocol_hash="bbb")
+def test_retired_distillation_configs_are_gone():
+    for stem in ("kt", "kd"):
+        assert not (ROOT / f"configs/ALFNet/{stem}.yaml").exists(), (
+            f"{stem}.yaml came back; distillation is not a deliverable path"
+        )
 
 
-def test_distillation_supervises_the_applied_residual():
-    from layers.teacher_gap import distillation_loss
-
-    anchor = torch.zeros(2, 3, 4, 1)
-    teacher = torch.full_like(anchor, 2.0)
-    valid = torch.ones_like(anchor, dtype=torch.bool)
-    gate = torch.ones(2, 4, 1)
-    exact = torch.full_like(anchor, 2.0)          # residual equals the gap
-    loss, report = distillation_loss(exact, teacher, anchor, valid, gate)
-    assert float(loss) == pytest.approx(0.0)
-    assert report["teacher_gap_abs_mean"] == pytest.approx(2.0)
-    assert report["teacher_gap_fit_mae"] == pytest.approx(0.0)
-    wrong = torch.zeros_like(anchor)
-    loss, report = distillation_loss(wrong, teacher, anchor, valid, gate)
-    assert float(loss) == pytest.approx(2.0)
-    # closed gates are excluded rather than pushed at an unreachable target
-    closed = torch.zeros(2, 4, 1)
-    assert distillation_loss(exact, teacher, anchor, valid, closed) == (None, {})
+@pytest.mark.parametrize("config_path", NO_TEACHER_CONFIGS)
+def test_no_mainline_config_declares_a_teacher(config_path):
+    config = yaml.safe_load((ROOT / config_path).read_text(encoding="utf-8"))
+    recipe = (config.get("family") or {}).get("recipe") or {}
+    for key in ("lambda_kd", "teacher_checkpoint", "teacher_config_path"):
+        assert key not in recipe, f"{config_path} still declares {key}"
 
 
-def test_distillation_target_is_detached_from_the_teacher():
-    from layers.teacher_gap import distillation_loss
+@pytest.mark.parametrize("config_path", NO_TEACHER_CONFIGS)
+def test_no_mainline_model_constructs_a_teacher(config_path):
+    """Behavioural: build it, run it, and check nothing teacher-shaped exists."""
+    import pytorch_lightning as pl
 
-    anchor = torch.zeros(2, 3, 4, 1, requires_grad=True)
-    teacher = torch.full_like(anchor, 2.0).requires_grad_(True)
-    residual = torch.zeros_like(anchor).requires_grad_(True)
-    loss, _ = distillation_loss(residual, teacher, anchor, torch.ones_like(anchor, dtype=torch.bool),
-                               torch.ones(2, 4, 1))
-    loss.backward()
-    assert residual.grad is not None and float(residual.grad.abs().max()) > 0
-    for tensor in (teacher, anchor):
-        assert tensor.grad is None or float(tensor.grad.abs().max()) == 0.0
-
-
-@pytest.mark.parametrize("name", DISTILL)
-def test_distillation_variant_forwards_and_backwards(name):
-    args, model = build(name)
-    data = _batch(args, model)
-    model.train()
-    out = model(data["adj"], data["x"], data["tm"], None, data["dec"], data["dm"], 0)
-    assert torch.isfinite(out["pred"]).all()
-    distill = out["distillation"]
-    assert distill is not None and torch.isfinite(distill["teacher"]).all()
-    assert not distill["teacher"].requires_grad, "the teacher output carries grad"
-    from layers.teacher_gap import distillation_loss
-
-    loss, report = distillation_loss(
-        distill["residual"], distill["teacher"], distill["anchor"],
-        torch.ones_like(data["dec"], dtype=torch.bool), distill["gate"], "mae",
-    )
-    assert loss is not None and torch.isfinite(loss)
-    assert set(report) >= {"teacher_gap_abs_mean", "teacher_gap_fit_mae",
-                           "teacher_gap_corr", "teacher_gap_cells"}
-    (out["pred"].pow(2).mean() + loss).backward()
-    grads = [p.grad for p in model.temporal_residual.parameters() if p.grad is not None]
-    assert grads and any(float(g.abs().max()) > 0 for g in grads)
-    assert all(float(p.grad.abs().max()) == 0.0
-               for p in model._teacher.parameters() if p.grad is not None)
-
-
-@pytest.mark.parametrize("name", DISTILL)
-def test_distillation_keeps_the_unseen_path_bit_identical(name):
-    args, model = build(name)
-    _amplify(model.temporal_residual)
-    model.eval()
-    nodes = len(model.known_nodes)
-    data = _batch(args, model)
-    onehot = torch.zeros(2, args.input_len, nodes, 4)
-    onehot[..., ROLE_VS] = 1.0
-    data["x"][..., model.role_start:model.role_end] = onehot
-    data["x"][..., model.mask_index] = 0.0
-    with torch.no_grad():
-        with_kd = model(data["adj"], data["x"], data["tm"], None, None, data["dm"], 0)["pred"]
-        head, model.temporal_residual = model.temporal_residual, None
-        plain = model(data["adj"], data["x"], data["tm"], None, None, data["dm"], 0)["pred"]
-        model.temporal_residual = head
-    assert torch.equal(with_kd, plain)
-
-
-def test_teacher_requires_a_residual_to_distil_into():
-    args = load_args_from_config("configs/ALFNet/fg1.yaml", [])
+    pl.seed_everything(32, workers=True)
+    args = load_args_from_config(config_path, [])
     args.device = "cpu"
-    args.model_family_cfg["recipe"]["teacher_checkpoint"] = "x.pth"
-    args.model_family_cfg["recipe"]["teacher_config_path"] = "configs/ALFNet/rf_l3s.yaml"
-    with pytest.raises(ValueError, match="nothing to distil into"):
-        load_model_class(args.model)(args)
-
-
-@pytest.mark.parametrize("name", DISTILL)
-def test_distillation_yaml_differs_from_rt_only_in_the_teacher_keys(name):
-    allowed = ALLOWED | {
-        "family.recipe.lambda_kd", "family.recipe.teacher_checkpoint",
-        "family.recipe.teacher_config_path",
-    }
-    base = _flat(yaml.safe_load((ROOT / "configs/ALFNet/rt.yaml").read_text(encoding="utf-8")))
-    other = _flat(yaml.safe_load((ROOT / f"configs/ALFNet/{name}.yaml").read_text(encoding="utf-8")))
-    drift = {key for key in set(base) | set(other) if base.get(key) != other.get(key)}
-    assert drift <= allowed, f"{name}.yaml drifted on {sorted(drift - allowed)}"
-
-
-def test_teacher_follows_the_model_onto_its_device():
-    """Unregistered modules are skipped by .to(); the teacher must not be."""
-    _, model = build("kt")
-    assert next(model._teacher.parameters()).dtype == torch.float32
-    model = model.to(torch.float64)
-    assert next(model.parameters()).dtype == torch.float64
-    assert next(model._teacher.parameters()).dtype == torch.float64, (
-        "the teacher stayed behind when the model was converted"
-    )
-    if torch.cuda.is_available():
-        model = model.float().cuda()
-        assert next(model._teacher.parameters()).is_cuda
-
-
-def test_teacher_is_not_used_at_inference():
-    """The shipped model is the anchor plus the residual, nothing more."""
-    args, model = build("kt")
-    data = _batch(args, model)
-    model.eval()
-    with torch.no_grad():
-        out = model(data["adj"], data["x"], data["tm"], None, None, data["dm"], 0)
-    assert out["distillation"] is None, "the teacher ran during inference"
-    model.train()
-    out = model(data["adj"], data["x"], data["tm"], None, data["dec"], data["dm"], 0)
-    assert out["distillation"] is not None
-
-
-def test_async_test_mode_does_not_need_the_teacher_checkpoint():
-    args = load_args_from_config("configs/ALFNet/kt.yaml", [])
-    args.device = "cpu"
-    args.test_for_async_lifecycle = True
-    args.model_family_cfg["recipe"]["teacher_checkpoint"] = "does/not/exist.pth"
     model = load_model_class(args.model)(args)
-    assert model._teacher is None and model.teacher_enabled is False
+
+    for attribute in ("_teacher", "lambda_kd", "teacher_provenance",
+                      "teacher_enabled", "_build_teacher"):
+        assert not hasattr(model, attribute), (
+            f"{config_path} built a model still carrying {attribute}"
+        )
+    assert not any("teacher" in key for key in model.state_dict()), (
+        "a teacher tensor reached the checkpoint"
+    )
+
+    nodes = len(model.known_nodes) if hasattr(model, "known_nodes") else 40
+    generator = torch.Generator().manual_seed(5)
+    adjacency = torch.rand(nodes, nodes, generator=generator)
+    x = torch.randn(2, args.input_len, nodes, args.enc_in, generator=generator)
+    tm = torch.rand(2, args.input_len, 3, generator=generator) * 5
+    dec = torch.randn(2, args.pred_len, nodes, args.c_out, generator=generator)
+    dm = torch.rand(2, args.pred_len, 3, generator=generator) * 5
+
+    # training mode is where the teacher used to run
+    model.train()
+    out = model(adjacency, x, tm, None, dec, dm, 0)
+    if isinstance(out, dict):
+        assert "distillation" not in out, "the forward still emits a distillation term"
+        prediction = out["pred"]
+    else:
+        prediction = out[0] if isinstance(out, tuple) else out
+    assert torch.isfinite(prediction).all()
+
+
+def test_alfnet_refuses_a_recipe_that_still_asks_for_distillation():
+    """A stale YAML must fail loudly, not silently train single-stage anyway."""
+    for key, value in (
+        ("lambda_kd", 1.0),
+        ("teacher_checkpoint", "some/old/checkpoint.pth"),
+        ("teacher_config_path", "configs/ALFNet/rf_l3s.yaml"),
+    ):
+        args = load_args_from_config("configs/ALFNet/fg1.yaml", [])
+        args.device = "cpu"
+        args.model_family_cfg["recipe"][key] = value
+        with pytest.raises(ValueError, match="distillation was removed"):
+            load_model_class(args.model)(args)

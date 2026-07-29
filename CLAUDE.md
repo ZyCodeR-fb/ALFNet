@@ -40,6 +40,10 @@ conda run -n COMG python -m pytest "tests/test_abcd_switches.py::test_combined_s
 
 `references/` holds vendored third-party source and is **not** collected by pytest — never add it.
 
+**Tests must be self-contained.** No test may depend on a checkpoint or result directory outside the
+working tree. Seven teacher tests used to load a checkpoint from `run_v5/` and broke the moment that
+gitignored tree was cleaned up; build fixtures in `tmp_path`, or assert absence behaviourally.
+
 Training and evaluation both go through `main.py`:
 
 ```bash
@@ -161,8 +165,12 @@ separate `+LC` name, never as the published baseline.
 
 Behaviour is selected by `family.recipe` keys, all optional and all defaulting to the historical path:
 `fusion_mode` (`residual_gate` | `film`), `evidence_router`, `observed_nlinear`, `temporal_residual`
-(`none`|`tcn`|`dlinear`), `lambda_kd` + `teacher_checkpoint`, `freeze_anchor`. Patch-side switches live in
-the ALFTemporal YAML: `spatial_tokenizer`, `mixer`, `use_timefilter`, `emit`.
+(`none`|`tcn`|`dlinear`), `companion_loss_weight`, `freeze_anchor`. Patch-side switches live in the
+ALFTemporal YAML: `spatial_tokenizer`, `mixer`, `use_timefilter`, `emit`.
+
+`ProtectedTemporalResidual` (`layers/protected_residual.py`) is **shared**, not distillation-specific: the
+frozen ablations `rt/rd/rtg` and the end-to-end candidate `jr` all use it, and `companion_loss_weight` /
+`freeze_anchor` are theirs. Only the teacher was removed.
 
 Two invariants worth knowing before editing:
 
@@ -212,9 +220,15 @@ misses are Join MAE, Warm MAE, Ready MAE, Ready RMSE — all on the join track, 
 their own history. The paired-bootstrap significance for this pair lives on the server; the local
 `reports/paired_bootstrap/` copy is from an older model pair and an older protocol, so do not quote it.
 
-`kt` reaches **35/36** (only Ready RMSE missing) but distils from the retired `rf_l3s`/A2 teacher into a
-frozen two-stage schedule with 15,317 trainable parameters. It violates the end-to-end constraint and is
-an **upper bound, not a deliverable**.
+`kt` reached **35/36** (only Ready RMSE missing) by distilling the retired `rf_l3s`/A2 teacher into a frozen
+two-stage schedule with 15,317 trainable parameters. That violates the end-to-end constraint, so it is a
+**recorded upper bound and not an active path**: the numbers stay in `outputs/ALFNet/kt-s32`, and the code,
+configs and teacher checkpoint are gone. ALFNet now *raises* on `lambda_kd`, `teacher_checkpoint` or
+`teacher_config_path` rather than ignoring them, so a stale YAML cannot reintroduce a two-stage run under a
+mainline name. Do not reintroduce distillation to chase 36/36, and do not reconstruct the teacher.
+
+Unrelated but easy to confuse: `ALFGraph`'s `teacher_forcing_ratio` is DCRNN scheduled sampling and has
+nothing to do with distillation. Leave it alone.
 
 Candidates that have been run and did not improve `fg1` on validation S+J+F: `a b c d` (and combinations),
 the frozen label-residual family `rt rd rtg`, and the training-objective knobs `tq wg tw` (tail weight,

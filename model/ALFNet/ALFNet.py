@@ -6,11 +6,6 @@ import torch
 import torch.nn as nn
 
 from args import load_args_from_config
-from layers.teacher_gap import (
-    FrozenTeacher,
-    checkpoint_fingerprint,
-    distillation_loss,
-)
 from layers.protected_residual import (
     ProtectedTemporalResidual,
     companion_residual_loss,
@@ -31,7 +26,9 @@ from utils.model_output import unpack_model_output
 _RNG_OFFSET_EVIDENCE_ROUTER = 10_007
 _RNG_OFFSET_OBSERVED_NLINEAR = 20_011
 _RNG_OFFSET_PROTECTED_RESIDUAL = 30_013
-_RNG_OFFSET_TEACHER = 40_009
+# 40_009 was _RNG_OFFSET_TEACHER. The offsets are fixed per module rather than
+# enumerated, so retiring one does not move any other module's initialisation;
+# leaving the value unused keeps that true if something is ever added here.
 
 
 @contextlib.contextmanager
@@ -395,28 +392,22 @@ class Model(nn.Module):
                 )
         self.last_residual_diagnostics = None
         self._last_encoder_state = None
-        # K: a frozen teacher supplies a *model-difference* target. Built last
-        # and kept out of the module tree's parameter accounting via a plain
-        # attribute so it never enters state_dict or the optimizer.
-        self.lambda_kd = float(recipe.get("lambda_kd", 0.0))
-        teacher_checkpoint = recipe.get("teacher_checkpoint") or ""
-        if self.lambda_kd > 0 and not teacher_checkpoint:
-            raise ValueError("lambda_kd > 0 needs recipe.teacher_checkpoint")
-        if teacher_checkpoint and self.temporal_residual is None:
+        # Distillation (K) is gone. The deliverable is trained from random
+        # initialisation in one stage, and a teacher makes that impossible: it
+        # needs a second trained model on disk and a frozen schedule around it.
+        # `kt` reached 35/36 that way and is kept only as a recorded upper
+        # bound. Rejecting the keys rather than ignoring them means a stale YAML
+        # cannot quietly reintroduce a two-stage path under a mainline name.
+        retired_distillation = [
+            key for key in ("lambda_kd", "teacher_checkpoint", "teacher_config_path")
+            if recipe.get(key)
+        ]
+        if retired_distillation:
             raise ValueError(
-                "a teacher without a residual has nothing to distil into; "
-                "set recipe.temporal_residual first"
+                f"distillation was removed; recipe still sets {retired_distillation}. "
+                "The deliverable is single-stage and end-to-end -- train the "
+                "residual jointly (see configs/ALFNet/jr.yaml) instead."
             )
-        object.__setattr__(self, "_teacher", None)
-        self.teacher_provenance = None
-        # The teacher is a *training* device. The shipped model is the anchor
-        # plus the residual, so the async test path must neither pay for it nor
-        # require the checkpoint file to exist.
-        self.teacher_enabled = not bool(getattr(configs, "test_for_async_lifecycle", False))
-        if teacher_checkpoint and self.teacher_enabled:
-            self._build_teacher(configs, recipe, teacher_checkpoint)
-        elif teacher_checkpoint:
-            print("-> Teacher skipped: inference does not use it")
 
         self.fault_residual_scale = float(recipe.get("fault_residual_scale", 0.0))
         if self.fault_residual_scale and not self.film_fusion:
@@ -525,46 +516,6 @@ class Model(nn.Module):
             torch.cat([last_availability, last_age, visibility], dim=-1)
         )
         return state, last_availability
-
-    def _apply(self, fn, recurse=True):
-        """Keep the unregistered teacher on the same device as everything else.
-
-        The teacher is deliberately not a registered submodule -- that keeps it
-        out of state_dict and out of the parameter count -- but that also means
-        `.to(device)` skips it, and the first forward then mixes a CUDA input
-        with CPU weights.
-        """
-        result = super()._apply(fn) if recurse is True else super()._apply(fn, recurse)
-        teacher = self.__dict__.get("_teacher")
-        if teacher is not None:
-            teacher._apply(fn)
-        return result
-
-    def _build_teacher(self, configs, recipe, checkpoint_path):
-        """Load A2 from its own config, frozen, and check it shares our protocol."""
-        provenance = checkpoint_fingerprint(checkpoint_path)
-        teacher_config = recipe.get("teacher_config_path")
-        if not teacher_config:
-            raise ValueError("recipe.teacher_checkpoint needs recipe.teacher_config_path")
-        teacher_args = load_args_from_config(
-            teacher_config, overrides={"device": str(configs.device)}
-        )
-        module = importlib.import_module(
-            f"model.{_expert_module_name(teacher_args.model)}"
-        )
-        teacher_model = module.Model(teacher_args).float()
-        payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-        teacher_model.load_state_dict(payload["state_dict"])
-        required = getattr(configs, "training_protocol_hash", None)
-        with _isolated_rng(configs.seed, _RNG_OFFSET_TEACHER):
-            teacher = FrozenTeacher(teacher_model, provenance, required)
-        object.__setattr__(self, "_teacher", teacher)
-        self.teacher_provenance = teacher.provenance
-        print(f"-> Teacher loaded from {checkpoint_path}")
-        print(
-            f"   sha256={provenance['sha256'][:16]} "
-            f"protocol={str(provenance['training_protocol_hash'])[:16]}"
-        )
 
     def _build_evidence_modules(self, gate_hidden_dim, recipe):
         """C's modules. Called inside a forked RNG so the switch is isolating."""
@@ -780,23 +731,7 @@ class Model(nn.Module):
                 prediction, extras = self._protected_residual(
                     y_graph, x_enc, adjacency, last_availability
                 )
-                distillation = None
-                # Only while learning: at eval the forecast is the anchor plus
-                # the residual and nothing else is computed.
-                if self.training and self._teacher is not None and self.lambda_kd > 0:
-                    distillation = {
-                        # The supervised quantity is the residual that is
-                        # actually added, not the head's raw output.
-                        "residual": extras["residual"],
-                        "gate": extras["gate"],
-                        "anchor": y_graph.detach(),
-                        "teacher": self._teacher(
-                            adjacency, x_enc, x_t_mark, pos_mark, dec_t_mark, epoch
-                        ),
-                        "weight": self.lambda_kd,
-                    }
                 return {
-                    "distillation": distillation,
                     "pred": prediction,
                     "aux_losses": expert_aux_losses,
                     "forecast_loss_mode": "role_balanced_mix",
