@@ -119,6 +119,26 @@ class Model(nn.Module):
         self.ori_parts_idx = ori_parts_idx
         self.reo_parts_idx = reo_parts_idx
         self.reo_all_idx = reo_all_idx
+        # `_reorder_data` only *pads* a KD-tree part up to spa_patchsize; it
+        # never splits one. So a patch size smaller than the largest part
+        # silently produces the wrong token count, and the model builds fine and
+        # then fails deep inside WindowAttBlock's reshape. Porting to a second
+        # dataset is exactly when that happens -- PEMS-BAY's 325 nodes give
+        # parts of 10-11 where METR-LA's 207 give 6-7 -- so check it here, where
+        # the message can name the value to put in the YAML.
+        expected_tokens = int(spa_patchnum) * int(model_cfg["spa_patchsize"])
+        if len(reo_all_idx) != expected_tokens:
+            largest = max(
+                len(part) for part in _kd_tree(positions.T, int(model_cfg["recur_times"]), 0)
+            )
+            raise ValueError(
+                f"spa_patchsize={model_cfg['spa_patchsize']} cannot hold this "
+                f"dataset's KD-tree partition: {self.full_num_nodes} nodes split "
+                f"into {spa_patchnum} parts of up to {largest}. Set "
+                f"spa_patchsize >= {largest} (the convention in these configs is "
+                f"largest + 1, so that every part is padded with at least one "
+                f"neighbour, as METR-LA's 7 -> 8)."
+            )
 
         tem_patchsize = int(model_cfg["tem_patchsize"])
         tem_patchnum = int(model_cfg["tem_patchnum"])

@@ -26,7 +26,13 @@ from model.regist_model import load_model_class
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# The stage-two family: anchor frozen, residual supervised directly.
 VARIANTS = ["rt", "rd", "rtg"]
+# JR is the same module wired for the deliverable: joint, single stage, no
+# companion term. The structural contracts below hold for both families; the
+# freezing contracts hold only for VARIANTS.
+END_TO_END = ["jr"]
+ALL_RESIDUAL = VARIANTS + END_TO_END
 ROLE_AAS, ROLE_NAS, ROLE_VS, ROLE_FS = 0, 1, 2, 3
 
 
@@ -96,7 +102,7 @@ def test_dlinear_decomposition_splits_trend_and_seasonal():
 # --- an untrained residual reproduces the anchor exactly ---------------------
 
 
-@pytest.mark.parametrize("name", VARIANTS)
+@pytest.mark.parametrize("name", ALL_RESIDUAL)
 def test_untrained_residual_reproduces_fg1(name):
     args, model = build(name)
     _, anchor = build("fg1")
@@ -115,7 +121,7 @@ def test_untrained_residual_reproduces_fg1(name):
     )
 
 
-@pytest.mark.parametrize("name", VARIANTS)
+@pytest.mark.parametrize("name", ALL_RESIDUAL)
 def test_residual_adds_only_its_own_parameters(name):
     _, plain = build("fg1")
     _, model = build(name)
@@ -153,7 +159,7 @@ def test_gate_is_exactly_zero_without_own_history():
     assert float(open_gate.max()) > 0.0
 
 
-@pytest.mark.parametrize("name", ["rt", "rd"])
+@pytest.mark.parametrize("name", ["rt", "rd", "jr"])
 def test_zero_history_nodes_keep_the_anchor_bit_for_bit(name):
     args, model = build(name)
     _amplify(model.temporal_residual)
@@ -174,7 +180,7 @@ def test_zero_history_nodes_keep_the_anchor_bit_for_bit(name):
     )
 
 
-@pytest.mark.parametrize("name", ["rt", "rd"])
+@pytest.mark.parametrize("name", ["rt", "rd", "jr"])
 def test_nodes_with_history_do_receive_a_correction(name):
     args, model = build(name)
     _amplify(model.temporal_residual)
@@ -282,7 +288,7 @@ def test_frozen_anchor_does_not_move_under_optimisation(name):
     assert moved > 0, "the residual did not train"
 
 
-@pytest.mark.parametrize("name", VARIANTS)
+@pytest.mark.parametrize("name", ALL_RESIDUAL)
 def test_variant_forwards_and_backwards(name):
     args, model = build(name)
     data = _batch(args, model)
@@ -348,7 +354,89 @@ ALLOWED = {
 }
 
 
-@pytest.mark.parametrize("name", VARIANTS)
+# --- JR: the same residual, wired for the deliverable ------------------------
+#
+# The deliverable must be trainable from random initialisation in one stage.
+# rt/rd/rtg and kt/kd all fail that: they freeze the anchor and need either a
+# companion target or a teacher checkpoint. JR removes both devices, so these
+# tests check the *absence* of every stage-two mechanism, not just that the
+# forward pass runs.
+
+
+def test_jr_carries_no_stage_two_mechanism():
+    _, model = build("jr")
+    assert model.temporal_residual is not None
+    assert model.freeze_anchor is False, "JR must not freeze the anchor"
+    assert model.companion_loss_weight == 0.0, "JR must not use direct supervision"
+    assert model.lambda_kd == 0.0 and model._teacher is None, "JR must not use a teacher"
+
+
+def test_jr_yaml_loads_no_pretrained_expert():
+    """The experts must be built from scratch, not restored from fg1/A2."""
+    config = yaml.safe_load((ROOT / "configs/ALFNet/jr.yaml").read_text(encoding="utf-8"))
+    recipe = config["family"]["recipe"]
+    assert "teacher_checkpoint" not in recipe and "teacher_config_path" not in recipe
+    for expert in config["family"]["experts"].values():
+        assert expert["load_checkpoint"] is False
+        assert not expert["checkpoint_path"]
+
+
+def test_jr_differs_from_rt_only_in_the_two_stage_switches():
+    """Pin the claim in jr.yaml: nothing else was retuned along the way.
+
+    If a later edit moves residual_lr or the kernel size as well, the run stops
+    being an isolated test of "joint instead of frozen" and this fails.
+    """
+    left = _flat(yaml.safe_load((ROOT / "configs/ALFNet/rt.yaml").read_text(encoding="utf-8")))
+    right = _flat(yaml.safe_load((ROOT / "configs/ALFNet/jr.yaml").read_text(encoding="utf-8")))
+    drift = {key for key in set(left) | set(right) if left.get(key) != right.get(key)}
+    assert drift == {
+        "runtime.model_variant",
+        "family.recipe.companion_loss_weight",
+        "family.recipe.freeze_anchor",
+    }, sorted(drift)
+
+
+def test_jr_emits_a_zero_weight_companion_term():
+    """weight 0 is what makes `inductive_epoch` skip the companion loss."""
+    args, model = build("jr")
+    model.train()
+    data = _batch(args, model)
+    out = model(data["adj"], data["x"], data["tm"], None, data["dec"], data["dm"], 0)
+    assert float(out["companion_residual"]["weight"]) == 0.0
+    assert out["distillation"] is None
+
+
+def test_jr_trains_the_anchor_and_the_residual_together():
+    """The joint counterpart of the frozen test: both sides must move.
+
+    Under the plain forecast loss alone -- no companion term, no teacher -- the
+    residual has to pick up gradient through the sum, and the anchor must keep
+    training. If either side is static the run is not the end-to-end candidate.
+    """
+    args, model = build("jr")
+    assert all(p.requires_grad for p in model.parameters())
+    before = {n: p.detach().clone() for n, p in model.named_parameters()}
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-2)
+    data = _batch(args, model)
+    model.train()
+    for _ in range(5):
+        opt.zero_grad(set_to_none=True)
+        out = model(data["adj"], data["x"], data["tm"], None, data["dec"], data["dm"], 0)
+        (out["pred"] - data["dec"]).pow(2).mean().backward()
+        opt.step()
+    current = dict(model.named_parameters())
+    moved = {
+        name: float((current[name].detach() - value).abs().max())
+        for name, value in before.items()
+    }
+    residual_moved = max(v for n, v in moved.items() if n.startswith("temporal_residual."))
+    anchor_moved = max(v for n, v in moved.items() if not n.startswith("temporal_residual."))
+    assert residual_moved > 0, "the residual received no gradient from the forecast loss"
+    assert anchor_moved > 0, "the anchor did not train -- this is not joint training"
+
+
+@pytest.mark.parametrize("name", ALL_RESIDUAL)
 def test_variant_yaml_differs_from_fg1_only_in_the_residual_switch(name):
     base = _flat(yaml.safe_load((ROOT / "configs/ALFNet/fg1.yaml").read_text(encoding="utf-8")))
     other = _flat(yaml.safe_load((ROOT / f"configs/ALFNet/{name}.yaml").read_text(encoding="utf-8")))

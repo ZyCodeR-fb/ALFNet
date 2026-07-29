@@ -70,8 +70,19 @@ ALFNET_VARIANTS = {
         # Training-only switches chosen from the diagnostics: tail (T),
         # worst-cell (W), and both.
         "tq", "wg", "tw",
+        # JR: the same protected residual as R, but joint, single-stage and
+        # from random init -- the only form that satisfies the deliverable
+        # constraint. Differs from rt in exactly two recipe keys.
+        "jr",
     )},
+    # Cross-dataset confirmation. Not a variant: same model, second dataset.
+    "fg1_bay": "fg1_bay",
 }
+
+# The comparison baselines carry one config per dataset, and nothing else.
+# METR-LA is required; PEMS-BAY appears as models are ported to the second
+# dataset, so it is allowed but not yet mandatory.
+BASELINE_CONFIGS = {"METRLA_lcbt_v3.yaml", "PEMSBAY_lcbt_v3.yaml"}
 
 
 def test_streamlined_yaml_surface_has_one_alfnet_mainline():
@@ -90,19 +101,21 @@ def test_streamlined_yaml_surface_has_one_alfnet_mainline():
         assert len(variant) <= 8
 
     for model in COMPARISON_MODELS:
-        config_paths = [
+        config_paths = sorted(
             path.name for path in (ROOT / "configs" / model).glob("*.yaml")
-        ]
-        assert config_paths == ["METRLA_lcbt_v3.yaml"]
-        args = load_args_from_config(
-            str(ROOT / "configs" / model / config_paths[0]),
-            overrides={"device": "cpu"},
         )
-        assert args.model == model
-        assert args.lifecycle_training_strategy == "lcbt_v3"
-        assert args.stop_based == "val_lifecycle"
-        assert args.lce_protocol_version == 3
-        assert args.ples_protocol_version == 3
+        assert "METRLA_lcbt_v3.yaml" in config_paths, model
+        assert set(config_paths) <= BASELINE_CONFIGS, (model, config_paths)
+        for config_path in config_paths:
+            args = load_args_from_config(
+                str(ROOT / "configs" / model / config_path),
+                overrides={"device": "cpu"},
+            )
+            assert args.model == model
+            assert args.lifecycle_training_strategy == "lcbt_v3"
+            assert args.stop_based == "val_lifecycle"
+            assert args.lce_protocol_version == 3
+            assert args.ples_protocol_version == 3
 
 
 def test_alfnet_contains_one_shared_grin_and_no_graph_local_grin():

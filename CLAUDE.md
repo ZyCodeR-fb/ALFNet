@@ -107,6 +107,24 @@ Unseen/Steady/Join/Fault, with worst-group MAE as the tie-break. It is part of t
 not change it, and never change grouping, weighting, aggregation or checkpoint rules on the basis of a
 test result.
 
+## Porting to a second dataset
+
+The loaders are dataset-generic: boundaries, hashes, node counts, unseen strata and cohort sizes are all
+derived from the payload (`lcbt_protocol.py`), and `PEMSBAY` is already a valid `--dloader_name`. So a
+second dataset is a config job, and its configs must be *twins* — identical outside the `dataset:` block,
+because a confirmation dataset proves nothing if capacity or learning rates were retuned for it.
+`tests/test_pemsbay_configs.py` enforces that.
+
+PEMS-BAY files: `configs/ALFNet/fg1_bay.yaml`, `configs/ALFGraph/PEMSBAY_alfgraph_k1.yaml`,
+`configs/ALFTemporal/PEMSBAY_cond1.yaml`, `configs/MoGERNN/PEMSBAY_lcbt_v3.yaml`.
+
+One value is genuinely dataset-dependent and is **geometry, not tuning**: ALFTemporal's `spa_patchsize`.
+`_reorder_data` pads a KD-tree part up to the patch size but never splits one, so the patch must hold the
+largest part. At `recur_times: 5` METR-LA's 207 nodes give parts of 6–7 and PEMS-BAY's 325 give 10–11; the
+convention is **largest part + 1** (so every part gets at least one augmented neighbour), which is 8 and 12
+respectively. ALFTemporal now raises at construction with the required value; before that it built fine and
+failed inside `WindowAttBlock`'s reshape.
+
 ## Input contract (fairness rule)
 
 Every model receives the same 7-channel tensor: `[raw, role×4, age, obs_mask]` (built by
