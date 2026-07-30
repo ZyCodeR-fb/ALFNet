@@ -70,6 +70,14 @@ predictions,manifests,logs,reports,figures,profiles}`. When it is set, `train.py
 appending `exp_id` again — the run folder already identifies the run, and `exp_id` is ~176 characters.
 Without it the legacy flat layout (`check_points/`, `predictions/`, …) applies.
 
+`utils/run_logger.py` tees stdout **and** stderr into `<run>/logs/{train,test_async}_<timestamp>.log`,
+installed by `main.py` before anything prints. This matters beyond convenience: the per-epoch lifecycle
+group numbers exist *only* on stdout — `training_summary.json` keeps the aggregated
+`validation_group_volatility` and discards the curve it came from — so without the log the single most
+useful diagnostic is unrecoverable once the terminal closes. It tees rather than redirects, so a tmux
+session still shows progress, and the timestamped name stops a later `test_async` run from truncating the
+training log that explains it.
+
 Everything result-shaped is gitignored. Git carries only source, YAML, scripts and tests. Old scattered
 result directories (`run_v5/`, `_smoke/`, `outputs/`) stay on disk but must never re-enter the index.
 
@@ -251,13 +259,24 @@ recorded here. Two operating rules do follow from it and are stable:
   point of the experiment. A real consequence to state in the paper rather than fix: the twins inherit
   hyper-parameters selected on METR-LA, so a transfer gap is partly a hyper-parameter transfer gap.
 
-The diagnostic worth knowing before touching the conditioner: on METR-LA `fg1`'s validation Join MAE falls
-~0.99 from `k1` to `k12`, i.e. the conditioner uses accumulating own-history. On PEMS-BAY the same curve is
-**flat** (+0.03) while source-native MoGERNN's falls 0.28 — and `fg1bay` early-stopped with its best
-checkpoint at epoch 4 of 14, against MoGERNN's epoch 25 of 35. Whether that is under-training plus the
-equal-weight `val_lifecycle` rule locking in an early Unseen minimum, or the conditioner genuinely failing
-at 325 nodes, is unresolved; `train.py` keeps the per-epoch group curve in `validation_group_history` but
-only writes the aggregated volatility, so answering it needs the run's stdout log.
+**The conditioner does not respond to accumulating own-history on PEMS-BAY, and this is settled.** On
+METR-LA `fg1`'s validation Join MAE falls ~0.99 from `k1` to `k12`; on PEMS-BAY the slope is flat or
+inverted at **every epoch** (−0.12, −0.41, then +0.06/+0.03/+0.01/−0.02/… through epoch 14) while
+source-native MoGERNN holds −0.25 to −0.75 throughout. Two things this rules out, so nobody re-litigates
+them:
+
+* **Not under-training.** The response was never present after epoch 2, so training longer cannot recover
+  something that never existed; Join also degrades monotonically after the epoch-4 checkpoint.
+* **Not the checkpoint rule.** Re-selecting each run's best epoch by S+J+F instead of `val_lifecycle`
+  moves `fg1bay` from 2.4564 to 2.4253 and `mgbay` from 2.4151 to 2.4058 — MoGERNN still wins. The frozen
+  rule costs `fg1bay` ~0.031 and is not the explanation. Do not change it on this basis.
+
+What replicates across both datasets is narrower than the METR-LA headline. Per-phase, `fg1` beats MoGERNN
+on **Cold** (−0.135 METR-LA, −0.226 PEMS-BAY) and **Outage** (−1.537, −0.230) on both, and loses **Warm**
+(+0.046, +0.048) and **Ready** (+0.031, +0.083) on both at near-identical magnitude — the same four cells
+that miss on METR-LA. The weakness reproduces at full size; the fault-track strength shrinks ~6×, and
+METR-LA's Unseen advantage inverts (+0.348). So the join-track weakness is not a PEMS-BAY problem, it is a
+standing property of the architecture that METR-LA's large fault-track margin used to cover.
 
 ## Housekeeping
 
