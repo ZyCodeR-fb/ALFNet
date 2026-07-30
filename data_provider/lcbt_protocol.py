@@ -10,8 +10,20 @@ from data_provider.calendar_strata import (
 )
 
 
-LCBT_PROTOCOL_NAME = "Lifecycle Coverage-Balanced Training v3.1"
-LCBT_PROTOCOL_VERSION = 4
+LCBT_PROTOCOL_NAME = "Lifecycle Coverage-Balanced Training v3.2"
+# 5: the evidence-length quota. v3.1 allocated k=1..L inside each
+# (scenario, calendar regime) cell independently, and `_allocate_counts` breaks
+# its remainder ties by index -- with uniform weights every fractional part ties,
+# so every cell handed its leftovers to the smallest k. Simulated over twenty
+# realistic cells the counts ran monotonically 377 at k=1 down to 357 at k=12,
+# a construction-level tilt rather than sampling noise, against a manifest that
+# declares `event_evidence_distribution: uniform_k=1..L`.
+#
+# The tilt biased no reported number -- LCE aggregates `mean_k(Join)`, a mean of
+# per-k means, which unequal counts do not distort -- so this is an
+# implementation/manifest inconsistency, not a wrong metric. LCE and PLES are
+# unchanged and stay at version 3.
+LCBT_PROTOCOL_VERSION = 5
 LCBT_PHASES = ("Cold", "Warm", "Ready", "Onset", "Decay", "Outage")
 LCBT_GROUPS = ("zero_history", "steady", "join", "fault")
 

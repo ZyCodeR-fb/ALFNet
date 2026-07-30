@@ -493,7 +493,8 @@ def build_protocol_manifest(
     large_event_cohorts = [c for c in cohorts if c["table"] == "large_event"]
     manifest = {
         "schema_version": 3,
-        "protocol": "LCBT v3.1 + LCE v3 + PLES v3",
+        # The three version independently: only LCBT changed, so only it moved.
+        "protocol": "LCBT v3.2 + LCE v3 + PLES v3",
         "dataset": dataset_record,
         "nodes": {
             "known": known_nodes,

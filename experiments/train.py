@@ -335,6 +335,17 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
         "training_protocol_hash",
         None,
     )
+    # The evaluation hashes travel in the same manifest. Recording them on the
+    # training checkpoint means a later test_async run is checked against the
+    # LCE/PLES definitions the weights were produced under, not only the LCBT
+    # one; without this they were written as None and silently unverified.
+    manifest = (
+        data_loaders["train"].dataset.get_protocol_manifest()
+        if hasattr(data_loaders["train"].dataset, "get_protocol_manifest")
+        else {}
+    )
+    for name in ("lce_protocol_hash", "ples_protocol_hash"):
+        setattr(args, name, manifest.get(name))
     print(f"-> Start {args.lifecycle_training_strategy} training...")
 
     wait_count = 0
