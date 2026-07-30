@@ -9,6 +9,8 @@ import time
 
 import torch
 
+from layers.structural_node_encoder import structural_fingerprints
+
 from .inductive_epoch import shared_step
 
 
@@ -83,6 +85,10 @@ def _save_checkpoint(model, optimizer, args, epoch, lifecycle_metrics):
                 "model_variant": args.model_variant,
                 "router_mode": _router_mode(args),
                 "resolved_config_hash": _resolved_config_hash(args),
+                # The graph the structural encoders were built from. Two
+                # datasets with the same node count give shape-compatible
+                # state dicts, so nothing else would catch a mismatch.
+                "structural_fingerprints": structural_fingerprints(model),
                 # Also kept at the payload top level for backwards
                 # compatibility; the readers look here.
                 "training_protocol_hash": args.training_protocol_hash,

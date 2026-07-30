@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 
-from lib.utils import load_project_adjacency
+from lib.utils import load_project_adjacency, load_project_positions
 from model.comparison_model.family_utils import build_stbp_cfg
 from .stbp import STBP_Model
 
@@ -33,8 +33,14 @@ class Model(nn.Module):
             model=self.cfg["model"],
             logger=_SilentLogger(),
         )
-        self.backbone = STBP_Model(self.model_args)
+        # Registered before the backbone: its structural encoder reads the graph
+        # at construction time.
         self.register_buffer("full_adj", load_project_adjacency({"data_path": configs.data_path}), persistent=False)
+        self.backbone = STBP_Model(
+            self.model_args,
+            adjacency=self.full_adj,
+            positions=load_project_positions({"data_path": configs.data_path}),
+        )
 
     def _resolve_current_node_ids(self, current_num_nodes):
         if current_num_nodes == len(self.known_nodes):

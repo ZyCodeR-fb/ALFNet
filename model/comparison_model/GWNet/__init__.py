@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from lib.utils import load_project_adjacency
+from lib.utils import load_project_adjacency, load_project_positions
 from model.comparison_model.family_utils import build_gwnet_cfg, normalize_adj_mx, source_native_input
 from .gwnet import GWNET as GWNETBackbone
 
@@ -30,6 +30,8 @@ class Model(nn.Module):
             horizon=self.cfg["horizon"],
             supports=supports,
             adp_adj=model_cfg["adp_adj"],
+            adjacency=full_adj,
+            positions=load_project_positions({"data_path": configs.data_path}),
             dropout=model_cfg["dropout"],
             residual_channels=model_cfg["residual_channels"],
             dilation_channels=model_cfg["dilation_channels"],

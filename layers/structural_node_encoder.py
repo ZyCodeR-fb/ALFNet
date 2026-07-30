@@ -40,6 +40,8 @@ Lifecycle features are deliberately absent. They are ALFNet's method inputs and
 must not leak into a baseline's node representation.
 """
 
+import hashlib
+
 import torch
 from torch import nn
 
@@ -50,6 +52,27 @@ STRUCTURAL_FEATURE_NAMES = (
     "log_total_degree", "isolated",
 )
 STRUCTURAL_FEATURE_DIM = len(STRUCTURAL_FEATURE_NAMES)
+DEFAULT_HIDDEN_DIM = 64
+
+
+def _fingerprint(features):
+    """A stable scalar digest of the structural features.
+
+    Stored as a buffer so it travels in the checkpoint and can be compared on
+    load. It is a digest of the *derived* features rather than of the raw
+    adjacency, because those are exactly what the encoder consumes.
+    """
+    payload = features.detach().cpu().double().contiguous().numpy().tobytes()
+    return float(int(hashlib.sha256(payload).hexdigest()[:12], 16))
+
+
+def structural_fingerprints(model):
+    """{module path: fingerprint} for every structural encoder in a model."""
+    return {
+        name: float(module.structure_fingerprint)
+        for name, module in model.named_modules()
+        if isinstance(module, StructuralNodeEncoder)
+    }
 
 
 def _normalise(values):
@@ -126,9 +149,22 @@ class StructuralNodeEncoder(nn.Module):
         # optimiser may touch. Persistent so a checkpoint records the geometry
         # it was trained on.
         self.register_buffer("features", features)
+        # Provenance. Two datasets with the same node count produce different
+        # structure, and a checkpoint trained on one must not load against the
+        # other -- the shapes match, so nothing else would notice.
+        self.register_buffer(
+            "structure_fingerprint",
+            torch.tensor(_fingerprint(features), dtype=torch.float64),
+            persistent=True,
+        )
         self.num_nodes = int(features.shape[0])
         self.out_dim = int(out_dim)
-        hidden_dim = int(hidden_dim or max(2 * self.out_dim, STRUCTURAL_FEATURE_DIM * 2))
+        # Fixed, not a multiple of out_dim: the input is seven numbers, so the
+        # bottleneck is the input side and widening the hidden layer only buys
+        # parameters. Scaling with out_dim was measurably wrong -- at STBP's
+        # out_dim=576 it produced a 673k-parameter encoder replacing a 119k
+        # bank, i.e. the fix cost five times what it removed.
+        hidden_dim = int(hidden_dim or DEFAULT_HIDDEN_DIM)
         self.mlp = nn.Sequential(
             nn.Linear(STRUCTURAL_FEATURE_DIM, hidden_dim),
             nn.ReLU(),

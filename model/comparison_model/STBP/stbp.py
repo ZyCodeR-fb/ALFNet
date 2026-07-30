@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from layers.structural_node_encoder import StructuralNodeEncoder
 
 
 class LayerNorm(nn.Module):
@@ -172,8 +173,13 @@ class FreNetwork(nn.Module):
     
 class STBP_Model(nn.Module):
     """Some Information about EAC_Model"""
-    def __init__(self, args):
+    def __init__(self, args, adjacency=None, positions=None):
         super(STBP_Model, self).__init__()
+        if adjacency is None:
+            raise ValueError(
+                "STBP's node patterns are derived from the frozen graph; "
+                "pass `adjacency`."
+            )
         self.args = args
         self.dropout = args.dropout
         
@@ -187,7 +193,15 @@ class STBP_Model(nn.Module):
         self.fc = nn.Linear(args.model["out_channel"], args.y_len)
         self.activation = nn.GELU()
         
-        self.pattern_bank = nn.Parameter(torch.empty(args.base_node_size, args.model["hidden_channel"]*3).uniform_(-0.1, 0.1))
+        # Shared mapping over frozen structure instead of a per-node bank.
+        # `[base_node_size, 3 * hidden_channel]` indexed by node id hands
+        # held-out nodes trainable capacity, which the inductive split forbids.
+        # The dynamic `expand_adaptive_params` path went with it: an encoder
+        # derives an embedding for any node in the frozen graph, so there is
+        # nothing to grow.
+        self.pattern_encoder = StructuralNodeEncoder(
+            adjacency, positions, out_dim=args.model["hidden_channel"] * 3
+        )
         
         self.year = args.year
         self.num_nodes = args.base_node_size
@@ -198,19 +212,13 @@ class STBP_Model(nn.Module):
         self.args.logger.info(f"Total Parameters: {total_params}")
         self.args.logger.info(f"Trainable Parameters: {trainable_params}")
     
-    def expand_adaptive_params(self, new_num_nodes):
-        if new_num_nodes > self.num_nodes:
-            new_params = nn.Parameter(torch.empty(new_num_nodes - self.num_nodes, self.args.model["hidden_channel"]*3, dtype=self.pattern_bank.dtype, device=self.pattern_bank.device).uniform_(-0.1, 0.1))
-            self.pattern_bank = nn.Parameter(torch.cat([self.pattern_bank, new_params], dim=0))
-            self.num_nodes = new_num_nodes
-
     def forward(self, data, adj):
         N = adj.shape[0]
         x = data.x.reshape((-1, N, self.args.model["in_channel"]))  
         B, N, T = x.shape
         x = F.relu(self.fconv1(x))                              
 
-        adaptive_params = self.pattern_bank 
+        adaptive_params = self.pattern_encoder()
         
         node_emb = adaptive_params.unsqueeze(0).expand(B, *adaptive_params.shape).permute(0,2,1).unsqueeze(-1)  # [bs, N, feature]
         x = x.permute(0,2,1).unsqueeze(-1)

@@ -11,6 +11,7 @@ from torch import nn
 from args import apply_output_root, initialize_args
 from data_provider.data_factory import data_provider
 from experiments import async_lifecycle_inference, train_model
+from layers.structural_node_encoder import structural_fingerprints
 from model.regist_model import load_model_class
 from utils.evaluation import MSEPinballLoss, MultiPinBallLoss, SlitPhyLoss, masked_gaussian_nll_loss, rmse_loss
 from utils.logtool import print_config, print_header, print_train, set_wandb
@@ -201,6 +202,34 @@ def _validate_checkpoint_provenance(checkpoint, args):
         )
 
 
+def _validate_structural_fingerprints(checkpoint, model):
+    """The structural encoders must have been built from the same graph.
+
+    Two datasets with the same node count produce shape-compatible state dicts,
+    so a wrong-graph checkpoint loads silently without this.
+    """
+    config = checkpoint.get("config") or {}
+    recorded = config.get("structural_fingerprints")
+    if not recorded:
+        return
+    current = structural_fingerprints(model)
+    mismatches = [
+        f"{name}: checkpoint={recorded[name]} current={current.get(name)}"
+        for name in sorted(recorded)
+        if name in current and float(recorded[name]) != float(current[name])
+    ]
+    missing = sorted(set(recorded) - set(current))
+    if missing:
+        mismatches.append(f"encoders absent from this model: {missing}")
+    if mismatches:
+        raise ValueError(
+            "Checkpoint was built from a different graph: "
+            + "; ".join(mismatches)
+            + ". The node counts match, so the state dict loads -- but the "
+            "structural features it was trained against do not."
+        )
+
+
 def _current_router_mode(args):
     from experiments.train import _router_mode
 
@@ -263,6 +292,9 @@ def _load_model_state(model, loaded, args, validator, allow_new_modules=False):
     if not isinstance(loaded, dict) or "state_dict" not in loaded:
         raise TypeError("Checkpoint must be a state_dict payload produced by the LCBT v3 trainer")
     validator(loaded, args)
+    # Needs the built model, not just args: the fingerprints live on the
+    # encoders themselves.
+    _validate_structural_fingerprints(loaded, model)
     if not allow_new_modules:
         model.load_state_dict(loaded["state_dict"])
         return model

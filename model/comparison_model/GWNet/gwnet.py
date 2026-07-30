@@ -2,22 +2,37 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from model.comparison_model.base_model import BaseModel
+from layers.structural_node_encoder import StructuralNodeEncoder
 
 class GWNET(BaseModel):
     '''
     Reference code: https://github.com/nnzhan/Graph-WaveNet
     '''
     def __init__(self, supports, adp_adj, dropout, residual_channels, dilation_channels, \
-                 skip_channels, end_channels, kernel_size=2, blocks=4, layers=2, **args):
+                 skip_channels, end_channels, kernel_size=2, blocks=4, layers=2,
+                 adjacency=None, positions=None, **args):
         super(GWNET, self).__init__(**args)
         self.supports = supports
         self.supports_len = len(supports)
         self.adp_adj = adp_adj
         if adp_adj:
-            self.nodevec1 = nn.Parameter(torch.randn(self.node_num, 10), requires_grad=True)
-            self.nodevec2 = nn.Parameter(torch.randn(10, self.node_num), requires_grad=True)
+            # The source learns the adaptive adjacency as two node-id factors,
+            # `nodevec1 [N, 10]` and `nodevec2 [10, N]`. Both give held-out nodes
+            # trainable capacity, which this project's inductive split forbids.
+            #
+            # Two *independent* shared MLPs over the same frozen structural
+            # features produce the left and right factors instead. Independence
+            # is the point: one encoder reused on both sides would force
+            # `adp = softmax(relu(E E^T))`, a symmetric operator, and Graph
+            # WaveNet's adaptive adjacency is directed by construction.
+            if adjacency is None:
+                raise ValueError(
+                    "GWNET's adaptive adjacency needs the frozen graph to build "
+                    "its structural factors; pass `adjacency`."
+                )
+            self.nodevec_left = StructuralNodeEncoder(adjacency, positions, out_dim=10)
+            self.nodevec_right = StructuralNodeEncoder(adjacency, positions, out_dim=10)
             self.supports_len += 1
-        print('check supports length', len(supports), self.supports_len)
         
         self.dropout = dropout
         self.blocks = blocks
@@ -85,7 +100,7 @@ class GWNET(BaseModel):
             support_bank = supports
 
         if self.adp_adj:
-            adp = F.softmax(F.relu(torch.mm(self.nodevec1, self.nodevec2)), dim=1)
+            adp = F.softmax(F.relu(torch.mm(self.nodevec_left(), self.nodevec_right().t())), dim=1)
             if current_node_ids is not None:
                 adp = adp.index_select(0, node_index).index_select(1, node_index)
             new_supports = support_bank + [adp]
@@ -138,7 +153,7 @@ class GWNET(BaseModel):
         else:
             support_bank = supports
 
-        adp = F.softmax(F.relu(torch.mm(self.nodevec1, self.nodevec2)), dim=1)
+        adp = F.softmax(F.relu(torch.mm(self.nodevec_left(), self.nodevec_right().t())), dim=1)
         if current_node_ids is not None:
             adp = adp.index_select(0, node_index).index_select(1, node_index)
         new_supports = support_bank + [adp]
