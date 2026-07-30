@@ -29,6 +29,7 @@ from layers.structural_node_encoder import (
     StructuralNodeEncoder,
     build_structural_features,
     structural_fingerprints,
+    structure_digest,
 )
 from lib.utils import resolve_known_unknown_nodes
 from model.regist_model import load_model_class
@@ -350,6 +351,58 @@ def test_structure_fingerprint_separates_graphs_with_the_same_node_count():
     # to exist at all
     assert {k: v.shape for k, v in encoder_a.state_dict().items()} == \
            {k: v.shape for k, v in encoder_b.state_dict().items()}
+
+
+def test_rewiring_at_identical_degrees_and_coordinates_is_rejected():
+    """The collision the derived-features-only digest would have missed.
+
+    Both graphs are 4-cycles on the same coordinates, so every node has the same
+    weighted in-degree, out-degree and total degree, and the seven structural
+    features are bit-identical. Only the edge set differs. Hashing the features
+    alone gave the same fingerprint; hashing the adjacency too separates them.
+    """
+    positions = torch.tensor([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+    # cycle 0-1-2-3-0
+    first = torch.tensor([
+        [0.0, 1.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0, 0.0],
+    ])
+    # cycle 0-2-1-3-0: same degree sequence, same coordinates, different edges
+    second = torch.tensor([
+        [0.0, 0.0, 1.0, 1.0],
+        [0.0, 0.0, 1.0, 1.0],
+        [1.0, 1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0, 0.0],
+    ])
+    features_first = build_structural_features(first, positions)
+    features_second = build_structural_features(second, positions)
+    assert torch.allclose(features_first, features_second), (
+        "this test is only meaningful while the derived features collide"
+    )
+
+    torch.manual_seed(0)
+    encoder_first = StructuralNodeEncoder(first, positions, out_dim=8)
+    torch.manual_seed(0)
+    encoder_second = StructuralNodeEncoder(second, positions, out_dim=8)
+    assert encoder_first.structure_hash != encoder_second.structure_hash
+    assert float(encoder_first.structure_fingerprint) != float(
+        encoder_second.structure_fingerprint
+    )
+
+
+def test_structure_digest_covers_shape_and_dtype():
+    adjacency, positions = _graph(num_nodes=6, seed=4)
+    features = build_structural_features(adjacency, positions)
+    base = structure_digest(adjacency, positions, features)
+    # a different node count must not collide even if the values were a prefix
+    smaller, smaller_positions = _graph(num_nodes=5, seed=4)
+    assert base != structure_digest(
+        smaller, smaller_positions, build_structural_features(smaller, smaller_positions)
+    )
+    # and missing coordinates is a different graph description from having them
+    assert base != structure_digest(adjacency, None, features)
 
 
 def test_structure_fingerprint_is_stable_for_the_same_graph():

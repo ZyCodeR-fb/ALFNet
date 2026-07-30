@@ -254,6 +254,77 @@ def _select_clustered_nodes(hops, strata, exposure, rng, cohort_size, seed_strat
     return sorted(selected)
 
 
+def global_evidence_quota(total, input_len, rotation=0):
+    """A multiset of k=1..L whose per-k counts differ by at most one, globally.
+
+    The v3 schedule allocated k inside each (scenario, calendar regime) cell
+    independently. `_allocate_counts` breaks its remainder ties by index, so
+    every cell handed its leftovers to the smallest k, and the bias accumulated:
+    measured on METR-LA the Join counts ran 361 at k=1 down to 352 at k=12,
+    which is a systematic tilt towards short evidence rather than the uniform
+    coverage the protocol claims.
+
+    Here the quota is computed once for the whole scenario, and the remainder
+    walks a rotating offset so it does not always land on the same k.
+    """
+    total, input_len = int(total), int(input_len)
+    if input_len <= 0:
+        raise ValueError("input_len must be positive")
+    counts = np.full(input_len, total // input_len, dtype=np.int64)
+    remainder = total - int(counts.sum())
+    for step in range(remainder):
+        counts[(int(rotation) + step) % input_len] += 1
+    values = []
+    for index, count in enumerate(counts):
+        values.extend([index + 1] * int(count))
+    return np.asarray(values, dtype=np.int64)
+
+
+def assign_global_evidence(indices_by_regime, input_len, rng, rotation=0):
+    """Deal one global k quota across calendar regimes, interleaved.
+
+    Interleaving matters: dealing the quota regime by regime would give the
+    first regime all the low k. Round-robin over regimes keeps each regime's k
+    distribution close to uniform while the *global* counts stay exact.
+    """
+    regimes = sorted(indices_by_regime)
+    # A two-dimensional quota, regime x k. Each regime gets floor(n_r / L) of
+    # every evidence length plus a run of `n_r % L` extras taken from a single
+    # cursor that carries across regimes. That makes both margins exact at once:
+    #
+    #   within a regime  every k appears base_r or base_r + 1 times
+    #   across regimes   the extras walk a contiguous rotation, so the global
+    #                    counts also differ by at most one
+    #
+    # Dealing a shuffled global quota instead balances only in expectation
+    # (measured range 8 across 12 lengths at 120 samples per regime), and
+    # dealing cyclically pairs regime with k whenever the regime count divides
+    # L -- three regimes at L=12 would give one regime only k in {1,4,7,10}.
+    cursor = int(rotation) % input_len
+    order, quota = [], []
+    for regime in regimes:
+        bucket = np.asarray(indices_by_regime[regime], dtype=np.int64)
+        count = len(bucket)
+        if not count:
+            continue
+        values = np.tile(np.arange(1, input_len + 1), count // input_len)
+        extras = count % input_len
+        if extras:
+            values = np.concatenate([
+                values,
+                np.asarray(
+                    [((cursor + step) % input_len) + 1 for step in range(extras)],
+                    dtype=np.int64,
+                ),
+            ])
+            cursor = (cursor + extras) % input_len
+        # Shuffle the *assignment* inside the regime, not the counts: which
+        # sample gets which k is arbitrary, how many get each k is not.
+        order.extend(bucket[rng.permutation(count)].tolist())
+        quota.extend(values[rng.permutation(count)].tolist())
+    return np.asarray(order, dtype=np.int64), np.asarray(quota, dtype=np.int64)
+
+
 def _balanced_values(size, values, weights, rng):
     counts = _allocate_counts(size, weights)
     output = []
@@ -352,20 +423,27 @@ def build_lcbt_schedule(
         scenario_names=LCBT_GROUPS,
     )
     evidence_steps = np.zeros(num_samples, dtype=np.int64)
-    for scenario in ("join", "fault"):
+    regime_array = np.asarray(calendar_regimes, dtype=object)
+    for scenario_index, scenario in enumerate(("join", "fault")):
+        indices_by_regime = {}
         for regime in sorted(set(calendar_regimes)):
             indices = np.flatnonzero(
-                (assignments == scenario)
-                & (np.asarray(calendar_regimes, dtype=object) == regime)
+                (assignments == scenario) & (regime_array == regime)
             )
-            shuffled = indices[rng.permutation(len(indices))]
-            values = _balanced_values(
-                len(shuffled),
-                list(range(1, input_len + 1)),
-                np.ones(input_len, dtype=np.float64),
-                rng,
+            if len(indices):
+                indices_by_regime[regime] = indices[rng.permutation(len(indices))]
+        if not indices_by_regime:
+            raise ValueError(
+                f"LCBT: scenario {scenario!r} received no samples, so its "
+                "evidence coverage cannot be built"
             )
-            evidence_steps[shuffled] = np.asarray(values, dtype=np.int64)
+        # The rotation differs per scenario and per epoch, so the remainder does
+        # not sit on the same k every time either.
+        rotation = (scenario_index + int(epoch)) % input_len
+        order, quota = assign_global_evidence(
+            indices_by_regime, input_len, rng, rotation=rotation
+        )
+        evidence_steps[order] = quota
 
     fractions = np.empty(num_samples, dtype=np.float64)
     topology_modes = np.empty(num_samples, dtype=object)

@@ -188,9 +188,17 @@ def test_test_async_loads_checkpoint_from_the_same_run_scoped_directory(tmp_path
     torch.save(
         {
             "state_dict": model.state_dict(),
-            # This regression targets path resolution; compatibility is covered
-            # independently by the checkpoint tests.
-            "config": None,
+            "training_protocol_hash": "hash",
+            # This regression targets path resolution, but the payload still has
+            # to carry provenance: a checkpoint without it is refused outright
+            # so a result can never be attributed to the wrong model.
+            "config": {
+                "model": "ALFNet",
+                "model_variant": "fg1",
+                "router_mode": None,
+                "canonical_config_hash": "canonical",
+                "training_protocol_hash": "hash",
+            },
         },
         checkpoint_dir / "best_val_checkpoint.pth",
     )
@@ -201,12 +209,20 @@ def test_test_async_loads_checkpoint_from_the_same_run_scoped_directory(tmp_path
         pretrained_model_path=None,
         model="ALFNet",
         model_variant="fg1",
+        model_family_cfg={},
         input_len=12,
         pred_len=12,
         enc_in=7,
+        raw_enc_in=1,
         c_out=1,
         d_model=64,
+        lifecycle_training_strategy="lcbt_v3",
+        lifecycle_role_features=True,
+        lifecycle_history_age_feature=True,
+        lifecycle_observation_mask_feature=True,
+        lifecycle_age_mode="state_duration",
         training_protocol_hash="hash",
+        canonical_config_hash="canonical",
     )
 
     loaded, resolved = load_pretrained_model(model, args)

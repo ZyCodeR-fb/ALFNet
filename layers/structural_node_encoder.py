@@ -55,21 +55,49 @@ STRUCTURAL_FEATURE_DIM = len(STRUCTURAL_FEATURE_NAMES)
 DEFAULT_HIDDEN_DIM = 64
 
 
-def _fingerprint(features):
-    """A stable scalar digest of the structural features.
+def _canonical_bytes(tensor):
+    """Shape and dtype alongside the values, so neither can change silently."""
+    if tensor is None:
+        return b"none"
+    values = torch.as_tensor(tensor).detach().cpu().double().contiguous()
+    header = f"{tuple(values.shape)}|{values.dtype}".encode("utf-8")
+    return header + b"|" + values.numpy().tobytes()
 
-    Stored as a buffer so it travels in the checkpoint and can be compared on
-    load. It is a digest of the *derived* features rather than of the raw
-    adjacency, because those are exactly what the encoder consumes.
+
+def structure_digest(adjacency, positions, features):
+    """Hex digest over the raw graph *and* what was derived from it.
+
+    Hashing only the derived features is not enough: the seven features are
+    coordinates plus degree summaries, so two graphs with identical coordinates
+    and identical degree sequences but different edges produce identical
+    features and would have collided. The adjacency itself is included, which is
+    what actually distinguishes a rewiring.
     """
-    payload = features.detach().cpu().double().contiguous().numpy().tobytes()
-    return float(int(hashlib.sha256(payload).hexdigest()[:12], 16))
+    digest = hashlib.sha256()
+    for part in (adjacency, positions, features):
+        digest.update(_canonical_bytes(part))
+        digest.update(b"::")
+    return digest.hexdigest()
+
+
+def _fingerprint_scalar(hex_digest):
+    """A float view of the digest, so it can live in a tensor buffer.
+
+    float64 holds 53 bits exactly; 12 hex characters is 48 bits, so the value
+    round-trips through the checkpoint without loss.
+    """
+    return float(int(hex_digest[:12], 16))
 
 
 def structural_fingerprints(model):
-    """{module path: fingerprint} for every structural encoder in a model."""
+    """{module path: full hex digest} for every structural encoder in a model.
+
+    The hex digest rather than the float buffer: the buffer exists so the value
+    survives a state_dict round trip, but provenance comparison should use the
+    whole hash, not its first 48 bits.
+    """
     return {
-        name: float(module.structure_fingerprint)
+        name: module.structure_hash
         for name, module in model.named_modules()
         if isinstance(module, StructuralNodeEncoder)
     }
@@ -149,12 +177,14 @@ class StructuralNodeEncoder(nn.Module):
         # optimiser may touch. Persistent so a checkpoint records the geometry
         # it was trained on.
         self.register_buffer("features", features)
-        # Provenance. Two datasets with the same node count produce different
-        # structure, and a checkpoint trained on one must not load against the
-        # other -- the shapes match, so nothing else would notice.
+        # Provenance over the raw graph as well as the derived features. Two
+        # datasets with the same node count produce shape-compatible state
+        # dicts, and two graphs with the same coordinates and degree sequence
+        # produce identical features, so neither alone identifies the graph.
+        self.structure_hash = structure_digest(adjacency, positions, features)
         self.register_buffer(
             "structure_fingerprint",
-            torch.tensor(_fingerprint(features), dtype=torch.float64),
+            torch.tensor(_fingerprint_scalar(self.structure_hash), dtype=torch.float64),
             persistent=True,
         )
         self.num_nodes = int(features.shape[0])

@@ -84,7 +84,11 @@ def _save_checkpoint(model, optimizer, args, epoch, lifecycle_metrics):
                 "model": args.model,
                 "model_variant": args.model_variant,
                 "router_mode": _router_mode(args),
-                "resolved_config_hash": _resolved_config_hash(args),
+                # Frozen at parse time by `utils.canonical_config`, so it
+                # identifies the configuration rather than the run.
+                "canonical_config_hash": getattr(args, "canonical_config_hash", None),
+                "lce_protocol_hash": getattr(args, "lce_protocol_hash", None),
+                "ples_protocol_hash": getattr(args, "ples_protocol_hash", None),
                 # The graph the structural encoders were built from. Two
                 # datasets with the same node count give shape-compatible
                 # state dicts, so nothing else would catch a mismatch.
@@ -127,33 +131,6 @@ def _router_mode(args):
     graph_recipe = (getattr(graph_args, "model_family_cfg", {}) or {}).get("recipe") or {}
     mode = graph_recipe.get("moge_router_mode")
     return None if mode is None else str(mode)
-
-
-def _resolved_config_hash(args):
-    """Hash of the resolved configuration, so a silently edited YAML is caught.
-
-    Only the fields that change what the model *is* or how it was trained; run
-    ids, output paths and device are excluded so the same experiment relocated
-    on disk still matches.
-    """
-    volatile = {
-        "run_id", "output_root", "device", "num_workers", "best_checkpoint_path",
-        "best_prediction_path", "best_fig_path", "best_metrics_path", "log_dir",
-        "run_output_dir", "profile_dir", "lcbt_manifest_root", "ples_manifest_root",
-        "exp_id", "wandb", "verbose", "pretrained_model_path",
-        "train_init_checkpoint_path", "paths_are_run_scoped", "mode",
-    }
-    payload = {}
-    for key, value in sorted(vars(args).items()):
-        if key in volatile or key.startswith("_"):
-            continue
-        try:
-            payload[key] = json.dumps(value, sort_keys=True, default=str)
-        except TypeError:
-            payload[key] = str(value)
-    digest = hashlib.sha256()
-    digest.update(json.dumps(payload, sort_keys=True).encode("utf-8"))
-    return digest.hexdigest()
 
 
 def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch):

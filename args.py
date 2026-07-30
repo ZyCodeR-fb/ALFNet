@@ -3,6 +3,7 @@ import os
 from copy import deepcopy
 
 from omegaconf import OmegaConf
+from utils.canonical_config import freeze_canonical_config
 
 
 CONFIG_SECTION_KEYS = {
@@ -145,6 +146,13 @@ def _add_arguments(parser):
     parser.add_argument("--lce_origins_per_stratum", type=int, default=1)
     parser.add_argument("--lcbt_min_observed_fraction", type=float, default=0.30)
     parser.add_argument("--lcbt_overwrite_manifest", action="store_true", help="overwrite a mismatched LCBT manifest intentionally")
+    parser.add_argument(
+        "--allow_legacy_checkpoint",
+        action="store_true",
+        help="load a checkpoint that predates provenance recording (no model / "
+             "variant / canonical config hash). Diagnostics only -- results from "
+             "such a checkpoint cannot be attributed or compared.",
+    )
 
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--no_scale", action="store_true")
@@ -499,7 +507,11 @@ def load_args_from_config(config_path, overrides=None):
             override_list.extend([flag, str(value)])
     args = parser.parse_args(override_list if override_list else [])
     args.model_family_cfg = family_cfg
-    return finalize_args(args)
+    args = finalize_args(args)
+    # Frozen here, at the end of parsing, so it describes the configuration and
+    # not the run: everything the trainer later writes onto `args` is excluded.
+    freeze_canonical_config(args)
+    return args
 
 
 def initialize_args():
@@ -514,4 +526,8 @@ def initialize_args():
         parser.set_defaults(**config_defaults)
     args = parser.parse_args(remaining if pre_args.config else None)
     args.model_family_cfg = family_cfg
-    return finalize_args(args)
+    args = finalize_args(args)
+    # Frozen here, at the end of parsing, so it describes the configuration and
+    # not the run: everything the trainer later writes onto `args` is excluded.
+    freeze_canonical_config(args)
+    return args

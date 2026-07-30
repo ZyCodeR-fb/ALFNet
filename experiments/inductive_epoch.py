@@ -35,6 +35,29 @@ def _element_loss(y_hat, y, loss_name):
     raise ValueError(f"Unsupported training loss: {loss_name}")
 
 
+def _sample_equal_cohort_loss(y_hat, y, valid_mask, loss_name):
+    """Mean inside each sample's own cohort, then an equal mean over samples.
+
+    Pooling every valid cell and taking one mean weights a sample by how many
+    cells its cohort happens to contain. LCBT draws cohorts at 2.5%, 5% and 10%
+    of the graph, so a 5% sample carried twice the weight of a 2.5% sample and
+    a 10% sample four times -- the objective was dominated by the large cohorts
+    while LCE scores every cell-first row equally. This makes the two agree.
+
+    Samples whose cohort is empty after masking contribute nothing rather than a
+    NaN.
+    """
+    element_loss = _element_loss(y_hat, y, loss_name)
+    per_sample = []
+    for index in range(element_loss.shape[0]):
+        mask = valid_mask[index]
+        if mask.any():
+            per_sample.append(element_loss[index][mask].mean())
+    if not per_sample:
+        return None
+    return torch.stack(per_sample).mean()
+
+
 def _role_balanced_loss(y_hat, y, valid_mask, last_role, loss_name):
     element_loss = _element_loss(y_hat, y, loss_name)
     losses = []
@@ -293,7 +316,9 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
             if not valid_mask.any():
                 continue
 
-            base_loss = criterions[args.loss](y_hat[valid_mask], y_for_loss[valid_mask])
+            base_loss = _sample_equal_cohort_loss(
+                y_hat, y_for_loss, valid_mask, args.loss
+            )
             optimize_loss = base_loss
             # Off by default (0.0): the training objective stays exactly the
             # unweighted batch mean unless the run explicitly opts in.

@@ -186,6 +186,28 @@ def _validate_checkpoint_provenance(checkpoint, args):
         if found is not None and expected is not None and found != expected:
             mismatches.append(f"{key}: checkpoint={found} current={expected}")
 
+    for key, attribute in (("canonical_config_hash", "canonical_config_hash"),
+                           ("lce_protocol_hash", "lce_protocol_hash"),
+                           ("ples_protocol_hash", "ples_protocol_hash")):
+        found = config.get(key)
+        expected = getattr(args, attribute, None)
+        if found and expected and str(found) != str(expected):
+            mismatches.append(
+                f"{key}: checkpoint={str(found)[:16]}... current={str(expected)[:16]}..."
+            )
+
+    # A checkpoint from before provenance was recorded has none of these fields.
+    # Loading it silently is how a result gets attributed to the wrong model, so
+    # it takes an explicit flag.
+    required = ("model", "model_variant", "canonical_config_hash")
+    absent = [key for key in required if config.get(key) is None]
+    if absent and not getattr(args, "allow_legacy_checkpoint", False):
+        raise ValueError(
+            f"Checkpoint predates provenance recording (missing {absent}). It cannot "
+            "be verified against this run. Pass --allow_legacy_checkpoint to load it "
+            "for diagnostics only; results from it are not comparable."
+        )
+
     found_router = config.get("router_mode")
     if "router_mode" in config:
         expected_router = _current_router_mode(args)
@@ -214,9 +236,10 @@ def _validate_structural_fingerprints(checkpoint, model):
         return
     current = structural_fingerprints(model)
     mismatches = [
-        f"{name}: checkpoint={recorded[name]} current={current.get(name)}"
+        f"{name}: checkpoint={str(recorded[name])[:16]}... "
+        f"current={str(current.get(name))[:16]}..."
         for name in sorted(recorded)
-        if name in current and float(recorded[name]) != float(current[name])
+        if name in current and str(recorded[name]) != str(current[name])
     ]
     missing = sorted(set(recorded) - set(current))
     if missing:
