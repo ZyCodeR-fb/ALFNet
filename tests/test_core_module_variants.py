@@ -72,9 +72,14 @@ ALFNET_VARIANTS = {
         # from random init -- the only form that satisfies the deliverable
         # constraint. Differs from rt in exactly two recipe keys.
         "jr",
+        # Differentiable graph routers. At moge_top_k=1 the default noisy top-k
+        # router is unreachable from the forecast loss; gs routes densely, g1
+        # keeps a hard top-1 forward with a straight-through gradient. Generated
+        # by scripts/build_router_configs.py.
+        "gs", "g1",
     )},
     # Cross-dataset confirmation. Not a variant: same model, second dataset.
-    "fg1_bay": "fg1_bay",
+    **{stem: stem for stem in ("fg1_bay", "gs_bay", "g1_bay")},
 }
 
 # The comparison baselines carry one config per dataset, and nothing else.

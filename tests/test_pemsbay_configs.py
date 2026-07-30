@@ -27,6 +27,12 @@ TWINS = [
     ("configs/ALFGraph/METRLA_alfgraph_k1.yaml", "configs/ALFGraph/PEMSBAY_alfgraph_k1.yaml"),
     ("configs/ALFTemporal/METRLA_cond1.yaml", "configs/ALFTemporal/PEMSBAY_cond1.yaml"),
     ("configs/MoGERNN/METRLA_lcbt_v3.yaml", "configs/MoGERNN/PEMSBAY_lcbt_v3.yaml"),
+    # Differentiable-router candidates. A candidate that wins on one dataset and
+    # was retuned on the other proves nothing, so its twin is checked too.
+    ("configs/ALFNet/gs.yaml", "configs/ALFNet/gs_bay.yaml"),
+    ("configs/ALFNet/g1.yaml", "configs/ALFNet/g1_bay.yaml"),
+    ("configs/ALFGraph/METRLA_alfgraph_soft.yaml", "configs/ALFGraph/PEMSBAY_alfgraph_soft.yaml"),
+    ("configs/ALFGraph/METRLA_alfgraph_st1.yaml", "configs/ALFGraph/PEMSBAY_alfgraph_st1.yaml"),
 ]
 
 # A twin may move the dataset block, its own name, and the paths of the expert

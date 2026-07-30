@@ -3,6 +3,7 @@ import torch.nn.functional as F
 
 from data_provider.calendar_strata import STRATA, stratum_weights
 from layers.evidence_router import routing_diagnostics
+from layers.lifecycle_moge import SUPPORT_NAMES
 from layers.protected_residual import companion_residual_loss
 from data_provider.lcbt_protocol import (
     accumulate_lifecycle_mae,
@@ -403,6 +404,23 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
             for name, value in batch_metrics.items():
                 metric_sums[name] = metric_sums.get(name, 0.0) + value
             valid_batches += 1
+
+            graph_router = meta.get("router_diagnostics")
+            if mode == "val" and graph_router:
+                # Per layer, because a router can collapse in the decoder while
+                # staying busy in the encoder and look healthy pooled. The
+                # entropy ratio is normalised by log(num_experts), so 1.0 means
+                # the router is carrying no information at all.
+                for layer, stats in graph_router.items():
+                    short = layer.replace("cells.", "c").replace("_gate", "")
+                    routing_sums[f"router/{short}/entropy_ratio"] = (
+                        routing_sums.get(f"router/{short}/entropy_ratio", 0.0)
+                        + stats["entropy_ratio"]
+                    )
+                    for index, share in enumerate(stats["usage"]):
+                        key = f"router/{short}/usage/{SUPPORT_NAMES[index]}"
+                        routing_sums[key] = routing_sums.get(key, 0.0) + share
+                routing_batches += 1
 
             gate = meta.get("residual_gate")
             if mode == "val" and gate is not None:

@@ -79,17 +79,60 @@ def build_lifecycle_supports(adjacency, forward_support, backward_support):
     )
 
 
-class LifecycleRouter(nn.Module):
-    """Noisy top-k gating over lifecycle state.
+ROUTER_MODES = ("noisy_topk", "soft", "st_top1")
 
-    ``noisy_top_k_gating``, ``_gates_to_load`` and ``_prob_in_top_k`` are copied
-    from GMoE; only the flattening of the node dimension is new.
+# Softmax temperature for the straight-through gradient. Fixed at 1.0 rather
+# than exposed as a knob: this round tests whether a differentiable router helps
+# at all, and a temperature sweep would confound that with tuning.
+STRAIGHT_THROUGH_TEMPERATURE = 1.0
+
+
+class LifecycleRouter(nn.Module):
+    """Route each node to propagation supports from its lifecycle state.
+
+    Three modes, selected by ``mode``:
+
+    ``noisy_topk``
+        The historical path, copied from GMoE (``noisy_top_k_gating``,
+        ``_gates_to_load``, ``_prob_in_top_k``); only the flattening of the node
+        dimension is new. **At k=1 this router is not trainable by the forecast
+        loss.** ``top_k_logits`` is then a single column, ``Softmax(1)`` of one
+        element is identically 1.0 with derivative 0, and the top-k indices are
+        not differentiable, so the only gradient reaching ``w_gate`` comes from
+        the load-balance term -- a uniformity prior that knows nothing about
+        prediction error. Measured on the shipped ``fg1-s32`` checkpoint: the
+        injected noise is ~586x the learned logits, and training-time routing
+        agrees with eval-time routing 20.0% of the time, which is exactly chance
+        for five experts. Kept as the default so historical runs reproduce.
+
+    ``soft``
+        Softmax over all experts, no noise and no top-k. Sparsity buys nothing
+        here -- ``LifecycleRoutedGraphConv`` evaluates all five supports before
+        applying the gates either way (measured 2.165 ms at k=1 against 2.222 ms
+        at k=5) -- so the sparse router costs differentiability for no saving.
+
+    ``st_top1``
+        Hard top-1 forward, so the output scale stays exactly 1.0 as the GRU
+        gates expect, with the gradient taken through the soft distribution
+        (straight-through estimator; Bengio et al. 2013, and the hard variant of
+        Jang et al. ICLR 2017). Deterministic -- see
+        ``_straight_through_top1_gating`` for why the Gumbel sample is left out.
+
+    The auxiliary load-balance formula is deliberately unchanged across modes:
+    under ``soft`` every gate is positive, so ``_gates_to_load`` is constant and
+    ``cv_squared`` of it is zero, leaving the importance term alone. That keeps
+    the objective identical rather than introducing a second difference between
+    candidates.
     """
 
-    def __init__(self, state_dim, num_experts, k=2, noisy_gating=True, loss_coef=1e-2):
+    def __init__(self, state_dim, num_experts, k=2, noisy_gating=True, loss_coef=1e-2,
+                 mode="noisy_topk"):
         super().__init__()
         if not 1 <= int(k) <= int(num_experts):
             raise ValueError("router top-k must satisfy 1 <= k <= num_experts")
+        if str(mode) not in ROUTER_MODES:
+            raise ValueError(f"unsupported router mode {mode!r}; expected one of {ROUTER_MODES}")
+        self.mode = str(mode)
         self.num_experts = int(num_experts)
         self.k = int(k)
         self.noisy_gating = bool(noisy_gating)
@@ -100,6 +143,32 @@ class LifecycleRouter(nn.Module):
         self.softmax = nn.Softmax(1)
         self.register_buffer("mean", torch.tensor([0.0]))
         self.register_buffer("std", torch.tensor([1.0]))
+        # Diagnostics are off by default: the graph core runs 24 recurrent steps
+        # per forward, and accumulating a tensor per step per router costs more
+        # than the statistics are worth outside an evaluation pass.
+        self._collect = False
+        self._usage = []
+        self._entropy = []
+
+    def set_collect_diagnostics(self, enabled):
+        self._collect = bool(enabled)
+        if not enabled:
+            self._usage, self._entropy = [], []
+
+    def pop_diagnostics(self):
+        """Mean gate mass per expert and mean routing entropy since the reset."""
+        if not self._usage:
+            return None
+        usage = torch.stack(self._usage).mean(dim=0)
+        entropy = torch.stack(self._entropy).mean()
+        self._usage, self._entropy = [], []
+        return {
+            "usage": usage.tolist(),
+            "entropy": float(entropy),
+            # log(num_experts) is the value a router that has learned nothing
+            # sits at, so the ratio is directly readable.
+            "entropy_ratio": float(entropy / math.log(self.num_experts)),
+        }
 
     def _gates_to_load(self, gates):
         return (gates > 0).sum(0)
@@ -127,6 +196,37 @@ class LifecycleRouter(nn.Module):
         0.273 ms against 0.075 ms for the formula, with bit-identical output.
         """
         return 0.5 * (1.0 + torch.erf((value - self.mean) * SQRT_HALF / self.std))
+
+    def _soft_gating(self, x):
+        """Dense softmax over every expert. Fully differentiable by construction."""
+        gates = self.softmax(x @ self.w_gate)
+        return gates, self._gates_to_load(gates)
+
+    def _straight_through_top1_gating(self, x, train):
+        """Hard one-hot forward, soft gradient backward. Deterministic.
+
+        `hard - soft.detach() + soft` is numerically `hard`, so the forward pass
+        selects exactly one support at weight 1.0 and the routed output keeps
+        DiffConv's scale. The backward pass sees `d(soft)`, which is what makes
+        `w_gate` reachable from the forecast loss at all.
+
+        No Gumbel noise, deliberately. The defect this mode exists to fix is a
+        train/eval mismatch -- with `noisy_topk` the injected noise was ~586x the
+        learned logits and the two passes agreed at chance. Sampling the routing
+        during training reproduces exactly that failure in milder form: measured
+        here, ST-Gumbel at temperature 1.0 agreed with its own eval-time routing
+        33% of the time, against 100% for the deterministic form. Five experts
+        and a six-dimensional router do not present the exploration problem that
+        motivates Gumbel in large sparse MoE, and the load-balance term already
+        supplies pressure against collapse -- now alongside a real forecast
+        gradient rather than instead of one.
+        """
+        soft = self.softmax((x @ self.w_gate) / STRAIGHT_THROUGH_TEMPERATURE)
+        hard = torch.zeros_like(soft).scatter_(
+            1, soft.argmax(dim=1, keepdim=True), 1.0
+        )
+        gates = hard - soft.detach() + soft
+        return gates, self._gates_to_load(gates)
 
     def noisy_top_k_gating(self, x, train, noise_epsilon=1e-2):
         clean_logits = x @ self.w_gate
@@ -156,10 +256,33 @@ class LifecycleRouter(nn.Module):
         """state: [batch, node, state_dim] -> gates [batch, node, num_experts]."""
         batch, nodes, _ = state.shape
         flat = state.reshape(batch * nodes, -1)
-        gates, load = self.noisy_top_k_gating(flat, self.training)
+        if self.mode == "soft":
+            gates, load = self._soft_gating(flat)
+        elif self.mode == "st_top1":
+            gates, load = self._straight_through_top1_gating(flat, self.training)
+        else:
+            gates, load = self.noisy_top_k_gating(flat, self.training)
         importance = gates.sum(0)
         aux_loss = self.loss_coef * (cv_squared(importance) + cv_squared(load))
+        self._record(gates)
         return gates.reshape(batch, nodes, self.num_experts), aux_loss.squeeze()
+
+    def _record(self, gates):
+        """Usage mass and routing entropy, for reading a run afterwards.
+
+        A router can look busy while carrying no information: usage alone does
+        not distinguish "each lifecycle state picks its own operator" from
+        "every node draws uniformly at random". Entropy separates them --
+        near log(num_experts) means the router is not committing.
+        """
+        if not self._collect:
+            return
+        with torch.no_grad():
+            mass = gates.detach()
+            probs = mass / mass.sum(dim=1, keepdim=True).clamp_min(1e-12)
+            entropy = -(probs.clamp_min(1e-12).log() * probs).sum(dim=1).mean()
+            self._usage.append(mass.mean(dim=0))
+            self._entropy.append(entropy)
 
 
 class LifecycleRoutedGraphConv(nn.Module):
@@ -179,6 +302,7 @@ class LifecycleRoutedGraphConv(nn.Module):
         k=2,
         noisy_gating=True,
         loss_coef=1e-2,
+        router_mode="noisy_topk",
     ):
         super().__init__()
         if int(num_experts) != len(SUPPORT_NAMES):
@@ -198,9 +322,14 @@ class LifecycleRoutedGraphConv(nn.Module):
             k=k,
             noisy_gating=noisy_gating,
             loss_coef=loss_coef,
+            mode=router_mode,
         )
         self._aux_terms = []
         self.reset_parameters()
+
+    @property
+    def router_mode(self):
+        return self.router.mode
 
     def reset_parameters(self):
         stdv = 1.0 / math.sqrt(self.out_channels)
@@ -209,6 +338,12 @@ class LifecycleRoutedGraphConv(nn.Module):
 
     def reset_router_stats(self):
         self._aux_terms = []
+
+    def set_collect_diagnostics(self, enabled):
+        self.router.set_collect_diagnostics(enabled)
+
+    def pop_router_diagnostics(self):
+        return self.router.pop_diagnostics()
 
     def pop_router_loss(self):
         if not self._aux_terms:

@@ -472,6 +472,8 @@ def test_rtg_differs_from_rt_only_in_its_name():
 NO_TEACHER_CONFIGS = [
     "configs/ALFNet/fg1.yaml",
     "configs/ALFNet/jr.yaml",
+    "configs/ALFNet/gs.yaml",
+    "configs/ALFNet/g1.yaml",
     "configs/ALFNet/fg1_bay.yaml",
     "configs/MoGERNN/PEMSBAY_lcbt_v3.yaml",
 ]

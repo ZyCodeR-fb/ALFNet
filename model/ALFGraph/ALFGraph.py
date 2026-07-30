@@ -147,6 +147,11 @@ class Model(nn.Module):
             top_k = int(recipe.get("moge_top_k", 2))
             noisy_gating = bool(recipe.get("moge_noisy_gating", True))
             loss_coef = float(recipe.get("moge_load_balance_coef", 1e-2))
+            # Default keeps the historical noisy top-k path so existing runs
+            # reproduce; `soft` and `st_top1` make the router reachable from the
+            # forecast loss, which at k=1 it provably is not.
+            router_mode = str(recipe.get("moge_router_mode", "noisy_topk"))
+            self.router_mode = router_mode
 
             def conv_factory(in_size, out_size):
                 return LifecycleRoutedGraphConv(
@@ -157,6 +162,7 @@ class Model(nn.Module):
                     k=top_k,
                     noisy_gating=noisy_gating,
                     loss_coef=loss_coef,
+                    router_mode=router_mode,
                 )
 
         self.encoder = Encoder(
@@ -186,6 +192,30 @@ class Model(nn.Module):
             if isinstance(module, LifecycleRoutedGraphConv)
         ]
 
+    def _named_routed_convs(self):
+        """Named so usage and entropy can be read per layer, not just pooled.
+
+        A router that collapses in the decoder while staying busy in the encoder
+        looks healthy in an aggregate and is not.
+        """
+        return [
+            (name, module)
+            for name, module in self.named_modules()
+            if isinstance(module, LifecycleRoutedGraphConv)
+        ]
+
+    def set_router_diagnostics(self, enabled):
+        for _, conv in self._named_routed_convs():
+            conv.set_collect_diagnostics(enabled)
+
+    def pop_router_diagnostics(self):
+        report = {}
+        for name, conv in self._named_routed_convs():
+            stats = conv.pop_router_diagnostics()
+            if stats is not None:
+                report[name] = stats
+        return report
+
     def forward(
         self,
         adjacency,
@@ -209,6 +239,10 @@ class Model(nn.Module):
             state_sequence = x_enc[..., self.raw_enc_in:self.raw_enc_in + self.state_dim]
             for conv in self._routed_convs():
                 conv.reset_router_stats()
+            # Collect only at evaluation. The statistics are cheap next to the
+            # einsums, but this runs 24 recurrent steps per forward across 12
+            # routers and training does not read them.
+            self.set_router_diagnostics(not self.training)
 
         hidden = self.encoder(
             x_enc,
@@ -251,4 +285,7 @@ class Model(nn.Module):
             ]
             if terms:
                 output["aux_losses"] = {"graph_router": torch.stack(terms).mean()}
+            diagnostics = self.pop_router_diagnostics()
+            if diagnostics:
+                output["router_diagnostics"] = diagnostics
         return output

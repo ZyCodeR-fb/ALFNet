@@ -392,6 +392,7 @@ class Model(nn.Module):
                 )
         self.last_residual_diagnostics = None
         self._last_encoder_state = None
+        self._last_router_diagnostics = None
         # Distillation (K) is gone. The deliverable is trained from random
         # initialisation in one stage, and a teacher makes that impossible: it
         # needs a second trained model on disk and a frozen schedule around it.
@@ -696,6 +697,7 @@ class Model(nn.Module):
             )
             y_graph, graph_meta = unpack_model_output(graph_output)
             self._last_encoder_state = graph_meta.get("encoder_state")
+            self._last_router_diagnostics = graph_meta.get("router_diagnostics")
             return y_graph, features, graph_meta.get("aux_losses")
         graph_output = self.graph_expert(
             adjacency, graph_input, x_t_mark, pos_mark, decoder, dec_t_mark, epoch
@@ -744,6 +746,7 @@ class Model(nn.Module):
                         "weight": self.companion_loss_weight,
                     },
                     "residual_gate": extras["gate"],
+                    "router_diagnostics": self._last_router_diagnostics,
                 }
             if self.evidence_router_enabled or self.observed_nlinear_enabled:
                 prediction, beta = self._evidence_fusion(
@@ -785,6 +788,8 @@ class Model(nn.Module):
                 "aux_losses": expert_aux_losses,
                 "forecast_loss_mode": "role_balanced_mix",
                 "forecast_role_balanced_beta": self.forecast_role_balanced_beta,
+                # fg1 and the router candidates take this path.
+                "router_diagnostics": self._last_router_diagnostics,
             }
         y_patch = self.temporal_refiner(y_patch, last_availability)
         state = state.unsqueeze(1).expand(-1, y_graph.size(1), -1, -1)

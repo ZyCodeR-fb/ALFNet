@@ -61,6 +61,8 @@ python scripts/paired_model_bootstrap.py --model_a <predictions/lifecycle-v3-*/>
   --model_b <...> --output_dir ./outputs/reports/a_vs_b
 python scripts/collect_lifecycle_results.py <result roots> --output-dir <dir>   # expects seeds 32/42/52
 python scripts/build_ablation_configs.py                                       # regenerates combination YAMLs
+python scripts/build_router_configs.py                                         # regenerates gs/g1 + twins
+python scripts/router_report.py outputs/ALFNet/<run_id>    # per-layer, per-phase, per-k routing
 ```
 
 ## Artefact layout
@@ -163,7 +165,7 @@ separate `+LC` name, never as the published baseline.
   `graph_conv=lifecycle_moge`, 5 propagation supports, top-k=1 sparse routing, decoder predicts a delta at
   residual scale 0.3. **This is the prediction backbone** — the final forecast always comes from its
   decoder. It exposes a detached `encoder_state` for downstream conditioning. Its internal GRIN is off, so
-  recovery happens once in the shared imputer.
+  recovery happens once in the shared imputer. **Its router is broken at `moge_top_k: 1` — see below.**
 * `ALFTemporal` — a **light spatio-temporal conditioner**, not an independent forecaster. Simplified from
   PatchSTG to one layer with TimeFilter off and `emit: features`, so it produces no forecast of its own.
   With `tem_patchsize=12, tem_patchnum=1` the stride-12 embedding conv collapses the whole input window
@@ -179,6 +181,33 @@ ALFTemporal YAML: `spatial_tokenizer`, `mixer`, `use_timefilter`, `emit`.
 `ProtectedTemporalResidual` (`layers/protected_residual.py`) is **shared**, not distillation-specific: the
 frozen ablations `rt/rd/rtg` and the end-to-end candidate `jr` all use it, and `companion_loss_weight` /
 `freeze_anchor` are theirs. Only the teacher was removed.
+
+### The top-1 router is not trained by the forecast loss
+
+`moge_router_mode` selects `noisy_topk` (default, historical), `soft`, or `st_top1`. The default is kept so
+existing runs reproduce, but at `moge_top_k: 1` it is **provably untrainable from the prediction
+objective**: `top_k_logits` is a single column, `nn.Softmax(1)` of one element is identically 1.0 with
+derivative 0, and the top-k indices carry no gradient. The only path to `w_gate` is the load-balance term —
+a uniformity prior that knows nothing about prediction error. Measured, not inferred:
+
+* forecast-only gradient on `w_gate`: **exactly 0.0** at k=1, non-zero at k=2 and k=3, and 0.0 for all 12
+  routers through the full ALFNet;
+* on the shipped `fg1-s32` checkpoint the injected training noise is **~586×** the learned logits, and
+  training-time routing agrees with eval-time routing **20.0%** of the time — chance for five experts;
+* `scripts/router_report.py` on the same checkpoint: `entropy_ratio` 1.0000 on every layer and phase, with
+  `top1_margin` between 2e-6 and 2.6e-4. The routing table looks specialised per phase and is a coin flip.
+* top-1 buys no compute either: all five supports are evaluated before the gates are applied (2.165 ms at
+  k=1 against 2.222 ms at k=5), so sparsity here costs differentiability for nothing.
+
+So `fg1`'s headline mechanism currently behaves as expert *dropout*, not as routing. Both candidate modes
+are deterministic — an ST-Gumbel variant was measured at 33% train/eval agreement and rejected for
+reproducing the defect in milder form. All three modes carry an identical parameter count (1,041,561), so
+the candidates are pure ablations.
+
+Diagnostics: per-layer expert usage and entropy are collected at eval only and land in
+`training_summary.json` under `routing_diagnostics` as `router/<layer>/…`; the phase-by-k table comes from
+`scripts/router_report.py`, which reconstructs it from `w_gate` because the router's only input is the
+lifecycle state and LCBT makes that an exact function of (scenario, k).
 
 Two invariants worth knowing before editing:
 
