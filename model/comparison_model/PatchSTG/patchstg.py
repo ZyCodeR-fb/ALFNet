@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from timm.models.vision_transformer import Attention, Mlp
+from layers.structural_node_encoder import StructuralNodeEncoder
 
 
 class WindowAttBlock(nn.Module):
@@ -58,6 +59,8 @@ class PatchSTG(nn.Module):
         ori_parts_idx,
         reo_parts_idx,
         reo_all_idx,
+        adjacency,
+        positions,
     ):
         super(PatchSTG, self).__init__()
         self.node_num = node_num
@@ -71,9 +74,13 @@ class PatchSTG(nn.Module):
         # spatio-temporal embedding -> section 4.1 in paper
         # input_emb
         self.input_st_fc = nn.Conv2d(in_channels=3, out_channels=input_dims, kernel_size=(1, tem_patchsize), stride=(1, tem_patchsize), bias=True)
-        # spa_emb
-        self.node_emb = nn.Parameter(torch.empty(node_num, node_dims))
-        nn.init.xavier_uniform_(self.node_emb)
+        # spa_emb. A shared mapping over frozen structure rather than the
+        # source's `[node_num, node_dims]` parameter: this project holds nodes
+        # out of training, and a per-node parameter gives them trainable
+        # capacity. Structure only -- no lifecycle feature reaches a baseline.
+        self.node_encoder = StructuralNodeEncoder(
+            adjacency, positions, out_dim=node_dims
+        )
         # tem_emb
         self.time_in_day_emb = nn.Parameter(torch.empty(tod, tod_dims))
         nn.init.xavier_uniform_(self.time_in_day_emb)
@@ -123,7 +130,7 @@ class PatchSTG(nn.Module):
         input_data = torch.cat([input_data, self.day_in_week_emb[(d_i_w_data).type(torch.LongTensor)]], -1)
 
         # cat spatial embedding
-        node_emb = self.node_emb.unsqueeze(0).unsqueeze(1).expand(b, t, -1, -1)
+        node_emb = self.node_encoder().unsqueeze(0).unsqueeze(1).expand(b, t, -1, -1)
         input_data = torch.cat([input_data, node_emb], -1)
 
         return input_data

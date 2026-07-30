@@ -102,6 +102,8 @@ class Model(nn.Module):
             ori_parts_idx=ori_parts_idx,
             reo_parts_idx=reo_parts_idx,
             reo_all_idx=reo_all_idx,
+            adjacency=torch.as_tensor(full_adj, dtype=torch.float32),
+            positions=positions,
         )
 
     def _resolve_current_node_ids(self, current_num_nodes):

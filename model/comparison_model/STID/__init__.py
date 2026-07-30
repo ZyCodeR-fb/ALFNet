@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 
+from lib.utils import load_project_adjacency, load_project_positions
 from model.comparison_model.family_utils import build_stid_cfg, source_native_input
 from .stid import STID as STIDBackbone
 
@@ -36,6 +37,8 @@ class Model(nn.Module):
             if_T_i_D=model_cfg["if_T_i_D"],
             if_D_i_W=model_cfg["if_D_i_W"],
             if_node=model_cfg["if_node"],
+            adjacency=load_project_adjacency({"data_path": configs.data_path}),
+            positions=load_project_positions({"data_path": configs.data_path}),
             # _build_stid_input appends tod then dow after the raw x_enc block.
             # The slice keeps only the raw channels, so tod/dow now sit
             # immediately after them rather than after all seven.

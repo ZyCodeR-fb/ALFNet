@@ -164,6 +164,8 @@ class Model(nn.Module):
             ori_parts_idx=self.ori_parts_idx,
             reo_parts_idx=self.reo_parts_idx,
             reo_all_idx=self.reo_all_idx,
+            adjacency=torch.as_tensor(full_adj, dtype=torch.float32),
+            positions=positions,
             input_channels=self.expert_input_dim + CALENDAR_CHANNELS,
             crossformer_router_factor=int(
                 model_cfg.get("crossformer_router_factor", 4)

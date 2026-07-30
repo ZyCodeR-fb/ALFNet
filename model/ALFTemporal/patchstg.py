@@ -5,6 +5,7 @@ from einops import rearrange, repeat
 from layers.source_timefilter import TimeFilterPatchMixer
 from layers.source_tokenlearner import NodeTokenizer
 from layers.source_tsmixer import TSMixerBlock
+from layers.structural_node_encoder import StructuralNodeEncoder
 
 
 class CrossformerFullAttention(nn.Module):
@@ -238,6 +239,11 @@ class PatchSTG(nn.Module):
         ori_parts_idx,
         reo_parts_idx,
         reo_all_idx,
+        # Frozen structure for the shared node encoder. Required, not optional:
+        # falling back to a per-node parameter is exactly the defect being
+        # removed, so a caller that cannot supply the graph must fail loudly.
+        adjacency,
+        positions,
         input_channels=3,
         crossformer_router_factor=4,
         crossformer_dropout=0.1,
@@ -275,8 +281,15 @@ class PatchSTG(nn.Module):
             stride=(1, tem_patchsize),
             bias=True,
         )
-        self.node_emb = nn.Parameter(torch.empty(node_num, node_dims))
-        nn.init.xavier_uniform_(self.node_emb)
+        # Node representation from frozen structure through a shared mapping,
+        # never a per-node parameter: the spatial attention mixes every node
+        # before the known ones are gathered back, so a `[node_num, node_dims]`
+        # parameter puts trainable capacity on held-out nodes. Measured on fg1,
+        # all 50 held-out rows took gradient and perturbing only those rows moved
+        # the known-node forecast by 1.056.
+        self.node_encoder = StructuralNodeEncoder(
+            adjacency, positions, out_dim=node_dims
+        )
         self.time_in_day_emb = nn.Parameter(torch.empty(tod, tod_dims))
         nn.init.xavier_uniform_(self.time_in_day_emb)
         self.day_in_week_emb = nn.Parameter(torch.empty(dow, dow_dims))
@@ -392,7 +405,7 @@ class PatchSTG(nn.Module):
             input_data,
             self.day_in_week_emb[dow_index],
         ], dim=-1)
-        node_emb = self.node_emb.unsqueeze(0).unsqueeze(1).expand(
+        node_emb = self.node_encoder().unsqueeze(0).unsqueeze(1).expand(
             batch,
             input_data.shape[1],
             -1,

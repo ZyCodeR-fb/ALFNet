@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from model.comparison_model.base_model import BaseModel
+from layers.structural_node_encoder import StructuralNodeEncoder
 
 
 class STID(BaseModel):
@@ -11,7 +12,7 @@ class STID(BaseModel):
     Official Code: https://github.com/zezhishao/STID
     """
 
-    def __init__(self, node_dim, input_len, input_dim, embed_dim, output_len, num_layer, temp_dim_tid, temp_dim_diw, time_of_day_size, day_of_week_size, if_T_i_D, if_D_i_W, if_node, tid_index=1, diw_index=2, **args):
+    def __init__(self, node_dim, input_len, input_dim, embed_dim, output_len, num_layer, temp_dim_tid, temp_dim_diw, time_of_day_size, day_of_week_size, if_T_i_D, if_D_i_W, if_node, adjacency=None, positions=None, tid_index=1, diw_index=2, **args):
         super(STID, self).__init__(**args)   
         
         # attributes
@@ -38,8 +39,12 @@ class STID(BaseModel):
 
         # spatial embeddings
         if self.if_spatial:
-            self.node_emb = nn.Parameter(torch.empty(self.node_num, self.node_dim))
-            nn.init.xavier_uniform_(self.node_emb)
+            # Shared mapping over frozen structure, never a per-node parameter:
+            # nodes are held out of training here, and a `[node_num, node_dim]`
+            # parameter hands them trainable capacity.
+            self.node_encoder = StructuralNodeEncoder(
+                adjacency, positions, out_dim=self.node_dim
+            )
         
         # temporal embeddings
         if self.if_time_in_day:
@@ -93,10 +98,7 @@ class STID(BaseModel):
         if self.if_spatial:
             # expand node embeddings
             current_node_ids = getattr(self, "current_node_ids", None)
-            node_source = self.node_emb
-            if current_node_ids is not None:
-                node_index = torch.as_tensor(current_node_ids, device=self.node_emb.device, dtype=torch.long)
-                node_source = self.node_emb.index_select(0, node_index)
+            node_source = self.node_encoder(current_node_ids)
             node_emb.append(node_source.unsqueeze(0).expand(batch_size, -1, -1).transpose(1, 2).unsqueeze(-1))  # [n, node_dim] -> [1, n, node_dim] -> [b, n, node_dim] -> [b, node_dim, n, 1]
         
         # temporal embeddings

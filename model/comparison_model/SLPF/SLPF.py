@@ -12,6 +12,7 @@ transfer matrices to capture complex spatial-temporal dependencies.
 
 import torch
 from torch import nn
+from layers.structural_node_encoder import StructuralNodeEncoder
 
 
 class MultiLayerPerceptron_(nn.Module):
@@ -107,7 +108,7 @@ class MultiLayerPerceptron(nn.Module):
         return hidden
 
 class SLPF(nn.Module):
-    def __init__(self, sensed_locations,unsensed_locations,A,args):
+    def __init__(self, sensed_locations,unsensed_locations,A,args,positions=None):
         super(SLPF, self).__init__()
         # attributes
         self.num_locs = args.num_locs
@@ -125,9 +126,14 @@ class SLPF(nn.Module):
         self.sensed_locations=sensed_locations
         self.unsensed_locations=unsensed_locations
         # embedding banks
-        self.full_locs_emb = nn.Parameter(
-            torch.empty(self.num_locs, self.embed_dim))
-        nn.init.xavier_uniform_(self.full_locs_emb)
+        # Shared mapping over frozen structure instead of a per-location
+        # bank: locations are held out of training here, and a
+        # `[num_locs, embed_dim]` parameter indexed by location id hands them
+        # trainable capacity. Exposed through the `full_locs_emb` property so
+        # every existing call site is unchanged. `rank_emb` below is indexed by
+        # a data-derived rank rather than by identity and is left alone.
+        self.full_locs_encoder = StructuralNodeEncoder(
+            A, positions, out_dim=self.embed_dim)
         # rank embedding bank
         self.rank_emb = nn.Parameter(
             torch.empty(self.num_locs, self.embed_dim))
@@ -163,7 +169,16 @@ class SLPF(nn.Module):
 
         # adjacency matrix
         self.A=nn.Parameter(A,requires_grad=False)
-        self.combine=nn.Linear(self.input_len,1) # only flow rate 
+        self.combine=nn.Linear(self.input_len,1) # only flow rate
+
+    @property
+    def full_locs_emb(self):
+        """[num_locs, embed_dim] from frozen structure, shared across locations.
+
+        A property so the eighteen existing call sites are untouched: they index
+        it by location exactly as before, but no location owns a parameter.
+        """
+        return self.full_locs_encoder()
 
     def forward(self, *args):
         if self.stage=='adp' or self.stage=='forecast':

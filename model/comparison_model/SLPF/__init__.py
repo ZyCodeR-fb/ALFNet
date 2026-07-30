@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 
-from lib.utils import load_project_adjacency
+from lib.utils import load_project_adjacency, load_project_positions
 from model.comparison_model.family_utils import build_slpf_cfg
 from .SLPF import SLPF as SLPFBackbone
 
@@ -34,6 +34,7 @@ class Model(nn.Module):
             unsensed_locations=[],
             A=full_adj,
             args=backbone_args,
+            positions=load_project_positions({"data_path": configs.data_path}),
         )
         self.backbone.stage = "forecast"
 

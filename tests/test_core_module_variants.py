@@ -140,8 +140,11 @@ def test_alfnet_contains_one_shared_grin_and_no_graph_local_grin():
     )
     # 3_288_746 + 4_608 for the widened patch input convolution that carries the
     # availability / state_age / observation-mask channels (6 * 64 * 12), then
-    # + 151_824 for the lifecycle-routed graph core replacing DiffConv.
-    assert sum(parameter.numel() for parameter in model.parameters()) == 3_445_178
+    # + 151_824 for the lifecycle-routed graph core replacing DiffConv, then
+    # - 4_032 for the strict-inductive change: the `[207, 32]` node-id parameter
+    # (6_624) became a shared 7 -> 64 -> 32 structural MLP (2_592), so no node
+    # owns capacity and the model shrinks.
+    assert sum(parameter.numel() for parameter in model.parameters()) == 3_441_146
     assert not hasattr(model, "fusion_gate")
     assert all(
         not hasattr(block, "nattn") and not hasattr(block, "sattn")
