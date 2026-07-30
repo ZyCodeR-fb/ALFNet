@@ -147,25 +147,38 @@ class LifecycleRouter(nn.Module):
         # per forward, and accumulating a tensor per step per router costs more
         # than the statistics are worth outside an evaluation pass.
         self._collect = False
-        self._usage = []
-        self._entropy = []
+        self._usage_total = torch.zeros(self.num_experts)
+        self._entropy_total = 0.0
+        self._rows = 0
+
+    def _reset_diagnostics(self):
+        self._usage_total = torch.zeros(
+            self.num_experts, device=self.w_gate.device, dtype=self.w_gate.dtype
+        )
+        self._entropy_total = 0.0
+        self._rows = 0
 
     def set_collect_diagnostics(self, enabled):
         self._collect = bool(enabled)
-        if not enabled:
-            self._usage, self._entropy = [], []
+        self._reset_diagnostics()
 
     def pop_diagnostics(self):
-        """Expert usage plus the per-node and population entropies."""
-        if not self._usage:
+        """Expert usage plus the per-node and population entropies.
+
+        Every quantity is a true total divided by the routed-node count, so a
+        short final batch contributes exactly its own rows and no more.
+        """
+        if not self._rows:
             return None
-        usage = torch.stack(self._usage).mean(dim=0)
-        gate_entropy = torch.stack(self._entropy).mean()
+        rows = int(self._rows)
+        usage = self._usage_total / rows
+        gate_entropy = self._entropy_total / rows
         share = usage / usage.sum().clamp_min(1e-12)
         usage_entropy = -(share.clamp_min(1e-12).log() * share).sum()
         uniform = math.log(self.num_experts)
-        self._usage, self._entropy = [], []
+        self._reset_diagnostics()
         return {
+            "routed_nodes": rows,
             "usage": usage.tolist(),
             # per-node: 1.0 = every node mixes uniformly. Always 0 for a hard
             # router, so do not read it as decisiveness there.
@@ -291,8 +304,14 @@ class LifecycleRouter(nn.Module):
         with torch.no_grad():
             mass = gates.detach()
             probs = mass / mass.sum(dim=1, keepdim=True).clamp_min(1e-12)
-            self._entropy.append(-(probs.clamp_min(1e-12).log() * probs).sum(dim=1).mean())
-            self._usage.append(mass.mean(dim=0))
+            # Accumulate totals and a row count rather than per-call means: the
+            # last batch of an epoch is short, and averaging means-of-means
+            # weights its rows more heavily than the rest.
+            self._usage_total = self._usage_total + mass.sum(dim=0)
+            self._entropy_total = self._entropy_total + float(
+                -(probs.clamp_min(1e-12).log() * probs).sum()
+            )
+            self._rows += int(mass.shape[0])
 
 
 class LifecycleRoutedGraphConv(nn.Module):

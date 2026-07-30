@@ -146,7 +146,69 @@ def build_exp_id(args):
     return _shorten_exp_id_component(f"{exp_prefix}-{exp_id}")
 
 
+def _checkpoint_protocol_hash(checkpoint):
+    """The hash lives at the payload top level; older readers looked in `config`.
+
+    Both are accepted so a checkpoint written either way still validates, but
+    the top level wins because that is where `train.py` writes it.
+    """
+    if not isinstance(checkpoint, dict):
+        return None
+    top = checkpoint.get("training_protocol_hash")
+    if top:
+        return top
+    config = checkpoint.get("config") or {}
+    return config.get("training_protocol_hash")
+
+
+def _validate_checkpoint_provenance(checkpoint, args):
+    """Refuse a checkpoint that is shape-compatible but is a different model.
+
+    Shapes alone do not identify a run: `fg1`, `gs` and `g1` are byte-identical
+    in structure and differ only in the router mode, so loading the wrong one
+    is silent and the result gets attributed to the wrong variant.
+    """
+    config = checkpoint.get("config") or {}
+    mismatches = []
+
+    expected_hash = getattr(args, "training_protocol_hash", None)
+    found_hash = _checkpoint_protocol_hash(checkpoint)
+    if expected_hash and found_hash and found_hash != expected_hash:
+        mismatches.append(
+            f"training_protocol_hash: checkpoint={found_hash[:16]}... "
+            f"current={expected_hash[:16]}..."
+        )
+
+    for key, expected in (("model", getattr(args, "model", None)),
+                          ("model_variant", getattr(args, "model_variant", None))):
+        found = config.get(key)
+        if found is not None and expected is not None and found != expected:
+            mismatches.append(f"{key}: checkpoint={found} current={expected}")
+
+    found_router = config.get("router_mode")
+    if "router_mode" in config:
+        expected_router = _current_router_mode(args)
+        if found_router != expected_router:
+            mismatches.append(
+                f"router_mode: checkpoint={found_router} current={expected_router}"
+            )
+
+    if mismatches:
+        raise ValueError(
+            "Checkpoint provenance does not match the current run: "
+            + "; ".join(mismatches)
+            + ". Re-run with the config this checkpoint was trained from."
+        )
+
+
+def _current_router_mode(args):
+    from experiments.train import _router_mode
+
+    return _router_mode(args)
+
+
 def _validate_checkpoint_compatibility(checkpoint, args):
+    _validate_checkpoint_provenance(checkpoint, args)
     checkpoint_config = checkpoint.get("config")
     if checkpoint_config is None:
         return
@@ -255,10 +317,14 @@ def _checkpoint_run_metadata(checkpoint, checkpoint_dir, checkpoint_file):
         "max_epoch": config.get("max_epoch") if isinstance(config, dict) else None,
         "patience": config.get("patience") if isinstance(config, dict) else None,
         "stop_based": config.get("stop_based") if isinstance(config, dict) else None,
-        "training_protocol_hash": (
-            config.get("training_protocol_hash")
-            if isinstance(config, dict)
-            else None
+        # The hash is written at the payload top level, not inside `config`.
+        # Reading it from `config` always produced None, so the recorded
+        # provenance of every finished run said "unknown".
+        "training_protocol_hash": _checkpoint_protocol_hash(checkpoint),
+        "model_variant": config.get("model_variant") if isinstance(config, dict) else None,
+        "router_mode": config.get("router_mode") if isinstance(config, dict) else None,
+        "resolved_config_hash": (
+            config.get("resolved_config_hash") if isinstance(config, dict) else None
         ),
     }
 

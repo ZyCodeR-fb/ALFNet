@@ -77,10 +77,13 @@ def main():
         print()
         print(f"Join k1->k12 slope: min={min(slopes):+.3f} max={max(slopes):+.3f} "
               f"mean={sum(slopes) / len(slopes):+.3f}   "
-              f"(negative = the conditioner uses accumulating own-history)")
-        if max(slopes) > -0.05:
-            print("  never clearly negative -- training longer cannot recover a "
-                  "response that was never present")
+              f"(negative = Join MAE falls as own-history accumulates)")
+        # Report what was observed. Whether a longer run would have developed a
+        # response is not something this file can establish, so it does not say.
+        clearly_negative = [s for s in slopes if s <= -0.05]
+        print(f"  epochs with slope <= -0.05: {len(clearly_negative)} / {len(slopes)}")
+        if not clearly_negative:
+            print("  no epoch in this run reached a clearly negative slope")
 
 
 if __name__ == "__main__":

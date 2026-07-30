@@ -229,7 +229,15 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
     metric_sums = {}
     valid_batches = 0
     lifecycle_cells = {}
-    routing_sums, routing_batches = {}, 0
+    # One counter per diagnostic source. They fire independently -- a routed
+    # graph and a residual gate can both be present -- and a shared counter
+    # divides every mean by the number of sources rather than the number of
+    # batches, silently halving all of them.
+    routing_sums, routing_counts = {}, {}
+    ROUTING_SOURCE = (
+        ("router/", "graph_router"),
+        ("residual_gate", "residual_gate"),
+    )
 
     with torch.set_grad_enabled(training):
         for batch in dataloader:
@@ -419,7 +427,7 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                     for index, share in enumerate(stats["usage"]):
                         key = f"router/{short}/usage/{SUPPORT_NAMES[index]}"
                         routing_sums[key] = routing_sums.get(key, 0.0) + share
-                routing_batches += 1
+                routing_counts["graph_router"] = routing_counts.get("graph_router", 0) + 1
 
             gate = meta.get("residual_gate")
             if mode == "val" and gate is not None:
@@ -428,7 +436,7 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                                     ("residual_gate_nonzero",
                                      float((gate > 1e-6).float().mean()))):
                     routing_sums[name] = routing_sums.get(name, 0.0) + value
-                routing_batches += 1
+                routing_counts["residual_gate"] = routing_counts.get("residual_gate", 0) + 1
 
             routing = meta.get("route_routing")
             if mode == "val" and isinstance(routing, dict) and "alpha" in routing:
@@ -446,7 +454,7 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                 for name, value in report.items():
                     if value == value:                       # skip NaN
                         routing_sums[name] = routing_sums.get(name, 0.0) + value
-                routing_batches += 1
+                routing_counts["route_router"] = routing_counts.get("route_router", 0) + 1
 
             if mode == "val":
                 accumulate_lifecycle_mae(
@@ -471,9 +479,13 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
         if mode == "val"
         else {}
     )
-    routing = (
-        {name: value / routing_batches for name, value in routing_sums.items()}
-        if routing_batches
-        else {}
-    )
+    routing = {}
+    for name, value in routing_sums.items():
+        source = next(
+            (key for prefix, key in ROUTING_SOURCE if name.startswith(prefix)),
+            "route_router",
+        )
+        count = routing_counts.get(source, 0)
+        if count:
+            routing[name] = value / count
     return model, {"total": metrics, "lifecycle": lifecycle, "routing": routing}

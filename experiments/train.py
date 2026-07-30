@@ -1,5 +1,6 @@
 """LCBT training and lifecycle-aware checkpoint selection."""
 
+import hashlib
 import json
 import math
 import os
@@ -74,6 +75,17 @@ def _save_checkpoint(model, optimizer, args, epoch, lifecycle_metrics):
                 "max_epoch": args.max_epoch,
                 "patience": args.patience,
                 "stop_based": "val_lifecycle",
+                # Provenance. Without these a structurally compatible checkpoint
+                # from a different variant, router or protocol loads silently:
+                # the shapes match, so nothing complains, and the run is
+                # attributed to the wrong model.
+                "model": args.model,
+                "model_variant": args.model_variant,
+                "router_mode": _router_mode(args),
+                "resolved_config_hash": _resolved_config_hash(args),
+                # Also kept at the payload top level for backwards
+                # compatibility; the readers look here.
+                "training_protocol_hash": args.training_protocol_hash,
             },
         },
         _checkpoint_path_for_save(args),
@@ -87,6 +99,55 @@ def _save_checkpoint(model, optimizer, args, epoch, lifecycle_metrics):
 
 def _checkpoint_path_for_save(args):
     return os.path.join(args.best_checkpoint_path, "best_val_checkpoint.pth")
+
+
+def _router_mode(args):
+    """The graph expert's router mode, or None when the model has no router."""
+    family = getattr(args, "model_family_cfg", None) or {}
+    recipe = (family.get("recipe") or {}) if isinstance(family, dict) else {}
+    if "moge_router_mode" in recipe:
+        return str(recipe["moge_router_mode"])
+    experts = (family.get("experts") or {}) if isinstance(family, dict) else {}
+    graph = experts.get("graph") or {}
+    path = graph.get("config_path")
+    if not path:
+        return None
+    try:
+        from args import load_args_from_config
+
+        graph_args = load_args_from_config(str(path), overrides={"device": "cpu"})
+    except Exception:                                          # noqa: BLE001
+        return None
+    graph_recipe = (getattr(graph_args, "model_family_cfg", {}) or {}).get("recipe") or {}
+    mode = graph_recipe.get("moge_router_mode")
+    return None if mode is None else str(mode)
+
+
+def _resolved_config_hash(args):
+    """Hash of the resolved configuration, so a silently edited YAML is caught.
+
+    Only the fields that change what the model *is* or how it was trained; run
+    ids, output paths and device are excluded so the same experiment relocated
+    on disk still matches.
+    """
+    volatile = {
+        "run_id", "output_root", "device", "num_workers", "best_checkpoint_path",
+        "best_prediction_path", "best_fig_path", "best_metrics_path", "log_dir",
+        "run_output_dir", "profile_dir", "lcbt_manifest_root", "ples_manifest_root",
+        "exp_id", "wandb", "verbose", "pretrained_model_path",
+        "train_init_checkpoint_path", "paths_are_run_scoped", "mode",
+    }
+    payload = {}
+    for key, value in sorted(vars(args).items()):
+        if key in volatile or key.startswith("_"):
+            continue
+        try:
+            payload[key] = json.dumps(value, sort_keys=True, default=str)
+        except TypeError:
+            payload[key] = str(value)
+    digest = hashlib.sha256()
+    digest.update(json.dumps(payload, sort_keys=True).encode("utf-8"))
+    return digest.hexdigest()
 
 
 def run_epoch(model, data_loaders, optimizer, scheduler, criterions, args, epoch):
@@ -204,6 +265,12 @@ def _write_training_summary(args, finished_epoch, stop_reason, data_loaders):
         json.dump(summary, handle, ensure_ascii=False, indent=2)
     print(f"-> Training summary saved to: {path}")
     _write_validation_history(args)
+    history_path = os.path.join(
+        getattr(args, "best_metrics_path", None) or args.best_checkpoint_path,
+        "validation_history.json",
+    )
+    if os.path.exists(history_path):
+        print(f"-> Validation curve saved to: {history_path}")
 
 
 def _write_validation_history(args):
@@ -220,13 +287,20 @@ def _write_validation_history(args):
     directory = getattr(args, "best_metrics_path", None) or args.best_checkpoint_path
     os.makedirs(directory, exist_ok=True)
     path = os.path.join(directory, "validation_history.json")
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(
-            {"best_val_metric_epoch": int(args.best_val_metric_epoch),
-             "epochs": history},
-            handle, ensure_ascii=False, indent=2,
-        )
-    print(f"-> Validation curve saved to: {path}")
+    # Atomic: a kill between truncate and write must not destroy the epochs
+    # already recorded, which is the whole point of writing it per epoch.
+    temporary = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"best_val_metric_epoch": int(args.best_val_metric_epoch),
+                 "epochs": history},
+                handle, ensure_ascii=False, indent=2,
+            )
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
 
 
 def _print_metrics(metrics):
@@ -314,6 +388,9 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
                 if value is not None and math.isfinite(value)
             },
         })
+        # Written every epoch, not once at the end: a run that is killed or
+        # crashes at epoch 40 should still leave the first 39 epochs behind.
+        _write_validation_history(args)
         wait_count = 0 if improved else wait_count + 1
         if not improved:
             print(f"-> Early stopping count: {wait_count}/{args.patience}")

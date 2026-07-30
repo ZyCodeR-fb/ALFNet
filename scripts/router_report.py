@@ -71,9 +71,9 @@ def _vector(role, age, mask):
     return vector
 
 
-def analyse(state_dict, mode):
+def analyse(state_dict, mode, input_len=INPUT_LEN):
     """Routing distribution per layer per lifecycle state."""
-    states = protocol_states()
+    states = protocol_states(input_len)
     inputs = torch.stack([_vector(role, age, mask) for _, _, role, age, mask in states])
     report = {}
     for key in sorted(k for k in state_dict if k.endswith("router.w_gate")):
@@ -98,6 +98,10 @@ def analyse(state_dict, mode):
                 "top1_margin": round(float(top2[index, 0] - top2[index, 1]), 6),
             })
         chosen = {row["expert"] for row in rows}
+        # Global usage entropy cannot tell "every state routes the same way"
+        # from "each state routes differently and it averages out". Divergence
+        # between the per-state distributions can.
+        max_tv, max_js = _pairwise_divergence(probs)
         report[key.replace(".router.w_gate", "")] = {
             "router_mode": mode,
             "distinct_experts_across_phases": sorted(chosen),
@@ -106,9 +110,33 @@ def analyse(state_dict, mode):
                 sum(r["entropy_ratio"] for r in rows) / len(rows), 5
             ),
             "mean_top1_margin": round(sum(r["top1_margin"] for r in rows) / len(rows), 6),
+            # 0 = every lifecycle state gets the same distribution, i.e. a fixed
+            # operator mixture wearing a router. 1 = fully disjoint per state.
+            "max_pairwise_tv": round(max_tv, 6),
+            "max_pairwise_js": round(max_js, 6),
             "states": rows,
         }
     return report
+
+
+def _pairwise_divergence(probs):
+    """Largest total-variation and Jensen-Shannon distance between any two states.
+
+    Both are computed over the canonical state table, so "phase/k specialisation"
+    means these are materially above zero, whatever the global usage looks like.
+    """
+    count = probs.shape[0]
+    max_tv, max_js = 0.0, 0.0
+    for i in range(count):
+        p = probs[i]
+        for j in range(i + 1, count):
+            q = probs[j]
+            max_tv = max(max_tv, float(0.5 * (p - q).abs().sum()))
+            m = 0.5 * (p + q)
+            kl_pm = float((p * ((p.clamp_min(1e-12) / m.clamp_min(1e-12)).log())).sum())
+            kl_qm = float((q * ((q.clamp_min(1e-12) / m.clamp_min(1e-12)).log())).sum())
+            max_js = max(max_js, math.sqrt(max(0.5 * (kl_pm + kl_qm), 0.0)))
+    return max_tv, max_js
 
 
 def _phase_table(report):
@@ -118,8 +146,9 @@ def _phase_table(report):
         entry = report[layer]
         lines.append(
             f"{layer}  mode={entry['router_mode']}  "
-            f"entropy_ratio={entry['mean_entropy_ratio']:.4f}  "
-            f"top1_margin={entry['mean_top1_margin']:.6f}  "
+            f"H={entry['mean_entropy_ratio']:.4f}  "
+            f"margin={entry['mean_top1_margin']:.6f}  "
+            f"maxTV={entry['max_pairwise_tv']:.4f}  maxJS={entry['max_pairwise_js']:.4f}  "
             f"{'COLLAPSED' if entry['collapsed'] else 'experts=' + ','.join(entry['distinct_experts_across_phases'])}"
         )
         for row in entry["states"]:
@@ -139,8 +168,13 @@ def main():
     parser.add_argument("--output-dir", default=None,
                         help="defaults to <run_dir>/reports")
     parser.add_argument("--mode", default=None,
-                        help="router mode label for the report; only cosmetic, "
-                             "the analysis reads w_gate directly")
+                        help="override the router mode recorded in the checkpoint; "
+                             "a soft and a hard router are read differently, so "
+                             "this is not cosmetic")
+    parser.add_argument("--input-len", type=int, default=None,
+                        help="override the input_len recorded in the checkpoint; "
+                             "state_age is k/input_len, so a wrong value mislabels "
+                             "every phase row")
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
@@ -152,10 +186,28 @@ def main():
     if not any(k.endswith("router.w_gate") for k in state_dict):
         raise SystemExit("this run has no lifecycle-routed graph convolutions")
 
-    mode = args.mode or str(
-        (payload.get("config") or {}).get("moge_router_mode", "unknown")
+    config = payload.get("config") or {}
+    # The phase-by-k table is only meaningful for the input_len the run used:
+    # `state_age` is k / input_len, so a wrong L silently mislabels every row.
+    input_len = args.input_len or config.get("input_len")
+    if input_len is None:
+        raise SystemExit(
+            "checkpoint does not record input_len and --input-len was not given; "
+            "the k -> state_age mapping cannot be reconstructed safely"
+        )
+    input_len = int(input_len)
+
+    mode = args.mode or config.get("router_mode")
+    if mode is None:
+        raise SystemExit(
+            "checkpoint does not record router_mode (written by train.py since the "
+            "provenance fix) and --mode was not given; refusing to guess, because a "
+            "soft and a hard router are read completely differently"
+        )
+    protocol_hash = payload.get("training_protocol_hash") or config.get(
+        "training_protocol_hash"
     )
-    report = analyse(state_dict, mode)
+    report = analyse(state_dict, str(mode), input_len=input_len)
 
     output_dir = Path(args.output_dir) if args.output_dir else run_dir / "reports"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -168,6 +220,13 @@ def main():
     collapsed = [name for name, entry in report.items() if entry["collapsed"]]
     print(text)
     print()
+    print(f"mode={mode}  input_len={input_len}  "
+          f"protocol={str(protocol_hash)[:16] if protocol_hash else 'unrecorded'}")
+    tvs = [entry["max_pairwise_tv"] for entry in report.values()]
+    print(f"max pairwise TV across lifecycle states: "
+          f"min={min(tvs):.4f} mean={sum(tvs) / len(tvs):.4f} max={max(tvs):.4f}")
+    print("  ~0 = the same distribution for every phase and k, i.e. a fixed "
+          "operator mixture rather than lifecycle routing")
     print(f"layers: {len(report)}   collapsed: {len(collapsed)}")
     if collapsed:
         print("  collapsed layers route every lifecycle phase to one operator:")

@@ -74,15 +74,48 @@ class DataPreparation(nn.Module):
         self.gating = SparseGatingNetwork(configs)
 
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None):
+        """Complete the unobserved sensors, one sample at a time.
+
+        The source detects unknown nodes with ``sum(x_enc, dim=(0,1)) == 0``,
+        i.e. a node counts as unknown only if it is zero across the *whole
+        batch*. That is exactly right in the setting MoGERNN was written for,
+        where one fixed sensor set is unobserved for the entire dataset.
+
+        LCBT hides a different cohort in every sample, so the batch-wide
+        intersection is usually empty: measured on METR-LA with disjoint
+        cohorts, B=1 finds 8 unknown nodes and B>=4 finds 0, which switches the
+        aggregator completion off for the whole of training and validation while
+        leaving it on at test time (the async evaluator runs at batch size 1).
+
+        Running the original rule per sample restores the source semantics under
+        this protocol: at B=1 it is bit-identical to the reference, and a mixed
+        batch now equals the concatenation of its samples. Nothing about the
+        model changes -- no lifecycle feature and no ALFNet module is consulted,
+        only the unknown-node set that the reference already computed.
+        """
         x_enc = x_enc.squeeze(-1)
-        batch_unknown_nodes = torch.where(torch.sum(x_enc, dim=(0, 1)) == 0)[0].cpu().tolist()
         x_enc = rearrange(x_enc, "b t n -> b n t")
         gate_weights = self.gating(x_enc)
         adj_noselfloop = adj.clone()
-        adj_noselfloop[torch.eye(adj.shape[0]).bool()] = 0
-        expert_outputs = [expert(adj_noselfloop, x_enc, batch_unknown_nodes) for expert in self.experts]
-        expert_outputs_stack = torch.stack(expert_outputs, dim=2)
-        combied_out = torch.sum(gate_weights.unsqueeze(-1) * expert_outputs_stack, dim=2)
+        adj_noselfloop[torch.eye(adj.shape[0], device=adj.device).bool()] = 0
+
+        completed = []
+        for index in range(x_enc.shape[0]):
+            sample = x_enc[index:index + 1]
+            # `sum(dim=(0,1))` over a single-sample slice is the reference rule
+            # applied to that sample alone.
+            unknown_nodes = torch.where(
+                torch.sum(sample, dim=(0, 2)) == 0
+            )[0].cpu().tolist()
+            outputs = [
+                expert(adj_noselfloop, sample, unknown_nodes) for expert in self.experts
+            ]
+            stacked = torch.stack(outputs, dim=2)
+            completed.append(
+                torch.sum(gate_weights[index:index + 1].unsqueeze(-1) * stacked, dim=2)
+            )
+        combied_out = torch.cat(completed, dim=0)
+
         miss_ix = (x_enc == 0).int()
         x_enc = x_enc * (1 - miss_ix) + combied_out * miss_ix
         x_enc = rearrange(x_enc, "b n t -> b t n 1")
