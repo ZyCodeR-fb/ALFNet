@@ -231,16 +231,33 @@ Unrelated but easy to confuse: `ALFGraph`'s `teacher_forcing_ratio` is DCRNN sch
 nothing to do with distillation. Leave it alone.
 
 Candidates that have been run and did not improve `fg1` on validation S+J+F: `a b c d` (and combinations),
-the frozen label-residual family `rt rd rtg`, and the training-objective knobs `tq wg tw` (tail weight,
-worst-group weight, and both). For `tq/wg/tw` the 0.1 weight turned out to be far too strong relative to a
+the frozen label-residual family `rt rd rtg`, the training-objective knobs `tq wg tw` (tail weight,
+worst-group weight, and both), and `jr` — the end-to-end form of the protected additive residual, which
+lost on **all four** validation groups (S+J+F mean 4.282 vs 4.066) with its gate measurably open
+(`residual_gate_mean` 0.42), so the branch was active and harmful rather than switched off. Additive
+correction over the FiLM anchor is now refuted in both the frozen (`rt/rd/rtg`) and joint (`d`, `jr`)
+forms; do not propose a third. For `tq/wg/tw` the 0.1 weight turned out to be far too strong relative to a
 base MSE of ~0.157; a finer sweep is deliberately *not* being run. Also decided and closed: no CAGrad or
 PCGrad (24 real-batch gradient probes showed all six group-pair cosines positive — no systematic conflict),
 no extra gating (FiLM is measurably active), no distribution-shift module (no evidence of shift yet).
 
-**Next**: cross-dataset confirmation on PEMS-BAY under identical protocol semantics — its own manifest,
-node count, time boundaries, scaler, unseen strata, cohort counts and protocol hash, never a copy of
-METR-LA's. First round is `fg1` seed 32 and source-native MoGERNN seed 32 only. Multi-seed (32/42/52) and
-the full baseline table wait until the architecture is frozen.
+**Cross-dataset status: open.** The PEMS-BAY seed-32 pair has been run (`fg1bay-s32`, `mgbay-s32`, both
+under hash `e9684b35…`). It is *not* a confirmation yet and the finding is not settled, so no conclusion is
+recorded here. Two operating rules do follow from it and are stable:
+
+* **PEMS-BAY test has not been run and must stay unrun** until a candidate wins on PEMS-BAY *validation*.
+  Its value is that it has not been inspected; spending it on a validation-stage loss destroys that.
+* **Never retune a PEMS-BAY config to close a gap.** The twin rule (`tests/test_pemsbay_configs.py`) is the
+  point of the experiment. A real consequence to state in the paper rather than fix: the twins inherit
+  hyper-parameters selected on METR-LA, so a transfer gap is partly a hyper-parameter transfer gap.
+
+The diagnostic worth knowing before touching the conditioner: on METR-LA `fg1`'s validation Join MAE falls
+~0.99 from `k1` to `k12`, i.e. the conditioner uses accumulating own-history. On PEMS-BAY the same curve is
+**flat** (+0.03) while source-native MoGERNN's falls 0.28 — and `fg1bay` early-stopped with its best
+checkpoint at epoch 4 of 14, against MoGERNN's epoch 25 of 35. Whether that is under-training plus the
+equal-weight `val_lifecycle` rule locking in an early Unseen minimum, or the conditioner genuinely failing
+at 325 nodes, is unresolved; `train.py` keeps the per-epoch group curve in `validation_group_history` but
+only writes the aggregated volatility, so answering it needs the run's stdout log.
 
 ## Housekeeping
 
