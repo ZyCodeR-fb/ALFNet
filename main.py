@@ -14,6 +14,7 @@ from experiments import async_lifecycle_inference, train_model
 from model.regist_model import load_model_class
 from utils.evaluation import MSEPinballLoss, MultiPinBallLoss, SlitPhyLoss, masked_gaussian_nll_loss, rmse_loss
 from utils.logtool import print_config, print_header, print_train, set_wandb
+from utils.run_logger import install_run_log
 
 
 MAX_EXP_ID_COMPONENT_LEN = 250
@@ -300,6 +301,12 @@ if __name__ == "__main__":
     args.exp_id = build_exp_id(args)
     # Must run after exp_id exists: the default run folder is the experiment id.
     apply_output_root(args)
+    # Install before anything prints: the per-epoch lifecycle group numbers are
+    # only ever written to stdout, and they are the diagnostic that
+    # training_summary.json cannot reconstruct.
+    run_log_path = install_run_log(args)
+    if run_log_path:
+        print(f"-> Console log: {run_log_path}")
     wandb = set_wandb(args)
     configs = OmegaConf.create(vars(args))
     pl.seed_everything(args.seed)
