@@ -31,9 +31,16 @@ Usage:
 import argparse
 import json
 import math
+import sys
 from pathlib import Path
 
 import torch
+
+# Direct execution sets ``sys.path[0]`` to ``scripts/`` rather than the
+# repository root, so make the project's layers package importable.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from layers.lifecycle_moge import SUPPORT_NAMES
 
