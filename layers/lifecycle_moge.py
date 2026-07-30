@@ -156,18 +156,23 @@ class LifecycleRouter(nn.Module):
             self._usage, self._entropy = [], []
 
     def pop_diagnostics(self):
-        """Mean gate mass per expert and mean routing entropy since the reset."""
+        """Expert usage plus the per-node and population entropies."""
         if not self._usage:
             return None
         usage = torch.stack(self._usage).mean(dim=0)
-        entropy = torch.stack(self._entropy).mean()
+        gate_entropy = torch.stack(self._entropy).mean()
+        share = usage / usage.sum().clamp_min(1e-12)
+        usage_entropy = -(share.clamp_min(1e-12).log() * share).sum()
+        uniform = math.log(self.num_experts)
         self._usage, self._entropy = [], []
         return {
             "usage": usage.tolist(),
-            "entropy": float(entropy),
-            # log(num_experts) is the value a router that has learned nothing
-            # sits at, so the ratio is directly readable.
-            "entropy_ratio": float(entropy / math.log(self.num_experts)),
+            # per-node: 1.0 = every node mixes uniformly. Always 0 for a hard
+            # router, so do not read it as decisiveness there.
+            "entropy_ratio": float(gate_entropy / uniform),
+            # population: 1.0 = the five operators are used equally often, which
+            # for `soft` means a uniform ensemble rather than routing.
+            "usage_entropy_ratio": float(usage_entropy / uniform),
         }
 
     def _gates_to_load(self, gates):
@@ -268,21 +273,26 @@ class LifecycleRouter(nn.Module):
         return gates.reshape(batch, nodes, self.num_experts), aux_loss.squeeze()
 
     def _record(self, gates):
-        """Usage mass and routing entropy, for reading a run afterwards.
+        """Usage mass and two entropies, because one of them is degenerate.
 
-        A router can look busy while carrying no information: usage alone does
-        not distinguish "each lifecycle state picks its own operator" from
-        "every node draws uniformly at random". Entropy separates them --
-        near log(num_experts) means the router is not committing.
+        `gate_entropy` is the per-node entropy of the gate vector. It separates
+        "this node mixes every operator" from "this node commits to one" -- but
+        for a hard router the gate is one-hot by construction, so it is
+        identically zero and says nothing. Reading only that number would have
+        made `st_top1` look maximally decisive and `soft` look useless.
+
+        `usage_entropy` is the entropy of the *population* usage, i.e. how the
+        mass is spread across experts once averaged over nodes. That is the one
+        that distinguishes real specialisation from a uniform ensemble, and it
+        is meaningful for both hard and soft routers.
         """
         if not self._collect:
             return
         with torch.no_grad():
             mass = gates.detach()
             probs = mass / mass.sum(dim=1, keepdim=True).clamp_min(1e-12)
-            entropy = -(probs.clamp_min(1e-12).log() * probs).sum(dim=1).mean()
+            self._entropy.append(-(probs.clamp_min(1e-12).log() * probs).sum(dim=1).mean())
             self._usage.append(mass.mean(dim=0))
-            self._entropy.append(entropy)
 
 
 class LifecycleRoutedGraphConv(nn.Module):

@@ -413,10 +413,9 @@ def shared_step(model, dataloader, optimizer, criterions, args, mode, train, epo
                 # the router is carrying no information at all.
                 for layer, stats in graph_router.items():
                     short = layer.replace("cells.", "c").replace("_gate", "")
-                    routing_sums[f"router/{short}/entropy_ratio"] = (
-                        routing_sums.get(f"router/{short}/entropy_ratio", 0.0)
-                        + stats["entropy_ratio"]
-                    )
+                    for name in ("entropy_ratio", "usage_entropy_ratio"):
+                        key = f"router/{short}/{name}"
+                        routing_sums[key] = routing_sums.get(key, 0.0) + stats[name]
                     for index, share in enumerate(stats["usage"]):
                         key = f"router/{short}/usage/{SUPPORT_NAMES[index]}"
                         routing_sums[key] = routing_sums.get(key, 0.0) + share

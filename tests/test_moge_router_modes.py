@@ -183,14 +183,38 @@ def test_diagnostics_report_usage_and_entropy(mode):
     report = conv.pop_router_diagnostics()
     assert report is not None
     assert len(report["usage"]) == len(SUPPORT_NAMES)
-    assert report["usage"] == pytest.approx(report["usage"])
     assert sum(report["usage"]) == pytest.approx(1.0, abs=1e-4)
-    # entropy_ratio is normalised by log(num_experts), so 1.0 means "uninformative"
-    assert 0.0 <= report["entropy_ratio"] <= 1.0 + 1e-6
-    assert report["entropy"] == pytest.approx(
-        report["entropy_ratio"] * math.log(len(SUPPORT_NAMES)), rel=1e-5
-    )
+    # both entropies are normalised by log(num_experts), so 1.0 = uninformative
+    for name in ("entropy_ratio", "usage_entropy_ratio"):
+        assert 0.0 <= report[name] <= 1.0 + 1e-6, name
     assert conv.pop_router_diagnostics() is None, "diagnostics must drain on read"
+
+
+def test_per_node_entropy_is_degenerate_for_hard_routers():
+    """Why `usage_entropy_ratio` exists at all.
+
+    A one-hot gate has zero entropy by construction, so the per-node number
+    makes every hard router look maximally decisive and every dense router look
+    useless. Reading only that would invert the comparison between the two
+    candidates, so both are reported.
+    """
+    supports, x, state = _inputs()
+    reports = {}
+    for mode in ("soft", "st_top1"):
+        conv = _conv(mode, k=1)
+        conv.eval()
+        conv.set_collect_diagnostics(True)
+        with torch.no_grad():
+            conv(x, None, None, supports=supports, state=state)
+        reports[mode] = conv.pop_router_diagnostics()
+
+    # a hard router's per-node gate entropy is identically zero...
+    assert reports["st_top1"]["entropy_ratio"] == pytest.approx(0.0, abs=1e-6)
+    # ...while a dense one at zero-init spreads mass evenly
+    assert reports["soft"]["entropy_ratio"] > 0.99
+    # the population view is meaningful for both, and at zero-init the dense
+    # router is a uniform ensemble rather than a router
+    assert reports["soft"]["usage_entropy_ratio"] > 0.99
 
 
 def test_diagnostics_are_off_by_default():

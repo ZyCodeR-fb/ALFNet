@@ -203,6 +203,30 @@ def _write_training_summary(args, finished_epoch, stop_reason, data_loaders):
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(summary, handle, ensure_ascii=False, indent=2)
     print(f"-> Training summary saved to: {path}")
+    _write_validation_history(args)
+
+
+def _write_validation_history(args):
+    """Persist the per-epoch lifecycle curve, not just its standard deviation.
+
+    The summary keeps `validation_group_volatility` and throws away the curve it
+    was computed from, so answering "was this group still improving when the run
+    stopped?" meant reading a 500-line console log. That question comes up every
+    time a run early-stops, so the curve belongs in a file next to the summary.
+    """
+    history = getattr(args, "validation_lifecycle_history", None)
+    if not history:
+        return
+    directory = getattr(args, "best_metrics_path", None) or args.best_checkpoint_path
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, "validation_history.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {"best_val_metric_epoch": int(args.best_val_metric_epoch),
+             "epochs": history},
+            handle, ensure_ascii=False, indent=2,
+        )
+    print(f"-> Validation curve saved to: {path}")
 
 
 def _print_metrics(metrics):
@@ -245,6 +269,7 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
     args.epoch_seconds = []
     args.seconds_to_best = float("nan")
     args.validation_group_history = {}
+    args.validation_lifecycle_history = []
     args.validation_group_volatility = {}
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -278,6 +303,17 @@ def train_model(model, optimizer, scheduler, data_loaders, criterions, args, wan
             value = metrics["val"]["lifecycle"].get(name)
             if value is not None and math.isfinite(value):
                 args.validation_group_history.setdefault(name, []).append(float(value))
+        # The full lifecycle row for this epoch, so the phase and per-k curves
+        # survive the terminal too -- reconstructing them from the log is what
+        # this is meant to replace.
+        args.validation_lifecycle_history.append({
+            "epoch": int(epoch),
+            **{
+                name: round(float(value), 6)
+                for name, value in metrics["val"]["lifecycle"].items()
+                if value is not None and math.isfinite(value)
+            },
+        })
         wait_count = 0 if improved else wait_count + 1
         if not improved:
             print(f"-> Early stopping count: {wait_count}/{args.patience}")
