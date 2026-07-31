@@ -16,6 +16,7 @@ import copy
 import pytest
 
 from args import load_args_from_config
+from main import _bind_evaluation_protocol_hashes, _validate_checkpoint_provenance
 from utils.canonical_config import (
     build_canonical_config,
     canonical_config_hash,
@@ -128,3 +129,35 @@ def test_protocol_versions_enter_the_hash():
     before = _hash(args)
     args.lce_protocol_version = args.lce_protocol_version + 1
     assert _hash(args) != before
+
+
+def test_async_manifest_hashes_are_bound_before_checkpoint_validation():
+    args = _args()
+    manifest = {
+        "training_protocol_hash": "train-new",
+        "lce_protocol_hash": "lce-new",
+        "ples_protocol_hash": "ples-new",
+    }
+    _bind_evaluation_protocol_hashes(args, manifest)
+
+    checkpoint = {
+        "training_protocol_hash": "train-old",
+        "config": {
+            "model": args.model,
+            "model_variant": args.model_variant,
+            "canonical_config_hash": args.canonical_config_hash,
+            "lce_protocol_hash": "lce-old",
+            "ples_protocol_hash": "ples-old",
+        },
+    }
+    with pytest.raises(ValueError, match="training_protocol_hash"):
+        _validate_checkpoint_provenance(checkpoint, args)
+
+
+def test_async_manifest_must_carry_all_protocol_hashes():
+    args = _args()
+    with pytest.raises(ValueError, match="ples_protocol_hash"):
+        _bind_evaluation_protocol_hashes(
+            args,
+            {"training_protocol_hash": "train", "lce_protocol_hash": "lce"},
+        )

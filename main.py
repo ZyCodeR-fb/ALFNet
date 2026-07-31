@@ -162,6 +162,19 @@ def _checkpoint_protocol_hash(checkpoint):
     return config.get("training_protocol_hash")
 
 
+def _bind_evaluation_protocol_hashes(args, manifest):
+    """Bind the frozen manifest identity before validating a test checkpoint."""
+    for name in (
+        "training_protocol_hash",
+        "lce_protocol_hash",
+        "ples_protocol_hash",
+    ):
+        value = manifest.get(name)
+        if not value:
+            raise ValueError(f"Async-test manifest is missing {name}")
+        setattr(args, name, value)
+
+
 def _validate_checkpoint_provenance(checkpoint, args):
     """Refuse a checkpoint that is shape-compatible but is a different model.
 
@@ -170,6 +183,13 @@ def _validate_checkpoint_provenance(checkpoint, args):
     is silent and the result gets attributed to the wrong variant.
     """
     config = checkpoint.get("config") or {}
+    # Identity mismatches are never negotiable: a different model or variant is
+    # a different experiment, and no flag makes loading it meaningful.
+    fatal = []
+    # Hash mismatches say "this was produced under a different definition". That
+    # is usually wrong too, but not always -- a hash *definition* can be
+    # corrected after a checkpoint was written, and the weights stay valid. So
+    # `--allow_legacy_checkpoint` can downgrade these to a warning.
     mismatches = []
 
     expected_hash = getattr(args, "training_protocol_hash", None)
@@ -184,7 +204,7 @@ def _validate_checkpoint_provenance(checkpoint, args):
                           ("model_variant", getattr(args, "model_variant", None))):
         found = config.get(key)
         if found is not None and expected is not None and found != expected:
-            mismatches.append(f"{key}: checkpoint={found} current={expected}")
+            fatal.append(f"{key}: checkpoint={found} current={expected}")
 
     for key, attribute in (("canonical_config_hash", "canonical_config_hash"),
                            ("lce_protocol_hash", "lce_protocol_hash"),
@@ -195,6 +215,12 @@ def _validate_checkpoint_provenance(checkpoint, args):
             mismatches.append(
                 f"{key}: checkpoint={str(found)[:16]}... current={str(expected)[:16]}..."
             )
+
+    if fatal:
+        raise ValueError(
+            "Checkpoint is a different model: " + "; ".join(fatal)
+            + ". No flag overrides this."
+        )
 
     # A checkpoint from before provenance was recorded has none of these fields.
     # Loading it silently is how a result gets attributed to the wrong model, so
@@ -212,15 +238,25 @@ def _validate_checkpoint_provenance(checkpoint, args):
     if "router_mode" in config:
         expected_router = _current_router_mode(args)
         if found_router != expected_router:
-            mismatches.append(
-                f"router_mode: checkpoint={found_router} current={expected_router}"
+            # `fg1`, `gs` and `g1` are structurally identical and differ only
+            # here, so this is an identity mismatch, not a definition drift.
+            raise ValueError(
+                f"Checkpoint uses a different graph router: checkpoint="
+                f"{found_router} current={expected_router}. No flag overrides this."
             )
 
     if mismatches:
-        raise ValueError(
-            "Checkpoint provenance does not match the current run: "
+        if not getattr(args, "allow_legacy_checkpoint", False):
+            raise ValueError(
+                "Checkpoint provenance does not match the current run: "
+                + "; ".join(mismatches)
+                + ". Re-run with the config this checkpoint was trained from, or "
+                "pass --allow_legacy_checkpoint if the hash *definition* changed "
+                "after this checkpoint was written."
+            )
+        print(
+            "-> WARNING: provenance not verified (--allow_legacy_checkpoint): "
             + "; ".join(mismatches)
-            + ". Re-run with the config this checkpoint was trained from."
         )
 
 
@@ -455,10 +491,13 @@ if __name__ == "__main__":
     print_train(args)
 
     if args.test_for_async_lifecycle:
-        model, args.best_checkpoint_path = load_pretrained_model(model, args)
         args.slide_step = 1
         test_loader = data_provider(args, "test")
         manifest = test_loader.dataset.get_protocol_manifest()  # type: ignore
+        # Loading before the manifest exists leaves these expectations unset,
+        # which silently skips the checkpoint's protocol-hash checks.
+        _bind_evaluation_protocol_hashes(args, manifest)
+        model, args.best_checkpoint_path = load_pretrained_model(model, args)
         print(
             f"PLES test data: {manifest['dataset']['time_steps']} time steps | "
             f"{manifest['resolved']['origin_count']} origins | "

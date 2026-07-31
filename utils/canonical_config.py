@@ -41,6 +41,13 @@ RUNTIME_FIELDS = frozenset({
     "pretrained_model_path", "train_init_checkpoint_path",
     "lcbt_overwrite_manifest", "ples_overwrite_manifest",
     "num_params", "loaded_checkpoint_metadata", "allow_legacy_checkpoint",
+    # Which *mode* a configuration is being executed in. `train` and
+    # `test_async` are two runs of the same experiment, and the evaluation pass
+    # has to be able to load the checkpoint the training pass produced -- so a
+    # flag that flips between them cannot be part of the configuration's
+    # identity. Everything that defines the model, the data and the protocol is
+    # unaffected and still enters the hash.
+    "test_for_async_lifecycle", "train_for_async_lifecycle",
 })
 
 # Anything the trainer writes back onto `args` while running. Listed by prefix
