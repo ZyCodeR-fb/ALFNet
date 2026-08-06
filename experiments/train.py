@@ -87,8 +87,15 @@ def _save_checkpoint(model, optimizer, args, epoch, lifecycle_metrics):
                 # Frozen at parse time by `utils.canonical_config`, so it
                 # identifies the configuration rather than the run.
                 "canonical_config_hash": getattr(args, "canonical_config_hash", None),
-                "lce_protocol_hash": getattr(args, "lce_protocol_hash", None),
-                "ples_protocol_hash": getattr(args, "ples_protocol_hash", None),
+                # No lce/ples hash here on purpose. The training manifest and
+                # the evaluation manifest both expose fields called
+                # `lce_protocol_hash`, but they hash different dicts: the
+                # training side includes `validation_time_range` and is dataset
+                # dependent, the evaluation side is a pure protocol definition
+                # and is identical across datasets. Storing one and comparing it
+                # against the other is a guaranteed false positive on every
+                # test_async run. The evaluation protocol identity belongs in
+                # the results files, which already record it.
                 # The graph the structural encoders were built from. Two
                 # datasets with the same node count give shape-compatible
                 # state dicts, so nothing else would catch a mismatch.

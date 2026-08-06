@@ -206,15 +206,21 @@ def _validate_checkpoint_provenance(checkpoint, args):
         if found is not None and expected is not None and found != expected:
             fatal.append(f"{key}: checkpoint={found} current={expected}")
 
-    for key, attribute in (("canonical_config_hash", "canonical_config_hash"),
-                           ("lce_protocol_hash", "lce_protocol_hash"),
-                           ("ples_protocol_hash", "ples_protocol_hash")):
-        found = config.get(key)
-        expected = getattr(args, attribute, None)
-        if found and expected and str(found) != str(expected):
-            mismatches.append(
-                f"{key}: checkpoint={str(found)[:16]}... current={str(expected)[:16]}..."
-            )
+    # Only `canonical_config_hash` is compared here. `lce_protocol_hash` and
+    # `ples_protocol_hash` are deliberately excluded: the training manifest and
+    # the evaluation manifest expose those names over different dicts -- the
+    # training side carries `validation_time_range` and is dataset dependent,
+    # the evaluation side is a protocol definition shared by every dataset --
+    # so comparing a stored one against a freshly bound one always fails.
+    # `training_protocol_hash` above is comparable, because the evaluation
+    # manifest copies it verbatim from the training manifest.
+    found = config.get("canonical_config_hash")
+    expected = getattr(args, "canonical_config_hash", None)
+    if found and expected and str(found) != str(expected):
+        mismatches.append(
+            f"canonical_config_hash: checkpoint={str(found)[:16]}... "
+            f"current={str(expected)[:16]}..."
+        )
 
     if fatal:
         raise ValueError(

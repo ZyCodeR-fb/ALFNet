@@ -154,6 +154,66 @@ def test_async_manifest_hashes_are_bound_before_checkpoint_validation():
         _validate_checkpoint_provenance(checkpoint, args)
 
 
+def test_a_legitimate_test_async_load_passes_provenance():
+    """The case that was silently broken.
+
+    `train.py` used to store the *training* manifest's `lce_protocol_hash`, and
+    `test_async` binds the *evaluation* manifest's field of the same name. The
+    two hash different dicts -- the training side includes
+    `validation_time_range` and is dataset dependent, the evaluation side is a
+    protocol definition identical across datasets -- so every real test run
+    tripped the provenance check. Measured on PEMS-BAY: checkpoint carried
+    b8eeda69..., evaluation bound f6c1faad....
+    """
+    train_args = _args()
+    train_args.batch_size = 64
+    checkpoint = {
+        "training_protocol_hash": "train-hash",
+        "config": {
+            "model": train_args.model,
+            "model_variant": train_args.model_variant,
+            "router_mode": None,
+            "canonical_config_hash": train_args.canonical_config_hash,
+            "training_protocol_hash": "train-hash",
+        },
+    }
+
+    eval_args = _args()
+    eval_args.batch_size = 64
+    _bind_evaluation_protocol_hashes(eval_args, {
+        "training_protocol_hash": "train-hash",
+        # deliberately different from anything a training manifest would hold
+        "lce_protocol_hash": "eval-side-lce",
+        "ples_protocol_hash": "eval-side-ples",
+    })
+
+    # must not raise, and must not need --allow_legacy_checkpoint
+    assert not getattr(eval_args, "allow_legacy_checkpoint", False)
+    _validate_checkpoint_provenance(checkpoint, eval_args)
+
+
+def test_evaluation_side_protocol_hashes_are_not_compared():
+    """Storing them would reintroduce the false positive, so they are absent."""
+    args = _args()
+    _bind_evaluation_protocol_hashes(args, {
+        "training_protocol_hash": "t",
+        "lce_protocol_hash": "eval-lce",
+        "ples_protocol_hash": "eval-ples",
+    })
+    checkpoint = {
+        "training_protocol_hash": "t",
+        "config": {
+            "model": args.model,
+            "model_variant": args.model_variant,
+            "canonical_config_hash": args.canonical_config_hash,
+            # a stale training-side value, as older checkpoints carry
+            "lce_protocol_hash": "training-side-lce",
+            "ples_protocol_hash": "training-side-ples",
+        },
+    }
+    _validate_checkpoint_provenance(checkpoint, args)
+
+
 def test_async_manifest_must_carry_all_protocol_hashes():
     args = _args()
     with pytest.raises(ValueError, match="ples_protocol_hash"):
