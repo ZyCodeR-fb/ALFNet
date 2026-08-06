@@ -261,6 +261,56 @@ def _write_training_summary(args, finished_epoch, stop_reason, data_loaders):
     )
     if os.path.exists(history_path):
         print(f"-> Validation curve saved to: {history_path}")
+    _write_router_report(args)
+
+
+def _write_router_report(args):
+    """Phase-by-k routing table, written by the run rather than by hand.
+
+    The routing question -- does the mixture depend on the lifecycle state at
+    all? -- is the whole reason these variants exist, so the answer should be an
+    artefact of every run, not something recovered afterwards by remembering to
+    invoke a script. The table is reconstructed from the router weights, which
+    is exact: the router's only input is the lifecycle state, and LCBT makes
+    that a deterministic function of (scenario, k).
+    """
+    checkpoint_path = os.path.join(args.best_checkpoint_path, "best_val_checkpoint.pth")
+    if not os.path.exists(checkpoint_path):
+        return
+    try:
+        import sys
+
+        scripts_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"
+        )
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        from router_report import analyse, _phase_table
+
+        payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        state_dict = payload.get("state_dict") or {}
+        if not any(key.endswith("router.w_gate") for key in state_dict):
+            return                       # no conditional router to report on
+        config = payload.get("config") or {}
+        report = analyse(
+            state_dict,
+            str(config.get("router_mode") or "unknown"),
+            input_len=int(args.input_len),
+        )
+    except Exception as exc:                                   # noqa: BLE001
+        # A diagnostic must never take the run down with it.
+        print(f"-> Router report skipped: {type(exc).__name__}: {exc}")
+        return
+
+    directory = getattr(args, "best_metrics_path", None) or args.best_checkpoint_path
+    os.makedirs(directory, exist_ok=True)
+    with open(os.path.join(directory, "router_report.json"), "w", encoding="utf-8") as handle:
+        json.dump(report, handle, ensure_ascii=False, indent=2)
+    with open(os.path.join(directory, "router_report.txt"), "w", encoding="utf-8") as handle:
+        handle.write(_phase_table(report) + "\n")
+    collapsed = [name for name, entry in report.items() if entry["collapsed"]]
+    print(f"-> Router report saved to: {directory}"
+          f"  ({len(report)} layers, {len(collapsed)} collapsed)")
 
 
 def _write_validation_history(args):

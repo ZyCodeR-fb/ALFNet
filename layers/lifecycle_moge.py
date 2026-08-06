@@ -79,7 +79,7 @@ def build_lifecycle_supports(adjacency, forward_support, backward_support):
     )
 
 
-ROUTER_MODES = ("noisy_topk", "soft", "st_top1")
+ROUTER_MODES = ("noisy_topk", "soft", "st_top1", "static")
 
 # Softmax temperature for the straight-through gradient. Fixed at 1.0 rather
 # than exposed as a knob: this round tests whether a differentiable router helps
@@ -118,6 +118,19 @@ class LifecycleRouter(nn.Module):
         Jang et al. ICLR 2017). Deterministic -- see
         ``_straight_through_top1_gating`` for why the Gumbel sample is left out.
 
+    ``static``
+        One learned convex combination shared by every node, with no lifecycle
+        input at all: five logits per convolution instead of a 6x5 projection.
+        This is the control arm for "does the *dynamic* part earn its keep?".
+        Measured on the trained `gs` router, conditioning changes the forecast
+        by 0.74% on average (max 6.6e-02 against a mean prediction magnitude of
+        0.295) and moves a gate by at most 0.19 away from 1/5 -- real, but the
+        same order as the differences between candidate models. That is a
+        question for a controlled run, not for a judgement call, and this mode
+        is what makes the run controlled. If it matches `soft`, the honest
+        description of the mechanism is a heterogeneous operator mixture rather
+        than lifecycle-aware routing.
+
     The auxiliary load-balance formula is deliberately unchanged across modes:
     under ``soft`` every gate is positive, so ``_gates_to_load`` is constant and
     ``cv_squared`` of it is zero, leaving the importance term alone. That keeps
@@ -137,8 +150,18 @@ class LifecycleRouter(nn.Module):
         self.k = int(k)
         self.noisy_gating = bool(noisy_gating)
         self.loss_coef = float(loss_coef)
-        self.w_gate = nn.Parameter(torch.zeros(int(state_dim), self.num_experts))
-        self.w_noise = nn.Parameter(torch.zeros(int(state_dim), self.num_experts))
+        # Allocated per mode, not unconditionally: giving every mode every
+        # tensor would change the parameter count of the existing variants and
+        # break their checkpoints, and would leave dead weights in the graph.
+        # `static` genuinely is the smaller model -- five logits instead of two
+        # 6x5 projections -- and the count should say so.
+        if self.mode == "static":
+            # Zero init, so it starts at exactly 1/E: the same place `soft`
+            # starts, leaving conditioning as the only difference between them.
+            self.w_static = nn.Parameter(torch.zeros(self.num_experts))
+        else:
+            self.w_gate = nn.Parameter(torch.zeros(int(state_dim), self.num_experts))
+            self.w_noise = nn.Parameter(torch.zeros(int(state_dim), self.num_experts))
         self.softplus = nn.Softplus()
         self.softmax = nn.Softmax(1)
         self.register_buffer("mean", torch.tensor([0.0]))
@@ -151,9 +174,14 @@ class LifecycleRouter(nn.Module):
         self._entropy_total = 0.0
         self._rows = 0
 
+    def _routing_weight(self):
+        """Whichever tensor this mode routes with; `static` has no `w_gate`."""
+        return self.w_static if self.mode == "static" else self.w_gate
+
     def _reset_diagnostics(self):
+        reference = self._routing_weight()
         self._usage_total = torch.zeros(
-            self.num_experts, device=self.w_gate.device, dtype=self.w_gate.dtype
+            self.num_experts, device=reference.device, dtype=reference.dtype
         )
         self._entropy_total = 0.0
         self._rows = 0
@@ -220,6 +248,16 @@ class LifecycleRouter(nn.Module):
         gates = self.softmax(x @ self.w_gate)
         return gates, self._gates_to_load(gates)
 
+    def _static_gating(self, x):
+        """One learned mixture for every node; the lifecycle state is ignored.
+
+        `x` is accepted and discarded on purpose: the call site is shared, and
+        taking the argument makes it obvious at a glance that this mode *could*
+        read the state and deliberately does not.
+        """
+        gates = torch.softmax(self.w_static, dim=0).expand(x.shape[0], -1)
+        return gates, self._gates_to_load(gates)
+
     def _straight_through_top1_gating(self, x, train):
         """Hard one-hot forward, soft gradient backward. Deterministic.
 
@@ -276,6 +314,8 @@ class LifecycleRouter(nn.Module):
         flat = state.reshape(batch * nodes, -1)
         if self.mode == "soft":
             gates, load = self._soft_gating(flat)
+        elif self.mode == "static":
+            gates, load = self._static_gating(flat)
         elif self.mode == "st_top1":
             gates, load = self._straight_through_top1_gating(flat, self.training)
         else:

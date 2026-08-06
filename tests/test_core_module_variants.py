@@ -76,10 +76,12 @@ ALFNET_VARIANTS = {
         # router is unreachable from the forecast loss; gs routes densely, g1
         # keeps a hard top-1 forward with a straight-through gradient. Generated
         # by scripts/build_router_configs.py.
-        "gs", "g1",
+        # gm is the control arm: one learned mixture for every node, no
+        # lifecycle input, so "does conditioning help?" becomes measurable.
+        "gs", "g1", "gm",
     )},
     # Cross-dataset confirmation. Not a variant: same model, second dataset.
-    **{stem: stem for stem in ("fg1_bay", "gs_bay", "g1_bay")},
+    **{stem: stem for stem in ("fg1_bay", "gs_bay", "g1_bay", "gm_bay")},
 }
 
 # The comparison baselines carry one config per dataset, and nothing else.

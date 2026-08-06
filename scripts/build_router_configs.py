@@ -24,6 +24,12 @@ ALFNET = ROOT / "configs" / "ALFNet"
 CANDIDATES = {
     "gs": ("soft", "soft"),
     "g1": ("st_top1", "st1"),
+    # The control arm: one learned mixture for every node, no lifecycle input.
+    # It answers "does conditioning the mixture on lifecycle state earn its
+    # keep?", which measurement alone could not settle -- the trained `gs`
+    # router moves the forecast by 0.74% against an exactly uniform gate, real
+    # but the same order as the gaps between candidates.
+    "gm": ("static", "static"),
 }
 
 HEADER = """\

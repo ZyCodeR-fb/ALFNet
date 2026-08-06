@@ -227,6 +227,73 @@ def test_diagnostics_are_off_by_default():
     assert conv.pop_router_diagnostics() is None
 
 
+# --- the static control arm ---------------------------------------------------
+
+
+def test_static_router_ignores_the_lifecycle_state():
+    """That is the whole point: it isolates the value of conditioning.
+
+    If `soft` and `static` end up equivalent on validation, the mechanism is a
+    learned mixture of heterogeneous operators and should be described that way,
+    not as lifecycle-aware routing.
+    """
+    torch.manual_seed(0)
+    router = LifecycleRouter(6, len(SUPPORT_NAMES), k=1, mode="static")
+    with torch.no_grad():                      # a mixture that is not uniform
+        router.w_static.copy_(torch.tensor([2.0, -1.0, 0.5, 0.0, -0.5]))
+    router.train()
+
+    _, _, state = _inputs()
+    other = state.clone()
+    other[..., :4] = 0.0
+    other[..., 1] = 1.0                        # force a different role
+    other[..., 4] = 1.0 - other[..., 4]        # and a different age
+
+    first, _ = router(state)
+    second, _ = router(other)
+    assert torch.allclose(first, second, atol=1e-6), (
+        "the static mixture reacted to the lifecycle state"
+    )
+    # every node gets the identical gate
+    flat = first.reshape(-1, len(SUPPORT_NAMES))
+    assert torch.allclose(flat, flat[:1].expand_as(flat), atol=1e-6)
+
+
+def test_static_router_is_a_convex_combination():
+    torch.manual_seed(0)
+    router = LifecycleRouter(6, len(SUPPORT_NAMES), k=1, mode="static")
+    with torch.no_grad():
+        router.w_static.normal_(0.0, 1.0)
+    _, _, state = _inputs()
+    gates, _ = router(state)
+    assert torch.all(gates > 0)
+    assert torch.allclose(gates.sum(-1), torch.ones_like(gates.sum(-1)), atol=1e-5)
+
+
+def test_static_router_receives_forecast_gradient():
+    supports, x, state = _inputs()
+    conv = _conv("static", k=1)
+    conv.train()
+    conv.zero_grad(set_to_none=True)
+    conv.reset_router_stats()
+    output = conv(x, None, None, supports=supports, state=state)
+    conv.reset_router_stats()
+    assert conv.pop_router_loss() is None
+    output.pow(2).mean().backward()
+    assert float(conv.router.w_static.grad.abs().max()) > 0.0
+
+
+def test_static_router_starts_at_the_uniform_mixture():
+    """Zero init, so it begins exactly where `soft` begins and the two differ
+    only in whether conditioning is available."""
+    torch.manual_seed(0)
+    router = LifecycleRouter(6, len(SUPPORT_NAMES), k=1, mode="static")
+    _, _, state = _inputs()
+    gates, _ = router(state)
+    expected = 1.0 / len(SUPPORT_NAMES)
+    assert torch.allclose(gates, torch.full_like(gates, expected), atol=1e-6)
+
+
 def test_unknown_router_mode_is_rejected():
     with pytest.raises(ValueError, match="unsupported router mode"):
         LifecycleRouter(6, len(SUPPORT_NAMES), k=1, mode="argmax")
@@ -239,7 +306,7 @@ import yaml                                                        # noqa: E402
 from pathlib import Path                                           # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-CANDIDATES = {"gs": "soft", "g1": "st_top1"}
+CANDIDATES = {"gs": "soft", "g1": "st_top1", "gm": "static"}
 
 
 def _flat(node, prefix=""):
