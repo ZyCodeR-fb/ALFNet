@@ -212,6 +212,136 @@ def structural_encoders(model):
     }
 
 
+def _checkpoint_state_dict(checkpoint):
+    if not isinstance(checkpoint, dict):
+        return {}
+    for key in ("state_dict", "model_state_dict"):
+        value = checkpoint.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _feature_drift(live, stored):
+    """Largest absolute difference, or None if the two are not comparable."""
+    if stored is None or live is None:
+        return None
+    live = live.detach().cpu().to(torch.float64)
+    stored = torch.as_tensor(stored).detach().cpu().to(torch.float64)
+    if live.shape != stored.shape:
+        return None
+    return float((live - stored).abs().max())
+
+
+def validate_structural_fingerprints(checkpoint, model, log=print):
+    """The structural encoders must have been built from the same graph.
+
+    Two datasets with the same node count produce shape-compatible state dicts,
+    so a wrong-graph checkpoint loads silently without this.
+
+    It lives here rather than in `main` so that anything needing to verify a
+    checkpoint -- the audit, a probe -- can do so without importing the training
+    entry point and its dependency stack. A verifier that cannot be imported
+    reports "provenance failed", which is indistinguishable from a wrong graph
+    and refuses good runs; that actually happened.
+
+    What is compared depends on how the value was written:
+
+    * schema 2 records an exact digest over the adjacency and coordinates as
+      loaded, plus a quantised digest over the derived features. The raw digest
+      must match exactly. The feature digest is allowed to differ only if the
+      stored feature buffer is within `FEATURE_ATOL` of this machine's.
+    * schema 1 is a single digest folding exact float bytes of the derived
+      features, which is machine dependent. It is decomposed by recomputing it
+      against the checkpoint's own stored feature buffer: if that reproduces the
+      recorded digest, the adjacency and coordinates are byte-identical and only
+      the derived features drifted, which is then held to the same tolerance.
+
+    Nothing here falls back to accepting an unverifiable checkpoint. A missing
+    feature buffer, an unreadable record or a drift beyond tolerance all raise.
+    """
+    config = checkpoint.get("config") or {}
+    recorded = config.get("structural_fingerprints")
+    if not recorded:
+        return
+    current = structural_fingerprints(model)
+    encoders = structural_encoders(model)
+    state = _checkpoint_state_dict(checkpoint)
+
+    problems, notes = [], []
+    for name in sorted(recorded):
+        stored = recorded[name]
+        if name not in current:
+            problems.append(f"encoder absent from this model: {name}")
+            continue
+        live = current[name]
+        stored_features = state.get(f"{name}.features")
+        drift = _feature_drift(encoders[name].features, stored_features)
+
+        if isinstance(stored, dict):
+            if stored.get("raw") != live["raw"]:
+                problems.append(
+                    f"{name}: different graph -- raw structure digest "
+                    f"checkpoint={str(stored.get('raw'))[:16]}... "
+                    f"current={live['raw'][:16]}..."
+                )
+                continue
+            if list(stored.get("shape") or []) != list(live["shape"]):
+                problems.append(
+                    f"{name}: feature shape {stored.get('shape')} != {live['shape']}"
+                )
+                continue
+            if stored.get("features") == live["features"]:
+                continue
+            reason = "quantised feature digest differs"
+        else:
+            # Schema 1. Recompose it against the stored buffer to find out
+            # whether the graph or only the derived features differ.
+            if str(stored) == encoders[name].structure_hash:
+                continue
+            if stored_features is None:
+                problems.append(
+                    f"{name}: checkpoint records a schema-1 structure digest that "
+                    "does not match, and carries no feature buffer to check it "
+                    "against. It cannot be verified."
+                )
+                continue
+            if str(stored) != encoders[name].legacy_digest_for(stored_features):
+                problems.append(
+                    f"{name}: different graph -- the recorded digest is not "
+                    "reproduced by this machine's adjacency and coordinates even "
+                    "when combined with the checkpoint's own features."
+                )
+                continue
+            reason = "schema-1 digest over machine-dependent float bytes"
+
+        if drift is None:
+            problems.append(
+                f"{name}: {reason} and the stored feature buffer is missing or "
+                "the wrong shape, so the difference cannot be bounded."
+            )
+        elif drift > FEATURE_ATOL:
+            problems.append(
+                f"{name}: derived structural features differ by {drift:.3e}, "
+                f"beyond the {FEATURE_ATOL:.0e} tolerance -- this is a different "
+                "graph, not floating-point drift."
+            )
+        else:
+            notes.append(f"{name}: {reason}, features agree to {drift:.3e}")
+
+    if problems:
+        raise ValueError(
+            "Checkpoint was built from a different graph: "
+            + "; ".join(problems)
+            + ". The node counts match, so the state dict loads -- but the "
+            "structural features it was trained against do not."
+        )
+    if notes and log is not None:
+        # Worth surfacing: it is the signature of a checkpoint that crossed
+        # machines, which is normal here and should not look like a silent pass.
+        log("-> structural provenance verified within tolerance: " + "; ".join(notes))
+
+
 def _normalise(values):
     """Zero mean, unit scale, robust to a constant column."""
     centred = values - values.mean()
