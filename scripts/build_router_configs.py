@@ -6,10 +6,15 @@ catch: a candidate that quietly differs from `fg1` in more than the router, and
 a PEMS-BAY twin that drifts from its METR-LA counterpart. Deriving them makes
 both properties true by construction.
 
-    ALFGraph  METRLA_alfgraph_k1.yaml      -> METRLA_alfgraph_{soft,st1}.yaml
-              PEMSBAY_alfgraph_k1.yaml     -> PEMSBAY_alfgraph_{soft,st1}.yaml
-    ALFNet    fg1.yaml                     -> gs.yaml,  g1.yaml
-              fg1_bay.yaml                 -> gs_bay.yaml, g1_bay.yaml
+    ALFGraph  METRLA_alfgraph_k1.yaml      -> METRLA_alfgraph_{soft,st1,static}.yaml
+              PEMSBAY_alfgraph_k1.yaml     -> PEMSBAY_alfgraph_{soft,st1,static}.yaml
+              PEMS08_alfgraph_k1.yaml      -> PEMS08_alfgraph_{soft,st1,static}.yaml
+    ALFNet    fg1.yaml                     -> gs.yaml, g1.yaml, gm.yaml
+              fg1_bay.yaml                 -> gs_bay.yaml, g1_bay.yaml, gm_bay.yaml
+              fg1_p8.yaml                  -> gs_p8.yaml, g1_p8.yaml, gm_p8.yaml
+
+`gs` is the mainline; `g1` and `gm` are routing ablations kept for the paper's
+ablation table and are not a live design search.
 
 Run:  python scripts/build_router_configs.py
 """
@@ -104,6 +109,7 @@ def main():
         for dataset, graph_base, alfnet_base, name in (
             ("METRLA", "METRLA_alfgraph_k1.yaml", "fg1.yaml", variant),
             ("PEMSBAY", "PEMSBAY_alfgraph_k1.yaml", "fg1_bay.yaml", f"{variant}_bay"),
+            ("PEMS08", "PEMS08_alfgraph_k1.yaml", "fg1_p8.yaml", f"{variant}_p8"),
         ):
             graph_target = build_graph_config(graph_base, suffix, mode)
             written.append(graph_target)

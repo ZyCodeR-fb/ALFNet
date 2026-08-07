@@ -80,14 +80,26 @@ ALFNET_VARIANTS = {
         # lifecycle input, so "does conditioning help?" becomes measurable.
         "gs", "g1", "gm",
     )},
-    # Cross-dataset confirmation. Not a variant: same model, second dataset.
-    **{stem: stem for stem in ("fg1_bay", "gs_bay", "g1_bay", "gm_bay")},
+    # Cross-dataset confirmation. Not a variant: same model, other datasets.
+    # `_p8` rather than `_pems08` because the variant name is capped at eight
+    # characters below, to keep the legacy exp_id path inside Windows limits.
+    **{stem: stem for stem in (
+        "fg1_bay", "gs_bay", "g1_bay", "gm_bay",
+        "fg1_p8", "gs_p8", "g1_p8", "gm_p8",
+    )},
+    # The paper-facing entry point. Deliberately *not* a new variant: it is the
+    # same experiment as gs.yaml, carries `model_variant: gs`, and hashes
+    # identically now that the config path has left the canonical identity, so
+    # the existing gs checkpoints load under the name the paper uses.
+    "alfnet": "gs",
 }
 
 # The comparison baselines carry one config per dataset, and nothing else.
 # METR-LA is required; PEMS-BAY appears as models are ported to the second
 # dataset, so it is allowed but not yet mandatory.
-BASELINE_CONFIGS = {"METRLA_lcbt_v3.yaml", "PEMSBAY_lcbt_v3.yaml"}
+BASELINE_CONFIGS = {
+    "METRLA_lcbt_v3.yaml", "PEMSBAY_lcbt_v3.yaml", "PEMS08_lcbt_v3.yaml",
+}
 
 
 def test_streamlined_yaml_surface_has_one_alfnet_mainline():

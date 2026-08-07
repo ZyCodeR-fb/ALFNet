@@ -151,25 +151,12 @@ def main():
             f"from {probe_args.config}\n  checkpoint {stored_hash}\n  config     {live_hash}"
         )
 
-    from layers.structural_node_encoder import structural_fingerprints
+    # The real validator, not a reimplementation: a probe that checks provenance
+    # its own way can pass a checkpoint the trainer would refuse.
+    import main as main_module
 
-    stored_fp = stored_config.get("structural_fingerprints") or {}
-    live_fp = structural_fingerprints(model)
-    structure_match = {
-        name: (stored_fp.get(name) == digest) for name, digest in live_fp.items()
-    }
-    # `structure_hash` is a plain string attribute, so load_state_dict does not
-    # restore it: a mismatch there compares this machine's fresh construction
-    # against the training machine's. What decides whether the graph is really
-    # the same is the `features` buffer, so measure its drift -- before the load
-    # overwrites it -- and report that alongside the digest.
-    feature_drift = {}
-    for name, module in model.named_modules():
-        key = f"{name}.features"
-        if key in state and hasattr(module, "features"):
-            drift = (module.features.detach().cpu().float()
-                     - state[key].cpu().float()).abs().max()
-            feature_drift[name] = float(drift)
+    main_module._validate_structural_fingerprints(blob, model)
+    structure_verified = True
 
     missing, unexpected = model.load_state_dict(state, strict=False)
     if missing or unexpected:
@@ -291,8 +278,7 @@ def main():
         "provenance": provenance,
         "canonical_config_hash_live": live_hash,
         "canonical_config_hash_match": config_match,
-        "structural_fingerprint_match": structure_match,
-        "structural_feature_max_drift": feature_drift,
+        "structural_provenance_verified": structure_verified,
         # The val loader hard-codes 256 (data_provider/data_factory.py); the
         # --batch_size flag only reaches the train loader.
         "batch_shape": list(x_enc.shape),
@@ -330,8 +316,8 @@ def main():
         f"router={provenance.get('router_mode')} epoch={provenance.get('epoch')}",
         f"             canonical_config_hash match = {config_match}",
         f"             training_protocol_hash      = {provenance.get('training_protocol_hash')}",
-        f"             structure digest match      = {structure_match}",
-        f"             structure feature drift     = {feature_drift}",
+        f"             structural provenance       = "
+        f"{'verified' if structure_verified else 'UNVERIFIED'}",
         f"batch      : {list(x_enc.shape)} (val loader hard-codes 256)   "
         f"elapsed {report['elapsed_seconds']}s",
         "",

@@ -21,7 +21,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# (METR-LA config, PEMS-BAY config)
+# (METR-LA config, twin config, expected dloader, expected path fragment)
+TWIN_DATASETS = {
+    "PEMSBAY": ("PEMS-BAY", "_bay"),
+    "PEMS08": ("PEMS08", "_p8"),
+}
+
+# (METR-LA config, twin config)
 TWINS = [
     ("configs/ALFNet/fg1.yaml", "configs/ALFNet/fg1_bay.yaml"),
     ("configs/ALFGraph/METRLA_alfgraph_k1.yaml", "configs/ALFGraph/PEMSBAY_alfgraph_k1.yaml"),
@@ -33,6 +39,17 @@ TWINS = [
     ("configs/ALFNet/g1.yaml", "configs/ALFNet/g1_bay.yaml"),
     ("configs/ALFGraph/METRLA_alfgraph_soft.yaml", "configs/ALFGraph/PEMSBAY_alfgraph_soft.yaml"),
     ("configs/ALFGraph/METRLA_alfgraph_st1.yaml", "configs/ALFGraph/PEMSBAY_alfgraph_st1.yaml"),
+    # PEMS08, the third dataset. METR-LA and PEMS-BAY have both informed a
+    # design choice, so PEMS08 is the only split that is still untouched; the
+    # twin rule is what keeps it that way.
+    ("configs/ALFNet/fg1.yaml", "configs/ALFNet/fg1_p8.yaml"),
+    ("configs/ALFNet/gs.yaml", "configs/ALFNet/gs_p8.yaml"),
+    ("configs/ALFNet/g1.yaml", "configs/ALFNet/g1_p8.yaml"),
+    ("configs/ALFGraph/METRLA_alfgraph_k1.yaml", "configs/ALFGraph/PEMS08_alfgraph_k1.yaml"),
+    ("configs/ALFGraph/METRLA_alfgraph_soft.yaml", "configs/ALFGraph/PEMS08_alfgraph_soft.yaml"),
+    ("configs/ALFGraph/METRLA_alfgraph_st1.yaml", "configs/ALFGraph/PEMS08_alfgraph_st1.yaml"),
+    ("configs/ALFTemporal/METRLA_cond1.yaml", "configs/ALFTemporal/PEMS08_cond1.yaml"),
+    ("configs/MoGERNN/METRLA_lcbt_v3.yaml", "configs/MoGERNN/PEMS08_lcbt_v3.yaml"),
 ]
 
 # A twin may move the dataset block, its own name, and the paths of the expert
@@ -77,9 +94,11 @@ def test_pemsbay_config_differs_only_in_the_dataset_block(metrla, pemsbay):
         f"{pemsbay} was retuned relative to {metrla} at {sorted(unexpected)}"
     )
     # and it really did switch datasets, rather than silently pointing at METR-LA
-    assert right["dataset.dloader_name"] == "PEMSBAY"
-    assert "PEMS-BAY" in str(right["dataset.data_path"])
-    assert "PEMS-BAY" in str(right["dataset.unknown_nodes_path"])
+    loader = str(right["dataset.dloader_name"])
+    assert loader in TWIN_DATASETS, f"{pemsbay} points at an unexpected dataset {loader}"
+    directory, _suffix = TWIN_DATASETS[loader]
+    assert directory in str(right["dataset.data_path"])
+    assert directory in str(right["dataset.unknown_nodes_path"])
 
 
 def _protocol_keys(flat):
@@ -127,6 +146,7 @@ def test_spa_patchsize_follows_the_partition():
     cases = [
         ("configs/ALFTemporal/METRLA_cond1.yaml", "./data/METR-LA/raw_data.pkl"),
         ("configs/ALFTemporal/PEMSBAY_cond1.yaml", "./data/PEMS-BAY/raw_data.pkl"),
+        ("configs/ALFTemporal/PEMS08_cond1.yaml", "./data/PEMS08/raw_data.pkl"),
     ]
     observed = {}
     for config_path, data_path in cases:
@@ -145,10 +165,12 @@ def test_spa_patchsize_follows_the_partition():
         adjacency = load_project_adjacency({"data_path": str(ROOT / data_path)})
         assert sum(len(part) for part in parts) == adjacency.shape[0]
 
-    # the two datasets must genuinely need different geometry, otherwise the
+    # the datasets must genuinely need different geometry, otherwise the
     # exemption in ALLOWED_KEYS is unnecessary and should be removed
     sizes = {value[1] for value in observed.values()}
-    assert len(sizes) == 2, f"spa_patchsize is the same on both datasets: {observed}"
+    assert len(sizes) == len(cases), (
+        f"spa_patchsize is not distinct across datasets: {observed}"
+    )
 
 
 def test_reorder_data_cannot_silently_undersize_a_patch():
@@ -176,6 +198,19 @@ def test_reorder_data_cannot_silently_undersize_a_patch():
     _, _, undersized = _reorder_data(parts, adjacency, 6)
     assert len(undersized) != 2 * 6, (
         "an under-sized patch silently produced the right token count"
+    )
+
+
+def test_every_twin_dataset_is_present_and_distinct():
+    """A third dataset only helps if it is genuinely a third graph."""
+    counts = {}
+    for name in ("METR-LA", "PEMS-BAY", "PEMS08"):
+        assert (ROOT / f"data/{name}/raw_data.pkl").exists(), f"{name} data is missing"
+        counts[name] = int(
+            np.load(ROOT / f"data/{name}/unknown_nodes.npy", allow_pickle=True).shape[0]
+        )
+    assert len(set(counts.values())) == 3, (
+        f"two datasets report the same unseen count -- check the data files: {counts}"
     )
 
 

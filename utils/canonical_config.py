@@ -48,7 +48,19 @@ RUNTIME_FIELDS = frozenset({
     # identity. Everything that defines the model, the data and the protocol is
     # unaffected and still enters the hash.
     "test_for_async_lifecycle", "train_for_async_lifecycle",
+    # See CONFIG_PATH_FIELD.
+    "config", "legacy_canonical_config_hash",
 })
+
+# Where the YAML was read from, as spelled on the command line. Excluded from
+# the identity on purpose: every value *inside* that file already enters the
+# hash through `scalars`, `model_family_cfg` and `nested_expert_configs`, so the
+# path contributes nothing but the spelling. Including it meant
+# `-c configs/ALFNet/gs.yaml` and `-c A:/projects/MoGERNN/configs/ALFNet/gs.yaml`
+# were different experiments, and a paper-facing config could not be given a new
+# filename without changing the identity of an unchanged model. Recorded beside
+# the hash as provenance instead.
+CONFIG_PATH_FIELD = "config"
 
 # Anything the trainer writes back onto `args` while running. Listed by prefix
 # because the set grows; a stray runtime field silently changing the hash is the
@@ -98,15 +110,27 @@ def _resolve_nested_configs(family_cfg, root="."):
     return resolved
 
 
-def build_canonical_config(args, data_fingerprints=None, root="."):
-    """The immutable dict that defines this experiment."""
+def build_canonical_config(args, data_fingerprints=None, root=".",
+                           include_config_path=False):
+    """The immutable dict that defines this experiment.
+
+    `include_config_path` reproduces the schema-1 payload, in which the config
+    path was part of the identity. It exists only so a checkpoint written under
+    that schema can still be verified; nothing should build a new identity with
+    it set.
+    """
     scalars = {
         key: _jsonable(value)
         for key, value in vars(args).items()
         if not _is_runtime(key) and key != "model_family_cfg"
     }
+    if include_config_path:
+        scalars[CONFIG_PATH_FIELD] = _jsonable(
+            getattr(args, CONFIG_PATH_FIELD, None)
+        )
+        scalars = dict(sorted(scalars.items()))
     return {
-        "schema": 1,
+        "schema": 1 if include_config_path else 2,
         "scalars": dict(sorted(scalars.items())),
         "model_family_cfg": _jsonable(getattr(args, "model_family_cfg", {}) or {}),
         "nested_expert_configs": _resolve_nested_configs(
@@ -127,12 +151,20 @@ def canonical_config_hash(canonical):
 
 
 def freeze_canonical_config(args, data_fingerprints=None, root="."):
-    """Compute and attach the canonical config and its hash, once.
+    """Compute and attach the canonical config and its hashes, once.
 
-    Called immediately after parsing. Attaching it to `args` is safe because
-    both fields are excluded from the hash by `_is_runtime`.
+    Called immediately after parsing. Attaching these is safe because every
+    field written here is excluded from the hash by `_is_runtime`.
+
+    Both schemas are computed: the schema-2 identity this run *is*, and the
+    schema-1 identity it *would have had*, so a checkpoint written before the
+    config path left the payload can still be recognised as the same experiment.
     """
     canonical = build_canonical_config(args, data_fingerprints, root=root)
+    legacy = build_canonical_config(
+        args, data_fingerprints, root=root, include_config_path=True
+    )
     args.canonical_config = canonical
     args.canonical_config_hash = canonical_config_hash(canonical)
+    args.legacy_canonical_config_hash = canonical_config_hash(legacy)
     return args.canonical_config_hash
