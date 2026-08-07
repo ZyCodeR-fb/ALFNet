@@ -47,22 +47,31 @@ gitignored tree was cleaned up; build fixtures in `tmp_path`, or assert absence 
 Training and evaluation both go through `main.py`:
 
 ```bash
-# train
-python main.py -c configs/ALFNet/fg1.yaml --batch_size 64 --output_root ./outputs --run_id fg1-s32
+# the whole frozen experiment: 2 models x 3 datasets x 3 seeds, resumable
+bash scripts/run_final_18.sh                    # --dry-run to see the plan first
+# one run
+python main.py -c configs/ALFNet/alfnet.yaml --batch_size 64 --output_root ./outputs --run_id alfnet-metrla-s32
 # frozen-protocol test; repeat the *exact* training flags or exp_id will not resolve the checkpoint
-python main.py -c configs/ALFNet/fg1.yaml --batch_size 64 --mode test_async \
-  --output_root ./outputs --run_id fg1-s32
+python main.py -c configs/ALFNet/alfnet.yaml --batch_size 64 --mode test_async \
+  --output_root ./outputs --run_id alfnet-metrla-s32
 ```
 
-Post-hoc analysis:
+`--batch_size` is part of the configuration identity, and the validation loader ignores it anyway (it is
+hard-coded to 256 in `data_provider/data_factory.py`). Reproduce a run's training flags exactly or the
+canonical hash will not match.
+
+Post-hoc analysis and diagnostics:
 
 ```bash
 python scripts/paired_model_bootstrap.py --model_a <predictions/lifecycle-v3-*/> \
   --model_b <...> --output_dir ./outputs/reports/a_vs_b
 python scripts/collect_lifecycle_results.py <result roots> --output-dir <dir>   # expects seeds 32/42/52
 python scripts/build_ablation_configs.py                                       # regenerates combination YAMLs
-python scripts/build_router_configs.py                                         # regenerates gs/g1 + twins
+python scripts/build_router_configs.py                                # regenerates gs/g1/gm + both twins
 python scripts/router_report.py outputs/ALFNet/<run_id>    # per-layer, per-phase, per-k routing
+python scripts/validation_curve.py outputs/ALFNet/<run_id> # per-epoch groups + Join k1->k12 slope
+python scripts/checkpoint_load_smoke.py         # every finished run loads; reads no test data
+python scripts/film_probe.py --run <run> --config <cfg>    # FiLM magnitude by evidence bucket
 ```
 
 ## Artefact layout
@@ -228,8 +237,38 @@ writes `best_val_metric`, per-epoch history and resolved paths onto — so it id
 configuration. The hash inlines the nested expert YAMLs, which is what makes `fg1`/`gs`/`g1` distinct, and
 excludes `output_root`, `run_id`, `device`, `num_workers` and every runtime field.
 
-A checkpoint predating provenance needs `--allow_legacy_checkpoint`, and results from one are not
-comparable.
+**Identity is content, never a path.** The `-c` path left the hash (schema 2): every value inside the YAML
+already enters through `scalars` / `model_family_cfg` / `nested_expert_configs`, so the path contributed
+only its spelling — `-c configs/ALFNet/gs.yaml` and the same file named absolutely were different
+experiments, and a paper-facing rename changed the identity of an unchanged model. The schema-1 hash is
+still computed as `args.legacy_canonical_config_hash` and accepted, with a printed note, so checkpoints
+written before the change still load.
+
+**Provenance must survive a machine move.** `structural_fingerprints` is schema 2, a record rather than
+one digest:
+
+* `raw` — exact SHA256 over the adjacency and coordinates *as loaded*. Those are file reads with a dtype
+  cast and no arithmetic, so they are bit-stable across machines. This is the only value compared for
+  equality, and it is what decides whether the graph is the same.
+* `features` — a quantised digest of the derived features plus shape, dtype, quantum and algorithm
+  version. **Never the deciding comparison**, and the reason is measured, not assumed: quantising reduces
+  churn but a grid still has boundaries, and one float32 ulp moved 9.65% of values into a different bucket
+  over 30 random graphs — all 30 digests differed. It is a record and a fast path, nothing more.
+
+Numerical agreement is checked directly against the checkpoint's stored `features` buffer at
+`atol=1e-6, rtol=0` (relative tolerance is meaningless on normalised values that sit near zero). A
+schema-1 digest is decomposed rather than trusted: recomputing it from this machine's adjacency and
+coordinates combined with the *checkpoint's own* feature buffer reproduces the recorded value if and only
+if the graph is byte-identical, after which the same tolerance applies. Nothing falls back to accepting an
+unverifiable checkpoint — a missing buffer, an absent field or drift beyond tolerance all raise.
+
+The bug this fixes was real and blocking: `build_structural_features` sums rows of the adjacency, a
+reduction's order depends on the BLAS build and thread count, and the r1 checkpoints trained on the server
+came out 1.31e-07 from the same graph here — so every server checkpoint was refused for evaluation.
+`scripts/checkpoint_load_smoke.py` runs the real loader over the finished runs and reads no test data.
+
+A checkpoint predating provenance entirely still needs `--allow_legacy_checkpoint`, and results from one
+are not comparable.
 
 ## ALFNet structure
 
@@ -325,6 +364,37 @@ while two different objectives can never share a checkpoint directory.
 * Auxiliary loss terms must be scaled against the measured base loss, not guessed. Base MSE is ~0.157 while
   the tail term is ~1.18 — a weight of 0.1 is *not* small, it is 75% of the objective.
 
+## The frozen model
+
+**`gs` is ALFNet.** The architecture and all three protocols are frozen; nothing below is a live search.
+
+Named in the paper as **ALFNet**, mechanism described as **lifecycle-conditioned soft heterogeneous
+propagation aggregation**. Do not describe it as sparse routing and do not claim expert specialisation —
+neither is true of the shipped model. Entry point `configs/ALFNet/alfnet.yaml`, which is content-identical
+to `configs/ALFNet/gs.yaml` and therefore the same experiment by hash, so existing `gs` checkpoints load
+under the paper's name. `gs.yaml` stays for that compatibility.
+
+Why `gs` and not the others, on validation only:
+
+* `fg1`'s router provably receives zero forecast gradient at `moge_top_k: 1`, so its headline mechanism is
+  expert dropout. Historical result and ablation, not a candidate.
+* `g1`'s hard routing is unstable across datasets; `gm` is the static control and loses to `gs`.
+* FiLM being active on zero-evidence nodes is a real measured phenomenon (`scripts/film_probe.py`), but the
+  evidence does **not** establish it as the cause of the Unseen gap — across the four variants the strength
+  of the asymmetry does not order the deficit. It is not grounds for a new candidate.
+
+`fg1`, `g1` and `gm` remain as routing ablations. Do not add router candidates.
+
+**The final experiment** is `scripts/run_final_18.sh`: 2 models × 3 datasets × 3 seeds, ALFNet against
+source-native MoGERNN on METR-LA, PEMS-BAY and PEMS08. Serial-safe, resumable, skips finished runs, at most
+three concurrent jobs on one GPU. It launches training only — `test_async` is spent once, after the
+training table has been checked. Main tables are three-seed mean±std. Hyper-parameter work is now
+sensitivity analysis on a frozen model, never selection.
+
+PEMS08 is the third dataset (170 nodes, 17,856 steps, 42 unknown nodes) and the only split that has taken
+no part in any selection. Its configs are twins under `tests/test_pemsbay_configs.py`; `spa_patchsize` is 7
+by the largest-part+1 rule (METR-LA 8, PEMS-BAY 12).
+
 ## Current state
 
 **Every result on disk is invalid and everything must be retrained.** Three corrections landed that change
@@ -340,10 +410,14 @@ So `fg1-s32`, `gs-s32`, `g1-s32`, `gsbay-s32`, `g1bay-s32`, `jr-s32`, `ad-s32`, 
 none of their numbers may be quoted against a new run. **Every architectural conclusion below predates
 these fixes and is provisional until re-measured.**
 
-`fg1` (`configs/ALFNet/fg1.yaml`) is the mainline and satisfies the end-to-end constraint: FiLM-conditioned
-graph anchor. Under the old protocol it reached **32/36** main+phase cells against MoGERNN on METR-LA, with
-the four misses on Join MAE, Warm MAE, Ready MAE and Ready RMSE — all on the join track, all on nodes that
-do have their own history. Whether that survives the corrections is unknown.
+The `*-r1-s32` runs (`gs`, `fg1`, `g1`, `gm`, `mg`) are the **current-fixed-protocol router diagnostic**,
+all under training hash `59c9ad67…` and comparable only with each other. They are *not* a reproduction of
+the historical `fg1-s32`. They are what selected `gs`, on validation only; no test split was read.
+
+`fg1` was the mainline until the r1 router diagnostic; **`gs` replaced it** — see "The frozen model" above.
+Under the old protocol `fg1` reached **32/36** main+phase cells against MoGERNN on METR-LA, with the four
+misses on Join MAE, Warm MAE, Ready MAE and Ready RMSE. That number predates every correction and must not
+be quoted against a current run.
 
 `kt` reached **35/36** (only Ready RMSE missing) by distilling the retired `rf_l3s`/A2 teacher into a frozen
 two-stage schedule with 15,317 trainable parameters. That violates the end-to-end constraint, so it is a
@@ -368,16 +442,18 @@ base MSE of ~0.157; a finer sweep is deliberately *not* being run. Also decided 
 PCGrad (24 real-batch gradient probes showed all six group-pair cosines positive — no systematic conflict),
 no extra gating (FiLM is measurably active), no distribution-shift module (no evidence of shift yet).
 
-**PEMS-BAY is the second development dataset, not a zero-tuning confirmation set.** It has been used to
+**PEMS-BAY is a second development dataset, not a zero-tuning confirmation set.** It has been used to
 compare `gs` against `g1`, so its validation split has informed a design choice and cannot be described as
-untouched. A genuinely external confirmation now needs a third dataset that has taken no part in any
-selection. Its *test* split has still never been run, and two operating rules follow:
+untouched. **PEMS08 is the confirmation dataset** — it has taken no part in any selection, and that is the
+one property worth protecting now that the model is frozen. Operating rules:
 
-* **PEMS-BAY test has not been run and must stay unrun** until a candidate wins on PEMS-BAY *validation*.
-  Spending it on a validation-stage loss destroys the only untouched split left on this dataset.
-* **Never retune a PEMS-BAY config to close a gap.** The twin rule (`tests/test_pemsbay_configs.py`) is the
-  point of the experiment. A real consequence to state in the paper rather than fix: the twins inherit
-  hyper-parameters selected on METR-LA, so a transfer gap is partly a hyper-parameter transfer gap.
+* **No test split is read until every training run in the 18-run matrix has finished and been checked.**
+  It is spent once. `scripts/run_final_18.sh` deliberately does not launch `test_async`.
+* **Never retune a twin config to close a gap.** The twin rule (`tests/test_pemsbay_configs.py`, now
+  covering PEMS08 too) is the point of the experiment. A real consequence to state in the paper rather than
+  fix: the twins inherit hyper-parameters selected on METR-LA, so a transfer gap is partly a
+  hyper-parameter transfer gap.
+* Never change the architecture on the basis of a test result. The model is frozen.
 
 **The strongest prior observation, now provisional.** Under the old protocol `fg1`'s validation Join MAE
 fell ~0.99 from `k1` to `k12` on METR-LA but was flat or inverted at every epoch on PEMS-BAY, while
