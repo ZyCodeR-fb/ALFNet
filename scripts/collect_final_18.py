@@ -18,7 +18,9 @@ It refuses, rather than works around:
 Output, per dataset: the six-row main table, the six-phase table and the PLES
 effects, each as ALFNet and MoGERNN three-seed mean +/- std.
 
-    conda run -n COMG python scripts/collect_final_18.py \
+Run it from the active project environment (server: ReaCH, local Windows: COMG):
+
+    python scripts/collect_final_18.py \
         --output-dir ./outputs/reports/final
 """
 

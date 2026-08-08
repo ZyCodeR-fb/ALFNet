@@ -16,9 +16,14 @@
 # Usage:
 #   bash scripts/run_final_18.sh                 # run everything, JOBS at a time
 #   bash scripts/run_final_18.sh --dry-run       # print the plan only
-#   JOBS=1 bash scripts/run_final_18.sh          # serial
+#   JOBS=3 bash scripts/run_final_18.sh          # three at a time, after a smoke
 #   MAX_EPOCH=1 SUFFIX=smoke bash scripts/run_final_18.sh   # pipeline smoke
 #   bash scripts/run_final_18.sh --only alfnet   # or: mogernn, metrla, bay, pems08
+#
+# --only is a substring match on the run_id, so it also selects a seed slice --
+# `--only s32` is the six-cell (2 models x 3 datasets) seed-32 plan used for the
+# smoke below. There is deliberately no separate --seeds flag.
+#   MAX_EPOCH=1 SUFFIX=smoke bash scripts/run_final_18.sh --only s32
 #
 # Resuming: a finished run is skipped only if it is verifiably *this* run --
 # same model, variant, canonical config hash (which covers seed, dataset and
@@ -33,9 +38,11 @@ set -uo pipefail
 
 PYTHON="${PYTHON:-python}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-./outputs}"
-# One GPU. Raise only after checking memory headroom with the smoke below;
-# wall-clock from a parallel run is not comparable across jobs.
-JOBS="${JOBS:-3}"
+# One GPU. Serial by default: concurrency is a property of the machine, not of
+# the experiment, so it is set explicitly after the smoke has shown the memory
+# headroom. Wall-clock from a parallel run is not comparable across jobs and
+# must never be quoted as a speed result.
+JOBS="${JOBS:-1}"
 MAX_EPOCH="${MAX_EPOCH:-}"
 SUFFIX="${SUFFIX:-}"
 DRY_RUN=0
@@ -178,7 +185,13 @@ while IFS=$'\t' read -r run_id config seed subdir model batch_size; do
   rm -f "${status_file}"
   (
     "${cmd[@]}" > "${launch_log}" 2>&1
-    echo "$?" > "${status_file}"
+    rc=$?
+    echo "${rc}" > "${status_file}"
+    # `exit "${rc}"` is load-bearing: without it the subshell's status is the
+    # status of the `echo`, which is 0 whatever the run did, so `wait` in
+    # reap_finished reported every failure as "done". The status file caught it
+    # in the final summary, but the live output lied for the whole run.
+    exit "${rc}"
   ) &
   PID_RUN[$!]="${effective_id}"
   LAUNCHED+=("${effective_id}")

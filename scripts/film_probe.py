@@ -16,7 +16,9 @@ the hypothesis is wrong and the Unseen deficit comes from somewhere else. This
 probe is read-only: one validation batch, one forward, no optimiser step, no
 write to any checkpoint, manifest or protocol artefact.
 
-    conda run -n COMG python scripts/film_probe.py \
+Run it from the active project environment (server: ReaCH, local Windows: COMG):
+
+    python scripts/film_probe.py \
         --run outputs/ALFNet/gs-r1-s32 --config configs/ALFNet/gs.yaml
 """
 

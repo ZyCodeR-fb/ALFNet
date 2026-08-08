@@ -25,18 +25,39 @@ Hard constraints on the deliverable model:
 * no teacher, no distillation, no frozen anchor, no fg1-initialised weights, no multi-stage schedule.
 
 36/36 cells beating MoGERNN is an engineering target, never a reason to change a protocol or drop a
-dataset. METR-LA has been inspected repeatedly and is a **development** set; it stays in the paper
-regardless of the result. Final claims are confirmed on a second, un-inspected dataset (PEMS-BAY).
+dataset. **Three datasets, three identities** — this is the single fact most often got wrong, so it is
+stated here and again under "Current state":
+
+| dataset | identity |
+|---|---|
+| METR-LA | development set. Inspected repeatedly, including its test split. Stays in the paper regardless of the result. |
+| PEMS-BAY | **second development set.** It was used to compare `gs` against `g1`, so its validation split has informed a design choice. It is *not* a zero-tuning confirmation set. |
+| PEMS08 | **the confirmation set.** It has taken no part in any selection, and that is its only value. |
+
+PEMS08's result — good or bad — is never grounds for changing the model, the protocols, the grouping, the
+weighting, the checkpoint rule or a hyper-parameter. It is reported as measured.
 
 ## Environment and commands
 
-The conda env in `environment.yml` is named `moge`, but the working env on this machine is **`COMG`**.
+Three environment names are in play; only two of them are ever activated.
+
+| where | env | use |
+|---|---|---|
+| Linux training server | **`ReaCH`** | all training, smoke, evaluation and tests run here |
+| Windows local | **`COMG`** | development and reading only — never run training or a GPU smoke here |
+| `environment.yml` | `moge` | the declared name; matches neither working env |
+
+On the server:
 
 ```bash
-conda run -n COMG python -m pytest tests -q --no-header        # full suite (~2-7 min)
-conda run -n COMG python -m pytest tests/test_input_contract.py -q
-conda run -n COMG python -m pytest "tests/test_abcd_switches.py::test_combined_switches_stay_finite" -q
+conda activate ReaCH
+python -m pytest tests -q --no-header                      # full suite (~2-7 min)
+python -m pytest tests/test_input_contract.py -q
+python -m pytest "tests/test_abcd_switches.py::test_combined_switches_stay_finite" -q
 ```
+
+Long training and the formal `test_async` run in `tmux`, never in a foreground session that a dropped SSH
+connection would kill.
 
 `references/` holds vendored third-party source and is **not** collected by pytest — never add it.
 
@@ -126,14 +147,23 @@ there is no requirement, and no benefit, in keeping the numbers tidy.
   monotonically 377 at k=1 down to 357 at k=12.
 * A `training_protocol_hash` is written into every manifest and checkpoint summary. Changing anything that
   enters `_manifest_payload` changes it and invalidates cross-run comparability — the loader refuses a
-  mismatched manifest unless `--lcbt_overwrite_manifest`. **The hash is per dataset.** Current values:
+  mismatched manifest unless `--lcbt_overwrite_manifest`. **Every one of these hashes is scoped to a
+  single dataset.** A METR-LA hash says nothing about PEMS-BAY or PEMS08 and must never be reused as an
+  expected value for them; the only cross-check that means anything is that *both models on the same
+  dataset* agree. Current values:
 
   | | training (LCBT v3.2) | LCE v3 | PLES v3 |
   |---|---|---|---|
   | METR-LA | `59c9ad67f2dc9c51…` | `659e3583c978a68a…` | `d6c09455e7273d55…` |
   | PEMS-BAY | `caa7dbd3507843c0…` | `b8eeda69790e97ea…` | `68401afbae31d851…` |
+  | PEMS08 | `bacf59d82497594e…` | — | — |
+
+  All three training hashes were read off a server 1-epoch smoke, both models per dataset, and each pair
+  agreed. PEMS08's LCE and PLES hashes are recorded when its first evaluation writes them.
 
   The LCE and PLES hashes are unchanged from v3.1; only the training hash moved.
+  `known_training_protocol_hashes` in `configs/paper/final_runs.json` is the machine-readable copy the
+  audit compares against, and it is the one to trust if the two ever disagree.
 * Training re-draws windows every epoch (`_build_schedule(..., epoch=epoch)`); **validation uses a fixed
   schedule** (`epoch=0`). This is why offline caching of training targets does not pay.
 * PLES resampling unit is the **overlap-connected origin block** (`overlap_blocks`), not the calendar day —
@@ -154,8 +184,16 @@ second dataset is a config job, and its configs must be *twins* — identical ou
 because a confirmation dataset proves nothing if capacity or learning rates were retuned for it.
 `tests/test_pemsbay_configs.py` enforces that.
 
-PEMS-BAY files: `configs/ALFNet/fg1_bay.yaml`, `configs/ALFGraph/PEMSBAY_alfgraph_k1.yaml`,
-`configs/ALFTemporal/PEMSBAY_cond1.yaml`, `configs/MoGERNN/PEMSBAY_lcbt_v3.yaml`.
+The mainline twins, per the three-layer structure (entry point → graph expert → temporal expert), plus the
+MoGERNN baseline. `gs_bay` / `gs_p8` are the ones the 18-run matrix uses; the `fg1_*` entry points remain
+only as router ablations:
+
+| | METR-LA | PEMS-BAY | PEMS08 |
+|---|---|---|---|
+| ALFNet | `configs/ALFNet/gs.yaml` (= `alfnet.yaml`) | `configs/ALFNet/gs_bay.yaml` | `configs/ALFNet/gs_p8.yaml` |
+| ALFGraph | `METRLA_alfgraph_soft.yaml` | `PEMSBAY_alfgraph_soft.yaml` | `PEMS08_alfgraph_soft.yaml` |
+| ALFTemporal | `METRLA_cond1.yaml` | `PEMSBAY_cond1.yaml` | `PEMS08_cond1.yaml` |
+| MoGERNN | `METRLA_lcbt_v3.yaml` | `PEMSBAY_lcbt_v3.yaml` | `PEMS08_lcbt_v3.yaml` |
 
 One value is genuinely dataset-dependent and is **geometry, not tuning**: ALFTemporal's `spa_patchsize`.
 `_reorder_data` pads a KD-tree part up to the patch size but never splits one, so the patch must hold the
@@ -369,8 +407,20 @@ while two different objectives can never share a checkpoint directory.
 **`gs` is ALFNet.** The architecture and all three protocols are frozen; nothing below is a live search.
 
 Named in the paper as **ALFNet**, mechanism described as **lifecycle-conditioned soft heterogeneous
-propagation aggregation**. Do not describe it as sparse routing and do not claim expert specialisation —
-neither is true of the shipped model. Entry point `configs/ALFNet/alfnet.yaml`, which is content-identical
+propagation aggregation** (生命周期条件化的异构传播算子聚合). That phrase is the *ceiling* of what the
+measurements support, and the two halves of the evidence pull in opposite directions:
+
+* **What holds.** `gs` aggregates densely, so its gate receives a non-zero forecast gradient — the exact
+  defect that makes `fg1` indefensible (`nn.Softmax` over a single top-1 column has derivative 0, so its
+  forecast gradient on `w_gate` is *exactly* 0.0) does not apply. The gate is conditioned on lifecycle
+  state and is genuinely trained by the prediction objective.
+* **What does not.** Measured `entropy_ratio` on `gs` is ≈ 0.99: the five propagation operators are used
+  almost uniformly. No operator has specialised to a lifecycle phase.
+
+So: never write *sparse routing*, *expert routing*, *expert specialisation*, or any claim that the experts
+have divided the lifecycle between them. The defensible claim is that the aggregation weights are
+lifecycle-conditioned and end-to-end trainable, not that they have become selective. Entry point
+`configs/ALFNet/alfnet.yaml`, which is content-identical
 to `configs/ALFNet/gs.yaml` and therefore the same experiment by hash, so existing `gs` checkpoints load
 under the paper's name. `gs.yaml` stays for that compatibility.
 
@@ -403,7 +453,7 @@ what the models are and what they were trained on:
 * strict inductive — parameter counts and `state_dict` changed for ALFTemporal/ALFNet (1,041,561 →
   1,037,529), PatchSTG, STID, SLPF, GWNET (300,920 → 299,104), STBP (351,352 → 270,072);
 * MoGERNN's batch adapter — its completion was off during training and on at test;
-* LCBT v3.2 — the training schedule and therefore `training_protocol_hash` moved on both datasets.
+* LCBT v3.2 — the training schedule and therefore `training_protocol_hash` moved on every dataset.
 
 So `fg1-s32`, `gs-s32`, `g1-s32`, `gsbay-s32`, `g1bay-s32`, `jr-s32`, `ad-s32`, `kt-s32`, `rg2-s32`,
 `mg-s32` and `mgbay-s32` are all superseded. The files stay in `outputs/` as a record of the old protocol;
@@ -415,9 +465,19 @@ all under training hash `59c9ad67…` and comparable only with each other. They 
 the historical `fg1-s32`. They are what selected `gs`, on validation only; no test split was read.
 
 `fg1` was the mainline until the r1 router diagnostic; **`gs` replaced it** — see "The frozen model" above.
-Under the old protocol `fg1` reached **32/36** main+phase cells against MoGERNN on METR-LA, with the four
-misses on Join MAE, Warm MAE, Ready MAE and Ready RMSE. That number predates every correction and must not
-be quoted against a current run.
+Under the old protocol (training hash `59c55e6e…`) `fg1` reached **32/36** main+phase cells against
+MoGERNN on METR-LA. The four misses, `fg1` vs MoGERNN:
+
+| table | cell | fg1 | MoGERNN |
+|---|---|---|---|
+| main | Join MAE | 4.6125 | 4.5827 |
+| phase | Warm MAE | 4.5698 | 4.5237 |
+| phase | Ready MAE | 4.4736 | 4.4423 |
+| phase | Ready RMSE | 6.8822 | 6.8736 |
+
+This result was accepted by the supervisor and is research history. It predates every correction — strict
+inductive, the MoGERNN batch adapter and LCBT v3.2 — so it is **not** a paper result, and none of its
+numbers may share a table or a mean with a run under the current protocol.
 
 `kt` reached **35/36** (only Ready RMSE missing) by distilling the retired `rf_l3s`/A2 teacher into a frozen
 two-stage schedule with 15,317 trainable parameters. That violates the end-to-end constraint, so it is a

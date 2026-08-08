@@ -5,8 +5,10 @@ about which files a `--mode test_async` pass leaves behind, and so the launcher
 and the aggregator agree on what "already evaluated" means. The rules live in
 `scripts/final_runs.verify_eval`.
 
-    conda run -n COMG python scripts/verify_eval_result.py
-    conda run -n COMG python scripts/verify_eval_result.py --only alfnet-metrla-s32
+Run it from the active project environment (server: ReaCH, local Windows: COMG):
+
+    python scripts/verify_eval_result.py
+    python scripts/verify_eval_result.py --only alfnet-metrla-s32
 """
 
 import argparse

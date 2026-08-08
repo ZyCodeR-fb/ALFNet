@@ -26,8 +26,10 @@ And across runs:
     datasets do not share one;
   * no two runs share a `canonical_config_hash`.
 
-    conda run -n COMG python scripts/audit_final_18.py
-    conda run -n COMG python scripts/audit_final_18.py --only alfnet-metrla-s32
+Run it from the active project environment (server: ReaCH, local Windows: COMG):
+
+    python scripts/audit_final_18.py
+    python scripts/audit_final_18.py --only alfnet-metrla-s32
 """
 
 import argparse
@@ -124,7 +126,8 @@ def main():
             print(
                 f"CANNOT VERIFY {run['run_id']}: {type(exc).__name__}: {exc}\n"
                 "This is an environment problem, not a verdict on the run. "
-                "Check that PYTHON points at the project environment (COMG).",
+                "Check that PYTHON points at the active project environment "
+                "(server: ReaCH, local Windows: COMG).",
                 file=sys.stderr,
             )
             return 2

@@ -11,8 +11,10 @@ shape and structural checks that `--mode test_async` would run -- and stops
 before the test data provider is built. **No test split is read and no metric is
 computed**, so this is safe to run at any time; the test split stays unspent.
 
-    conda run -n COMG python scripts/checkpoint_load_smoke.py
-    conda run -n COMG python scripts/checkpoint_load_smoke.py \
+Run it from the active project environment (server: ReaCH, local Windows: COMG):
+
+    python scripts/checkpoint_load_smoke.py
+    python scripts/checkpoint_load_smoke.py \
         --run outputs/ALFNet/gs-r1-s32 --config configs/ALFNet/gs.yaml
 """
 
