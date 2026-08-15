@@ -18,6 +18,7 @@ construction.
 """
 
 import argparse
+import math
 import csv
 import json
 import sys
@@ -95,13 +96,67 @@ def parse_args():
     return parser.parse_args()
 
 
-def _read_rows(result_dir):
+class InvalidRow(ValueError):
+    """A raw CSV row that cannot be trusted to enter any statistic."""
+
+
+def _validate_row(row, path, line_number):
+    """Reject a malformed raw row at the door, with enough context to find it.
+
+    Every downstream finite check was useless without this. ``_nanmean`` drops
+    non-finite cells -- which is correct for a bootstrap draw that missed a
+    cell, and catastrophic for a NaN that was in the CSV to begin with.
+    Measured: injecting a single ``treated_ae_sum = NaN`` into a real METR-LA
+    post-event row still produced 114 of 114 finite endpoints, so the corruption
+    passed every later guard silently.
+
+    A structural NaN produced *inside* the resampler stays legitimate. A NaN in
+    the source data is not a missing-cell marker and is never treated as one.
+    """
+    def _fail(field, value, reason):
+        raise InvalidRow(
+            f"{path}:{line_number}: {field}={value!r} {reason} "
+            f"[dataset={row.get('dataset')!r} model={row.get('model')!r} "
+            f"origin_id={row.get('origin_id')!r} cohort_id={row.get('cohort_id')!r} "
+            f"track={row.get('track')!r} tau={row.get('tau')!r}]"
+        )
+
+    for field in SUM_FIELDS:
+        value = row.get(field)
+        if value is None:
+            _fail(field, value, "is missing")
+        if not math.isfinite(value):
+            _fail(field, value, "is not finite; a NaN in the source is not a missing cell")
+        if value < 0:
+            _fail(field, value, "is negative, but it is a sum of absolute or squared errors")
+
+    for field in ("count", "node_count"):
+        value = row.get(field)
+        if value is None or value <= 0:
+            _fail(field, value, "must be a positive integer")
+
+    fraction = row.get("cohort_fraction")
+    if fraction is None or not math.isfinite(fraction) or not 0.0 < fraction <= 1.0:
+        _fail("cohort_fraction", fraction, "must be finite and in (0, 1]")
+
+    for field in ("graph_weight", "patch_residual_weight"):
+        value = row.get(field)
+        if value is not None and not math.isfinite(value):
+            _fail(field, value, "is present but not finite")
+
+    for field in ("track", "phase", "regime", "dataset"):
+        if not row.get(field):
+            _fail(field, row.get(field), "is required and must be non-empty")
+
+
+def _read_rows(result_dir, validate=True):
     path = Path(result_dir) / "ples_paired_rows.csv"
     if not path.exists():
         raise FileNotFoundError(f"PLES row file not found: {path}")
     rows = []
     with path.open("r", encoding="utf-8", newline="") as handle:
-        for raw in csv.DictReader(handle):
+        reader = csv.DictReader(handle)
+        for line_number, raw in enumerate(reader, start=2):  # 1 is the header
             row = dict(raw)
             for key in ("origin_id", "cohort_id", "tau", "count", "node_count", "event_time_index"):
                 row[key] = int(row[key])
@@ -111,6 +166,8 @@ def _read_rows(result_dir):
             # aggregation expects float-or-None.
             for key in ("graph_weight", "patch_residual_weight"):
                 row[key] = None if row.get(key) in {None, ""} else float(row[key])
+            if validate:
+                _validate_row(row, path, line_number)
             rows.append(row)
     if not rows:
         raise ValueError(f"PLES paired rows are empty: {path}")

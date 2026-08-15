@@ -28,7 +28,6 @@ from scripts.multiseed_paired_inference import (
     _descriptive_verdict,
     build_records,
 )
-from scripts.paired_model_bootstrap import _bootstrap_p_value, _holm
 
 SEEDS = [32, 42, 52]
 MARGINS = {"MAE": 0.05, "MAPE": 0.25, "RMSE": None}
@@ -58,16 +57,6 @@ def test_point_estimate_is_the_mean_of_the_per_seed_differences():
 # --- Holm is applied inside frozen families ----------------------------------
 
 
-def test_holm_is_monotone_and_never_below_the_raw_p():
-    raw = [0.001, 0.02, 0.04, 0.5, 0.9]
-    adjusted = _holm(raw)
-    for a, r in zip(adjusted, raw):
-        assert a >= r - 1e-12
-    ordered = [adjusted[i] for i in sorted(range(len(raw)), key=lambda i: raw[i])]
-    assert ordered == sorted(ordered), "Holm output must be monotone in the raw order"
-    assert all(0.0 <= value <= 1.0 for value in adjusted)
-
-
 def test_families_are_frozen_and_disjoint():
     keys = [key for member in FAMILIES.values() for key in member]
     assert len(keys) == len(set(keys)), "a key in two families would be corrected twice"
@@ -76,12 +65,19 @@ def test_families_are_frozen_and_disjoint():
     assert len(FAMILIES["ples"]) == 6
 
 
-def test_cells_outside_a_family_get_no_adjusted_p():
-    """Correcting across a set picked after seeing results is not a correction."""
+def test_no_p_like_statistic_is_emitted():
+    """Three seeds cannot support one, and a p-shaped number gets read as a p."""
+    record = _records(-1.0, [-1.0] * 50, [-1.0, -1.0, -1.0])[0]
+    banned = {"p_bootstrap", "p_holm", "p_holm_descriptive", "p_value",
+              "bootstrap_tail_area", "holm_ordering_score"}
+    assert banned.isdisjoint(record), sorted(banned & set(record))
+
+
+def test_cells_outside_a_group_are_marked_exploratory():
     exploratory = ("phase", "Warm", "RMSE")
     assert exploratory not in [k for m in FAMILIES.values() for k in m]
     records = _records(-1.0, [-1.0] * 50, [-1.0, -1.0, -1.0], key=exploratory)
-    assert records[0]["holm_ordering_score"] is None
+    assert records[0]["family"] is None
     assert "exploratory" in records[0]["verdict"]
 
 
@@ -158,21 +154,19 @@ def test_non_finite_input_is_undetermined_not_a_win():
 # --- synthetic null, fixed effect, reversal ----------------------------------
 
 
-def test_synthetic_null_is_not_called_significant():
+def test_synthetic_null_is_not_described_as_a_difference():
     rng = np.random.default_rng(0)
     draws = rng.normal(0.0, 1.0, 4000)
-    assert _bootstrap_p_value(draws) > 0.05
     record = _records(0.0, draws, [0.0, 0.0, 0.0])[0]
     assert record["verdict"] == "no difference"
     assert record["n_tie"] == 3
 
 
-def test_a_clear_fixed_effect_is_detected_with_the_right_sign():
+def test_a_clear_fixed_effect_is_described_with_the_right_sign():
     rng = np.random.default_rng(1)
     draws = rng.normal(-1.0, 0.05, 4000)
     record = _records(-1.0, draws, [-1.0, -0.9, -1.1])[0]
-    assert record["bootstrap_tail_area"] < 0.05
-    assert record["holm_ordering_score"] < 0.05
+    assert record["ci_high"] < 0, "interval should sit entirely below zero"
     assert MODEL_A in record["verdict"]
     assert record["seeds_favouring_alfnet"] == 3
     assert record["seed_unanimous"] is True
@@ -187,12 +181,11 @@ def test_reversing_the_effect_reverses_the_verdict():
     assert record["seed_unanimous"] is True
 
 
-def test_seed_conflict_is_reported_even_when_the_mean_is_significant():
+def test_seed_conflict_is_visible_next_to_the_point_estimate():
     """The METR-LA situation: a mean that favours one model on split seeds.
 
-    The verdict may still be significant -- that is the estimator's business --
-    but the seed disagreement must be visible next to it, because a 2/3 split is
-    what distinguishes this from a settled result.
+    The seed disagreement must be visible in structured fields, because a 2/3
+    split is what distinguishes this from a settled result.
     """
     rng = np.random.default_rng(3)
     draws = rng.normal(-0.3, 0.05, 4000)

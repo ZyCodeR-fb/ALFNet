@@ -35,12 +35,14 @@ the JSON as ``post_hoc_diagnostic_only`` and
 3. The practical margins were chosen *after* the v3 test split had been read, so
    they are post-hoc and cannot be presented as pre-registered thresholds.
 
-``holm_ordering_score`` is computed inside the two families as a descriptive
-ordering statistic. It is not a p-value: it is a Holm transform of an
-uncalibrated bootstrap tail area, it is consumed by no verdict, and it must not
-be reported as significance. The families are fixed in this file for
-reproducibility, not pre-registered -- v3 had no analysis plan before its test
-split was read.
+**No p-like statistic is emitted.** A bootstrap tail area computed across three
+training seeds is not a calibrated p-value, and a Holm transform of one is not a
+multiplicity correction. Earlier revisions published both as "descriptive"; they
+were removed instead, because a number that looks like a p-value will be read as
+one. What remains is the point estimate, a nominal percentile interval and the
+seed tally. The endpoint grouping is fixed in this file for reproducibility and
+is **not** pre-registered -- v3 had no analysis plan before its test split was
+read.
 
 Non-finite values fail closed. A NaN per-seed delta used to satisfy the
 lower-is-better comparison and count as an ALFNet win, and an all-NaN family
@@ -69,8 +71,6 @@ from scripts.collect_lifecycle_results import _load_run  # noqa: E402
 from scripts.final_runs import load_manifest, verify_eval  # noqa: E402
 from scripts.paired_model_bootstrap import (  # noqa: E402
     RowTensor,
-    _bootstrap_p_value,
-    _holm,
     _main_cohort_ids,
     _pair_keys,
     _read_rows,
@@ -321,6 +321,8 @@ def crossed_bootstrap(tensors, seeds, samples, seed):
     every drawn seed and both models; drawing a seed twice only doubles its
     weight in the average, it does not resample the events again.
     """
+    if samples <= 0:
+        raise NonFiniteValue(f"crossed_bootstrap needs samples > 0, got {samples}")
     rng = np.random.default_rng(seed)
     reference = tensors[seeds[0]][MODEL_A]
     keys, draws = None, None
@@ -428,18 +430,41 @@ def _descriptive_verdict(delta, low, high, higher_is_better, margin, seeds_favou
     return f"favours {direction}{scale}"
 
 
+def _assert_key_sets_agree(point, draws, seed_deltas, seeds):
+    """point, draws and every seed must describe exactly the same endpoints.
+
+    A missing endpoint in one of them would otherwise be scored on a quietly
+    reduced set, and an extra one would be scored with no counterpart.
+    """
+    expected = set(point)
+    problems = []
+    if set(draws) != expected:
+        problems.append(f"draws: missing {sorted(expected - set(draws))}, "
+                        f"extra {sorted(set(draws) - expected)}")
+    for seed in seeds:
+        if set(seed_deltas[seed]) != expected:
+            problems.append(f"seed {seed}: missing {sorted(expected - set(seed_deltas[seed]))}, "
+                            f"extra {sorted(set(seed_deltas[seed]) - expected)}")
+    if problems:
+        raise NonFiniteValue("endpoint key sets disagree:\n  - " + "\n  - ".join(problems))
+
+
 def build_records(point, draws, seed_deltas, seeds, margins):
+    _assert_key_sets_agree(point, draws, seed_deltas, seeds)
     family_of = {key: name for name, keys in FAMILIES.items() for key in keys}
     records = []
     for key in sorted(draws):
         table, row, metric = key
-        delta_draws = draws[key]
-        finite = np.isfinite(delta_draws)
-        low, high = (
-            (float(np.percentile(delta_draws[finite], 2.5)),
-             float(np.percentile(delta_draws[finite], 97.5)))
-            if finite.any() else (float("nan"), float("nan"))
-        )
+        delta_draws = np.asarray(draws[key], dtype=np.float64)
+        # Order matters and used to be wrong: the percentile was taken over
+        # `delta_draws[finite]`, i.e. NaN was filtered out before the check that
+        # claimed nothing was filtered. Validate first, then compute.
+        if delta_draws.size == 0:
+            raise NonFiniteValue(f"{table}/{row}/{metric}: no bootstrap draws")
+        _require_finite(delta_draws, f"bootstrap draws {table}/{row}/{metric}")
+        low = float(np.percentile(delta_draws, 2.5))
+        high = float(np.percentile(delta_draws, 97.5))
+        _require_finite([low, high], f"interval ends {table}/{row}/{metric}")
         higher_is_better = key in HIGHER_IS_BETTER
         directions = [seed_deltas[s][key] for s in seeds]
         tally = seed_tally(directions, higher_is_better)
@@ -449,7 +474,6 @@ def build_records(point, draws, seed_deltas, seeds, margins):
                 "per-seed deltas are non-finite; refusing to score this endpoint"
             )
         _require_finite(point[key], f"point estimate {table}/{row}/{metric}")
-        _require_finite(delta_draws, f"bootstrap draws {table}/{row}/{metric}")
         if low > high:
             raise NonFiniteValue(f"{table}/{row}/{metric}: interval low {low} > high {high}")
         records.append({
@@ -457,7 +481,6 @@ def build_records(point, draws, seed_deltas, seeds, margins):
             "family": family_of.get(key),
             "delta": float(point[key]),
             "ci_low": low, "ci_high": high,
-            "bootstrap_tail_area": _bootstrap_p_value(delta_draws),
             "higher_is_better": higher_is_better,
             "per_seed_delta": {str(s): float(seed_deltas[s][key]) for s in seeds},
             **tally,
@@ -466,19 +489,11 @@ def build_records(point, draws, seed_deltas, seeds, margins):
             "seed_unanimous": _unanimous(tally, len(seeds)),
         })
 
-    # Holm inside each frozen family. Reported as a descriptive ordering
-    # statistic only -- it is applied to an uncalibrated bootstrap tail area, so
-    # it does not convert these into tested results and no verdict consumes it.
-    for family, keys in FAMILIES.items():
-        members = [r for r in records if r["family"] == family]
-        if not members:
-            continue
-        tails = [r["bootstrap_tail_area"] for r in members]
-        _require_finite(tails, f"bootstrap tail areas in family {family}")
-        for record, value in zip(members, _holm(tails)):
-            record["holm_ordering_score"] = float(value)
+    # No p-like statistic is emitted. A bootstrap tail area over three training
+    # seeds is not a calibrated p-value and a Holm transform of one is not a
+    # correction; publishing either invites exactly the reading v3 cannot
+    # support. Point, percentile interval and the seed tally are what remain.
     for record in records:
-        record.setdefault("holm_ordering_score", None)
         margin = margin_for(record["metric"], margins)
         record["post_hoc_margin"] = margin
         record["verdict"] = _descriptive_verdict(
@@ -531,16 +546,17 @@ def main():
     print(f"  seeds={seeds} | samples={args.bootstrap_samples} | "
           f"protocol={provenance[seeds[0]]['protocol_hash'][:12]}")
     print(f"  {'family':<12}{'row':<19}{'metric':<6}{'delta':>10}{'95% CI':>22}"
-          f"{'holm*':>9}  seeds  verdict")
+          f"  ALF/base/tie/eval  verdict")
     for record in records:
         if record["family"] is None:
             continue
         interval = f"[{record['ci_low']:+.4f},{record['ci_high']:+.4f}]"
         print(f"  {record['family']:<12}{record['row']:<19}{record['metric']:<6}"
               f"{record['delta']:>+10.4f}{interval:>22}"
-              f"{record['holm_ordering_score']:>9.3f}"
-              f"   {record['seeds_favouring_alfnet']}/{record['seed_count']}"
-              f"   {record['verdict']}")
+              f"   {record['n_favour_alfnet']}/{record['n_favour_baseline']}"
+              f"/{record['n_tie']}/{record['n_evaluable']}"
+              f"{'  U' if record['seed_unanimous'] else '   '}"
+              f"  {record['verdict']}")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -567,7 +583,8 @@ def main():
         },
         "point_estimate": "mean over seeds of (ALFNet - MoGERNN); equals the "
                           "difference of the two published three-seed means",
-        "families": {name: [list(k) for k in keys] for name, keys in FAMILIES.items()},
+        "endpoint_groups": {name: [list(k) for k in keys] for name, keys in FAMILIES.items()},
+        "endpoint_groups_status": "code-fixed post-hoc grouping, not pre-registered",
         "post_hoc_margins": margins,
         "margin_status": "chosen after the v3 test split was read; post-hoc, not "
                          "pre-registered, and not usable as an acceptance threshold",
@@ -577,9 +594,10 @@ def main():
                       "from three seeds give 27 ordered sequences but only 10 "
                       "distinct multiplicity vectors. Read the sign and the seed "
                       "agreement, not the width, and never as a formal test.",
-        "holm_ordering_score": "descriptive ordering statistic only. Computed from an "
-                               "uncalibrated bootstrap tail area, consumed by no verdict, "
-                               "and not a p-value.",
+        "significance_reporting": "none. No p-value, tail area or multiplicity "
+                                  "correction is emitted; three training seeds cannot "
+                                  "support one and a number shaped like a p-value "
+                                  "would be read as one.",
         "provenance": provenance,
         "records": records,
     }, indent=2, allow_nan=False), encoding="utf-8")
