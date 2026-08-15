@@ -1,8 +1,8 @@
-"""Three-seed hierarchical paired inference, ALFNet against MoGERNN.
+"""Three-seed crossed paired diagnostics, ALFNet against MoGERNN. Post-hoc.
 
 ``scripts/paired_model_bootstrap.py`` compares one seed against one seed. It
 says so itself -- it asserts the two runs share a seed and stamps
-``single_seed_diagnostic_only`` into its output -- but that leaves the formal
+``single_seed_diagnostic_only`` into its output -- but that leaves the whole
 comparison resting on a single training run, and training randomness is a real
 source of variance here: on METR-LA the seed ordering reverses on most cells.
 
@@ -35,11 +35,18 @@ the JSON as ``post_hoc_diagnostic_only`` and
 3. The practical margins were chosen *after* the v3 test split had been read, so
    they are post-hoc and cannot be presented as pre-registered thresholds.
 
-Holm is still computed inside the frozen families, but as a descriptive ordering
-statistic only -- adjusting an uncalibrated bootstrap tail area does not make it
-a test, and no verdict here consumes it. Formal seed-level inference needs a
-pre-registered analysis plan and more seeds; if only three are affordable, it
-stays descriptive.
+``holm_ordering_score`` is computed inside the two families as a descriptive
+ordering statistic. It is not a p-value: it is a Holm transform of an
+uncalibrated bootstrap tail area, it is consumed by no verdict, and it must not
+be reported as significance. The families are fixed in this file for
+reproducibility, not pre-registered -- v3 had no analysis plan before its test
+split was read.
+
+Non-finite values fail closed. A NaN per-seed delta used to satisfy the
+lower-is-better comparison and count as an ALFNet win, and an all-NaN family
+produced a Holm score of 0.0 out of a NaN tail area. Nothing here filters NaN
+silently; it raises with the endpoint named, and the JSON is written with
+``allow_nan=False``.
 
     python scripts/multiseed_paired_inference.py --dataset METRLA \\
         --output-dir ./outputs/reports/final/multiseed
@@ -75,6 +82,10 @@ from scripts.paired_model_bootstrap import (  # noqa: E402
 
 MODEL_A, MODEL_B = "ALFNet", "MoGERNN"
 
+# A 95% percentile interval from a handful of draws is not a 95% interval. Unit
+# tests inject draws directly rather than weakening this production floor.
+MIN_BOOTSTRAP_SAMPLES = 1000
+
 # Frozen multiple-testing families. Anything outside these is exploratory and
 # carries no adjusted p-value: correcting across a set chosen after seeing the
 # results is not a correction.
@@ -103,7 +114,17 @@ def parse_args():
                              "POST-HOC: chosen after the v3 test split was read, so it is "
                              "a reporting aid, not an acceptance threshold")
     parser.add_argument("--post-hoc-margin-mape", type=float, default=0.25)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.bootstrap_samples < MIN_BOOTSTRAP_SAMPLES:
+        parser.error(
+            f"--bootstrap-samples must be at least {MIN_BOOTSTRAP_SAMPLES} to report a "
+            f"95% interval; got {args.bootstrap_samples}"
+        )
+    for name, value in (("--post-hoc-margin-mae", args.post_hoc_margin_mae),
+                        ("--post-hoc-margin-mape", args.post_hoc_margin_mape)):
+        if not np.isfinite(value) or value < 0:
+            parser.error(f"{name} must be finite and >= 0, got {value!r}")
+    return args
 
 
 def load_seed_bundles(dataset, output_root):
@@ -326,6 +347,60 @@ def crossed_bootstrap(tensors, seeds, samples, seed):
     return draws
 
 
+class NonFiniteValue(SystemExit):
+    """Raised, never swallowed, when a non-finite value reaches a statistic.
+
+    Filtering NaN silently is what produced the two worst defects here: a NaN
+    per-seed delta satisfied the lower-is-better test and was counted as an
+    ALFNet win, and an all-NaN family produced a Holm score of 0.0 -- the
+    strongest possible ordering -- out of a NaN tail area.
+    """
+
+
+def _require_finite(value, what):
+    array = np.asarray(value, dtype=np.float64)
+    bad = ~np.isfinite(array)
+    if bool(np.any(bad)):
+        index = int(np.argmax(bad)) if array.ndim else None
+        where = "" if index is None else f" at index {index}"
+        raise NonFiniteValue(f"non-finite value in {what}{where}: {array.ravel()[:5]}")
+    return value
+
+
+def seed_tally(directions, higher_is_better):
+    """Count seeds by outcome, keeping ties and non-finite values separate.
+
+    ``seeds_favouring == 0`` used to imply unanimity for the other model. It
+    does not: per-seed deltas of ``[+1, 0, 0]`` gave "favours MoGERNN, all 3
+    seeds agree" when only one seed favoured MoGERNN and two were exact ties.
+    A tie supports neither model, and a non-finite delta supports nothing at all.
+    """
+    favour_a = favour_b = tie = nonfinite = 0
+    for value in directions:
+        if not np.isfinite(value):
+            nonfinite += 1
+        elif value == 0:
+            tie += 1
+        elif (value > 0) == higher_is_better:
+            favour_a += 1
+        else:
+            favour_b += 1
+    return {
+        "n_favour_alfnet": favour_a,
+        "n_favour_baseline": favour_b,
+        "n_tie": tie,
+        "n_nonfinite": nonfinite,
+        "n_evaluable": favour_a + favour_b + tie,
+    }
+
+
+def _unanimous(tally, seed_count):
+    """Every seed evaluable, and all of them on the same side."""
+    if tally["n_evaluable"] != seed_count:
+        return False
+    return seed_count in (tally["n_favour_alfnet"], tally["n_favour_baseline"])
+
+
 def _descriptive_verdict(delta, low, high, higher_is_better, margin, seeds_favouring,
                          seed_count):
     """A described direction, never a significance claim.
@@ -341,17 +416,16 @@ def _descriptive_verdict(delta, low, high, higher_is_better, margin, seeds_favou
     """
     if not np.isfinite(delta) or not np.isfinite(low) or not np.isfinite(high):
         return "undetermined"
+    if delta == 0:
+        return "no difference"
     favours_a = delta > 0 if higher_is_better else delta < 0
-    excludes_zero = low > 0 or high < 0
-    unanimous = seeds_favouring in (0, seed_count)
     direction = MODEL_A if favours_a else MODEL_B
-    if not excludes_zero:
+    if not (low > 0 or high < 0):
         return "interval covers zero"
-    if abs(delta) < margin:
+    if margin is not None and abs(delta) < margin:
         return f"below the {margin:g} post-hoc margin"
-    if not unanimous:
-        return f"favours {direction}, seeds split {seeds_favouring}/{seed_count}"
-    return f"favours {direction}, all {seed_count} seeds agree"
+    scale = "" if margin is not None else ", direction only (no margin defined)"
+    return f"favours {direction}{scale}"
 
 
 def build_records(point, draws, seed_deltas, seeds, margins):
@@ -368,21 +442,28 @@ def build_records(point, draws, seed_deltas, seeds, margins):
         )
         higher_is_better = key in HIGHER_IS_BETTER
         directions = [seed_deltas[s][key] for s in seeds]
-        agreeing = sum(
-            1 for value in directions
-            if (value > 0) == higher_is_better and value != 0
-        )
+        tally = seed_tally(directions, higher_is_better)
+        if tally["n_nonfinite"]:
+            raise NonFiniteValue(
+                f"{table}/{row}/{metric}: {tally['n_nonfinite']} of {len(seeds)} "
+                "per-seed deltas are non-finite; refusing to score this endpoint"
+            )
+        _require_finite(point[key], f"point estimate {table}/{row}/{metric}")
+        _require_finite(delta_draws, f"bootstrap draws {table}/{row}/{metric}")
+        if low > high:
+            raise NonFiniteValue(f"{table}/{row}/{metric}: interval low {low} > high {high}")
         records.append({
             "table": table, "row": row, "metric": metric,
             "family": family_of.get(key),
             "delta": float(point[key]),
             "ci_low": low, "ci_high": high,
-            "p_bootstrap": _bootstrap_p_value(delta_draws),
+            "bootstrap_tail_area": _bootstrap_p_value(delta_draws),
             "higher_is_better": higher_is_better,
             "per_seed_delta": {str(s): float(seed_deltas[s][key]) for s in seeds},
-            "seeds_favouring_alfnet": agreeing,
+            **tally,
+            "seeds_favouring_alfnet": tally["n_favour_alfnet"],
             "seed_count": len(seeds),
-            "seed_unanimous": agreeing in (0, len(seeds)),
+            "seed_unanimous": _unanimous(tally, len(seeds)),
         })
 
     # Holm inside each frozen family. Reported as a descriptive ordering
@@ -392,12 +473,13 @@ def build_records(point, draws, seed_deltas, seeds, margins):
         members = [r for r in records if r["family"] == family]
         if not members:
             continue
-        adjusted = _holm([r["p_bootstrap"] for r in members])
-        for record, value in zip(members, adjusted):
-            record["p_holm_descriptive"] = float(value)
+        tails = [r["bootstrap_tail_area"] for r in members]
+        _require_finite(tails, f"bootstrap tail areas in family {family}")
+        for record, value in zip(members, _holm(tails)):
+            record["holm_ordering_score"] = float(value)
     for record in records:
-        record.setdefault("p_holm_descriptive", None)
-        margin = margins["MAE"] if record["metric"] == "MAE" else margins["MAPE"]
+        record.setdefault("holm_ordering_score", None)
+        margin = margin_for(record["metric"], margins)
         record["post_hoc_margin"] = margin
         record["verdict"] = _descriptive_verdict(
             record["delta"], record["ci_low"], record["ci_high"],
@@ -406,6 +488,25 @@ def build_records(point, draws, seed_deltas, seeds, margins):
         if record["family"] is None:
             record["verdict"] += " (exploratory)"
     return records
+
+
+def margin_for(metric, margins):
+    """Margin for a metric, or None when no basis for one exists.
+
+    RMSE deliberately has no margin. Borrowing MAPE's 0.25 would apply a
+    percentage-scaled threshold to a squared-error scale, which is not the same
+    quantity; without an independent basis the honest value is None and the
+    endpoint is described by direction only. An unknown metric fails closed
+    rather than silently inheriting a number.
+    """
+    if metric in margins:
+        value = margins[metric]
+        if value is None:
+            return None
+        if not np.isfinite(value) or value < 0:
+            raise NonFiniteValue(f"margin for {metric} must be finite and >= 0, got {value!r}")
+        return float(value)
+    raise NonFiniteValue(f"no margin policy declared for metric {metric!r}")
 
 
 def main():
@@ -420,7 +521,10 @@ def main():
     }
     draws = crossed_bootstrap(tensors, seeds, args.bootstrap_samples,
                                    args.bootstrap_seed)
-    margins = {"MAE": args.post_hoc_margin_mae, "MAPE": args.post_hoc_margin_mape}
+    margins = {"MAE": args.post_hoc_margin_mae,
+               "MAPE": args.post_hoc_margin_mape,
+               # no independent basis for an RMSE threshold; describe direction only
+               "RMSE": None}
     records = build_records(point, draws, seed_deltas, seeds, margins)
 
     print(f"MultiSeedPairedInference: {MODEL_A} vs {MODEL_B} | {args.dataset}")
@@ -434,7 +538,7 @@ def main():
         interval = f"[{record['ci_low']:+.4f},{record['ci_high']:+.4f}]"
         print(f"  {record['family']:<12}{record['row']:<19}{record['metric']:<6}"
               f"{record['delta']:>+10.4f}{interval:>22}"
-              f"{record['p_holm_descriptive']:>9.3f}"
+              f"{record['holm_ordering_score']:>9.3f}"
               f"   {record['seeds_favouring_alfnet']}/{record['seed_count']}"
               f"   {record['verdict']}")
 
@@ -473,11 +577,12 @@ def main():
                       "from three seeds give 27 ordered sequences but only 10 "
                       "distinct multiplicity vectors. Read the sign and the seed "
                       "agreement, not the width, and never as a formal test.",
-        "holm_status": "descriptive ordering statistic only; applied to an "
-                       "uncalibrated bootstrap tail area and consumed by no verdict",
+        "holm_ordering_score": "descriptive ordering statistic only. Computed from an "
+                               "uncalibrated bootstrap tail area, consumed by no verdict, "
+                               "and not a p-value.",
         "provenance": provenance,
         "records": records,
-    }, indent=2), encoding="utf-8")
+    }, indent=2, allow_nan=False), encoding="utf-8")
     print(f"\n-> {destination}")
 
 

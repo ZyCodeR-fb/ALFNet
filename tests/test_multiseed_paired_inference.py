@@ -31,7 +31,7 @@ from scripts.multiseed_paired_inference import (
 from scripts.paired_model_bootstrap import _bootstrap_p_value, _holm
 
 SEEDS = [32, 42, 52]
-MARGINS = {"MAE": 0.05, "MAPE": 0.25}
+MARGINS = {"MAE": 0.05, "MAPE": 0.25, "RMSE": None}
 KEY = ("main", "Unseen", "MAE")
 
 
@@ -81,7 +81,7 @@ def test_cells_outside_a_family_get_no_adjusted_p():
     exploratory = ("phase", "Warm", "RMSE")
     assert exploratory not in [k for m in FAMILIES.values() for k in m]
     records = _records(-1.0, [-1.0] * 50, [-1.0, -1.0, -1.0], key=exploratory)
-    assert records[0]["p_holm_descriptive"] is None
+    assert records[0]["holm_ordering_score"] is None
     assert "exploratory" in records[0]["verdict"]
 
 
@@ -118,11 +118,16 @@ def test_direction_is_respected_for_higher_is_better_endpoints():
     assert MODEL_B in _descriptive_verdict(0.9, 0.4, 1.4, False, 0.25, 0, 3)
 
 
-def test_seed_split_is_stated_in_the_verdict():
-    split = _descriptive_verdict(-1.0, -2.0, -0.5, False, 0.05, 2, 3)
-    assert "2/3" in split
-    unanimous = _descriptive_verdict(-1.0, -2.0, -0.5, False, 0.05, 3, 3)
-    assert "all 3 seeds agree" in unanimous
+def test_seed_agreement_is_reported_in_fields_not_buried_in_prose():
+    """The tally is structured, so a reader cannot mistake a 2/3 split."""
+    split = _records(-1.0, [-1.0] * 50, [-1.0, -1.0, +0.4])[0]
+    assert split["n_favour_alfnet"] == 2
+    assert split["n_favour_baseline"] == 1
+    assert split["seed_unanimous"] is False
+
+    agreed = _records(-1.0, [-1.0] * 50, [-1.0, -1.0, -0.4])[0]
+    assert agreed["n_favour_alfnet"] == 3
+    assert agreed["seed_unanimous"] is True
 
 
 def test_only_ten_distinct_seed_multiplicity_vectors_exist():
@@ -158,15 +163,16 @@ def test_synthetic_null_is_not_called_significant():
     draws = rng.normal(0.0, 1.0, 4000)
     assert _bootstrap_p_value(draws) > 0.05
     record = _records(0.0, draws, [0.0, 0.0, 0.0])[0]
-    assert record["verdict"] == "interval covers zero"
+    assert record["verdict"] == "no difference"
+    assert record["n_tie"] == 3
 
 
 def test_a_clear_fixed_effect_is_detected_with_the_right_sign():
     rng = np.random.default_rng(1)
     draws = rng.normal(-1.0, 0.05, 4000)
     record = _records(-1.0, draws, [-1.0, -0.9, -1.1])[0]
-    assert record["p_bootstrap"] < 0.05
-    assert record["p_holm_descriptive"] < 0.05
+    assert record["bootstrap_tail_area"] < 0.05
+    assert record["holm_ordering_score"] < 0.05
     assert MODEL_A in record["verdict"]
     assert record["seeds_favouring_alfnet"] == 3
     assert record["seed_unanimous"] is True
@@ -191,7 +197,7 @@ def test_seed_conflict_is_reported_even_when_the_mean_is_significant():
     rng = np.random.default_rng(3)
     draws = rng.normal(-0.3, 0.05, 4000)
     record = _records(-0.3, draws, [-1.0, -1.0, +0.4])[0]
-    assert "2/3" in record["verdict"]
+    assert record["seed_unanimous"] is False
     assert record["seeds_favouring_alfnet"] == 2
     assert record["seed_unanimous"] is False
     assert record["per_seed_delta"] == {"32": -1.0, "42": -1.0, "52": 0.4}
@@ -318,3 +324,130 @@ def test_row_design_hash_ignores_model_output_but_not_order():
     assert _row_design_hash(base) == _row_design_hash(other)
     # reordering is a different design, because weights are positional
     assert _row_design_hash(base) != _row_design_hash(list(reversed(base)))
+
+
+# --- ties and non-finite values (Stage 1R-A2) --------------------------------
+
+
+def test_ties_are_not_counted_for_either_model():
+    """[+1, 0, 0] once read as "favours MoGERNN, all 3 seeds agree"."""
+    from scripts.multiseed_paired_inference import seed_tally
+
+    tally = seed_tally([+1.0, 0.0, 0.0], higher_is_better=False)
+    assert tally == {"n_favour_alfnet": 0, "n_favour_baseline": 1, "n_tie": 2,
+                     "n_nonfinite": 0, "n_evaluable": 3}
+
+    record = _records(0.3333, [0.3] * 50, [+1.0, 0.0, 0.0])[0]
+    assert record["n_tie"] == 2
+    assert record["n_favour_baseline"] == 1
+    assert record["seed_unanimous"] is False
+    assert "all 3 seeds agree" not in record["verdict"]
+
+
+def test_unanimity_requires_every_seed_evaluable_and_on_one_side():
+    from scripts.multiseed_paired_inference import _unanimous, seed_tally
+
+    assert _unanimous(seed_tally([-1.0, -1.0, -1.0], False), 3) is True
+    assert _unanimous(seed_tally([-1.0, -1.0, 0.0], False), 3) is False
+    assert _unanimous(seed_tally([-1.0, -1.0, +1.0], False), 3) is False
+
+
+def test_a_non_finite_per_seed_delta_fails_closed():
+    """It used to be counted as an ALFNet win."""
+    from scripts.multiseed_paired_inference import NonFiniteValue
+
+    with pytest.raises(NonFiniteValue, match="non-finite"):
+        _records(-0.5, [-0.5] * 50, [-1.0, float("nan"), -0.5])
+
+
+def test_an_all_nan_family_fails_closed_instead_of_scoring_zero():
+    """all-NaN once produced holm_ordering_score = 0.0, the strongest rank."""
+    from scripts.multiseed_paired_inference import NonFiniteValue
+
+    with pytest.raises(NonFiniteValue):
+        _records(float("nan"), [float("nan")] * 50, [float("nan")] * 3)
+
+
+def test_non_finite_bootstrap_draws_fail_closed():
+    from scripts.multiseed_paired_inference import NonFiniteValue
+
+    draws = [-0.5] * 49 + [float("inf")]
+    with pytest.raises(NonFiniteValue, match="bootstrap draws"):
+        _records(-0.5, draws, [-1.0, -0.5, -0.2])
+
+
+def test_rmse_gets_no_borrowed_margin():
+    from scripts.multiseed_paired_inference import NonFiniteValue, margin_for
+
+    margins = {"MAE": 0.05, "MAPE": 0.25, "RMSE": None}
+    assert margin_for("RMSE", margins) is None
+    assert margin_for("MAE", margins) == 0.05
+    with pytest.raises(NonFiniteValue, match="no margin policy"):
+        margin_for("SMAPE", margins)
+
+
+def test_a_negative_or_non_finite_margin_is_refused():
+    from scripts.multiseed_paired_inference import NonFiniteValue, margin_for
+
+    for bad in (-0.1, float("nan"), float("inf")):
+        with pytest.raises(NonFiniteValue, match="finite and >= 0"):
+            margin_for("MAE", {"MAE": bad})
+
+
+def test_a_marginless_metric_is_described_by_direction_only():
+    record = _records(-1.0, [-1.0] * 50, [-1.0, -1.0, -1.0],
+                      key=("main", "Unseen", "RMSE"))[0]
+    assert record["post_hoc_margin"] is None
+    assert "no margin defined" in record["verdict"]
+
+
+def test_production_requires_enough_draws_for_a_95_percent_interval():
+    from scripts.multiseed_paired_inference import MIN_BOOTSTRAP_SAMPLES
+
+    assert MIN_BOOTSTRAP_SAMPLES >= 1000
+
+
+def test_seed_multiplicity_actually_reaches_the_number(monkeypatch):
+    """Force the draw to [32, 32, 52] and require exactly (2*d32 + d52)/3.
+
+    The earlier fixture held A-B constant across seeds, so any weighting gave
+    the same answer and the test could not see a multiplicity bug.
+    """
+    from scripts import multiseed_paired_inference as module
+
+    effects = {32: 1.0, 42: 100.0, 52: 4.0}
+
+    class _T:
+        def __init__(self, value):
+            self.n_rows = 4
+            self.cohort_ids = [1]
+            self.blocks_by_stratum = {"W": ["b0"]}
+            self.block_rows = {"b0": np.array([0, 1, 2, 3])}
+            self.row_cohort = np.array([1, 1, 1, 1])
+            self.value = value
+
+    def _stats(tensor, weights):
+        return {KEY: tensor.value}
+
+    monkeypatch.setattr(module, "compute_statistics", _stats)
+    monkeypatch.setattr(module.np.random, "default_rng", module.np.random.default_rng)
+
+    class _RNG:
+        def __init__(self):
+            self.calls = 0
+
+        def choice(self, values, size, replace=True):
+            self.calls += 1
+            if self.calls == 1:                      # the seed draw
+                return np.array([32, 32, 52])
+            return np.array(list(values))            # cohorts, then blocks
+
+    monkeypatch.setattr(module.np.random, "default_rng", lambda seed: _RNG())
+    tensors = {s: {MODEL_A: _T(effects[s]), MODEL_B: _T(0.0)} for s in SEEDS}
+    draws = module.crossed_bootstrap(tensors, SEEDS, samples=1, seed=0)
+
+    expected = (2 * effects[32] + effects[52]) / 3
+    assert draws[KEY][0] == pytest.approx(expected), (
+        f"seed multiplicity did not reach the statistic: got {draws[KEY][0]}, "
+        f"expected {expected}"
+    )
