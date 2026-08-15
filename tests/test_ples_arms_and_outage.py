@@ -144,12 +144,12 @@ def test_control_only_degradation_is_named_by_the_pareto_status():
     advantages = plot._advantages_v2(ours, baseline, INPUT_LEN)
     join = advantages["JoinLiftGain/MAPE"]
 
+    # _advantages_v2 reports the arms; the verdict needs intervals and is made
+    # in bootstrap_advantages_v2, exercised end to end further down.
     assert join["advantage"] > 0, "fixture must look like a win on the contrast"
     assert join["treated_delta"] == pytest.approx(0.0), "treated arm is unchanged"
     assert join["control_delta"] > 0, "control arm got worse"
-    assert join["pareto"] == "control_improves_treated_degrades" or (
-        join["pareto"] == "both_arms_degrade"
-    ), f"a control-only degradation must not read as a clean win: {join['pareto']}"
+    assert "pareto" not in join, "a verdict must not be made without an interval"
 
 
 def test_both_arms_improving_is_distinguished_from_a_contrast_artifact():
@@ -163,14 +163,56 @@ def test_both_arms_improving_is_distinguished_from_a_contrast_artifact():
                 "OutageFaultPenaltyReduction/MAPE"):
         assert advantages[key]["treated_delta"] < 0, key
         assert advantages[key]["control_delta"] < 0, key
-        assert advantages[key]["pareto"] == "both_arms_improve", key
+        assert advantages[key]["n_evaluable_cells"] >= 1, key
 
 
-def test_pareto_status_covers_every_quadrant():
-    assert plot._pareto_status(-1.0, -1.0) == "both_arms_improve"
-    assert plot._pareto_status(-1.0, +1.0) == "treated_improves_control_degrades"
-    assert plot._pareto_status(+1.0, -1.0) == "control_improves_treated_degrades"
-    assert plot._pareto_status(+1.0, +1.0) == "both_arms_degrade"
+# --- arm classification is decided by the interval, not the point ------------
+
+
+def _ci(low, high):
+    return {"low": low, "high": high}
+
+
+def test_arm_status_uses_the_interval_not_the_point_estimate():
+    """A clearly negative point estimate whose interval spans zero is uncertain."""
+    assert plot.arm_status(-0.9, _ci(-2.0, +0.5), 0.05) == "uncertain"
+    assert plot.arm_status(-0.9, _ci(-2.0, -0.4), 0.05) == "improve"
+    assert plot.arm_status(+0.9, _ci(+0.4, +2.0), 0.05) == "degrade"
+
+
+def test_an_interval_inside_the_margin_is_equivalent_not_degraded():
+    """The old point-estimate rule called an exactly-zero delta a degradation."""
+    assert plot.arm_status(0.0, _ci(-0.01, +0.01), 0.05) == "equivalent"
+    assert plot.arm_status(0.0, _ci(0.0, 0.0), 0.05) == "equivalent"
+
+
+def test_a_missing_or_non_finite_interval_is_uncertain_never_a_win():
+    assert plot.arm_status(-1.0, None, 0.05) == "uncertain"
+    assert plot.arm_status(float("nan"), _ci(-2.0, -1.0), 0.05) == "uncertain"
+    assert plot.arm_status(-1.0, _ci(float("nan"), -1.0), 0.05) == "uncertain"
+
+
+def test_pareto_credits_a_contrast_only_when_treated_improves():
+    assert plot.pareto_status("improve", "equivalent") == "accepted_treated_improves"
+    assert plot.pareto_status("improve", "improve") == "accepted_treated_improves"
+    # the gameable case: contrast looks better purely from a worse control arm
+    assert plot.pareto_status("equivalent", "degrade") == "rejected_control_degraded"
+    assert plot.pareto_status("improve", "degrade") == "rejected_control_degraded"
+    assert plot.pareto_status("degrade", "improve") == "rejected_treated_degraded"
+    assert plot.pareto_status("equivalent", "equivalent") == "no_material_change"
+    assert plot.pareto_status("uncertain", "improve") == "uncertain"
+
+
+def test_a_degraded_control_arm_is_never_accepted():
+    """No arm classification may rescue a degraded control arm."""
+    for treated in ("improve", "degrade", "equivalent", "uncertain"):
+        assert not plot.pareto_status(treated, "degrade").startswith("accepted")
+
+
+def test_margin_is_selected_per_metric():
+    margins = {"MAE": 0.05, "MAPE": 0.25}
+    assert plot.arm_margin_for("JoinLiftGain/MAE", margins) == 0.05
+    assert plot.arm_margin_for("JoinLiftGain/MAPE", margins) == 0.25
 
 
 # --- 4. saturated cohorts must not reach a main-plan number ------------------
@@ -226,3 +268,39 @@ def test_curves_use_calendar_shares_not_an_equal_regime_mean():
     share_weighted = (10.0 * (5 / 7) + 0.0 * (2 / 7)) * 100
     assert treated == pytest.approx(share_weighted)
     assert treated != pytest.approx(equal_weighted)
+
+
+# --- the gameable contrast, end to end through the bootstrap ------------------
+
+
+def test_control_only_degradation_is_rejected_by_the_full_pipeline():
+    """Build the exploit, run the real bootstrap, require a rejection.
+
+    Treated arm identical, control arm clearly worse. The JoinLift contrast
+    improves, and the verdict must still refuse it.
+    """
+    flat = {tau: 1.0 for tau in range(INPUT_LEN)}
+    baseline = _rows(flat, control=1.0, join_treated=1.0)
+    ours = _rows(flat, control=3.0, join_treated=1.0)
+    for origin, rows in ((1, baseline), (1, ours)):
+        for row in rows:
+            row["event_time_index"] = row["origin_id"] * 1000
+
+    result = plot.bootstrap_advantages_v2(
+        ours, baseline, INPUT_LEN, samples=120, seed=11, trajectory_span=8,
+        arm_margins={"MAE": 0.01, "MAPE": 0.05})
+    join = result["JoinLiftGain/MAPE"]
+
+    assert join["advantage"] > 0, "fixture must look like a win on the contrast"
+    assert join["treated_status"] == "equivalent", join["treated_status"]
+    assert join["control_status"] == "degrade", join["control_status"]
+    assert join["pareto"] == "rejected_control_degraded"
+
+
+def test_zero_samples_yields_uncertain_rather_than_a_point_verdict():
+    flat = {tau: 1.0 for tau in range(INPUT_LEN)}
+    result = plot.bootstrap_advantages_v2(
+        _rows(flat, control=3.0), _rows(flat, control=1.0), INPUT_LEN, samples=0)
+    for entry in result.values():
+        assert entry["pareto"] == "uncertain"
+        assert entry["treated_status"] == "uncertain"

@@ -410,9 +410,23 @@ while two different objectives can never share a checkpoint directory.
   `tau = input_len - 1`, it kept the saturated cohorts the main plan excludes, and it weighted calendar
   regimes equally instead of by their 5/7 and 2/7 shares. The formal PLES pipeline
   (`ples_protocol.paired_effects`) was correct throughout, so `final_18_tables.json` was never affected —
-  but the two disagreed, and a maximum is not a paired quantity: measured on the finished runs the two
-  models' maxima land at different `tau` in 12 of 18 cells and the contrast flips sign in 2. The plot
-  script now calls `ples_protocol`; do not reintroduce a second copy.
+  but the two disagreed, and a maximum is not a paired quantity: the two models' maxima land at different
+  `tau`, so a difference of two maxima compares two different cells. The plot script now calls
+  `ples_protocol`; do not reintroduce a second copy.
+
+  Three measurements, on METR-LA s32 `OutageFaultPenaltyReduction/MAPE`. They must not be conflated —
+  each isolates a different defect, and only the first is what the old script actually printed:
+
+  | reading | definition | value |
+  |---|---|---|
+  | `legacy_exact_5a06678` | all cohorts, equal regime weights, two-sided max | **−0.46452883240133325** |
+  | `isolated_max_counterfactual` | main cohorts and 5/7–2/7 weighting fixed, max deliberately kept | +0.16168498470594983 |
+  | `formal_tau_L_minus_1` | both models read at `tau = 11` | **+0.6049055413153859** |
+
+  So shipped-old → formal **does flip sign** on this cell. The "maxima differ in 12 of 18 cells, contrast
+  flips in 2" figure was computed on *corrected* curves, so it describes the isolated-max defect only, not
+  the old-to-new transition; and the old script emitted no MAE at all, so any MAE flip attributed to it is
+  an extrapolated counterfactual, not a historical result.
 * **Report both PLES arms, never the contrast alone.** `JoinLift` is `control - treated` and the Fault
   penalties are `treated - control`, so a model that merely predicts the *control* arm worse scores better
   on every one of them. This is not hypothetical: on METR-LA s32 the measured `JoinLiftGain/MAE` of +0.358
@@ -434,12 +448,38 @@ measurements support, and the two halves of the evidence pull in opposite direct
   defect that makes `fg1` indefensible (`nn.Softmax` over a single top-1 column has derivative 0, so its
   forecast gradient on `w_gate` is *exactly* 0.0) does not apply. The gate is conditioned on lifecycle
   state and is genuinely trained by the prediction objective.
-* **What does not.** Measured `entropy_ratio` on `gs` is ≈ 0.99: the five propagation operators are used
+* **What does not.** Measured `entropy_ratio` on `gs` is ≈ 0.99: the propagation operators are used
   almost uniformly. No operator has specialised to a lifecycle phase.
+* **There are not five distinct operators.** `SUPPORT_NAMES` lists five, but
+  `weighted_mean = A / rowsum.clamp_min(1e-6)` (`layers/lifecycle_moge.py`) and
+  `forward_diffusion = calculate_random_walk_matrix(A) = diag(1/rowsum) @ A` (`layers/gnn.py`) are the
+  same operator. Measured `max |difference|`:
 
-So: never write *sparse routing*, *expert routing*, *expert specialisation*, or any claim that the experts
-have divided the lifecycle between them. The defensible claim is that the aggregation weights are
-lifecycle-conditioned and end-to-end trainable, not that they have become selective. Entry point
+  | dataset | duplicate pairs | effective operators |
+  |---|---|---|
+  | METR-LA | weighted ≡ forward (5.96e-08) | **4** |
+  | PEMS-BAY | weighted ≡ forward (5.96e-08) | **4** |
+  | PEMS03 | forward ≡ backward (0.0) | 4 nominal, **3 by design** |
+  | PEMS04 | forward ≡ backward (0.0) | 4 nominal, **3 by design** |
+  | PEMS08 | weighted ≡ forward ≡ backward | **3** |
+
+  This is **not** a PEMS quirk — the weighted/forward duplication holds on every dataset, and the
+  5.96e-08 is a float path difference, not a different operator. `forward ≡ backward` on PEMS03/04/08 is
+  separate and comes from the converter symmetrising the adjacency. On PEMS03/04 `weighted` does differ
+  from `forward`, but on **2 of 358** and **8 of 307** rows only, and every one of those is a row whose
+  sum falls below the `1e-6` clamp while the random walk normalises it properly — a clamp artifact, not a
+  designed operator.
+
+So: never write *sparse routing*, *expert routing*, *expert specialisation*, *five heterogeneous
+operators*, or any claim that the experts have divided the lifecycle between them. Two of the five labels
+are the same matrix, so the router's usage mass is **unidentifiable between duplicated labels** — a
+reported per-expert usage split across `weighted_mean` and `forward_diffusion` carries no information.
+The defensible v3 claim is that the aggregation weights are lifecycle-conditioned and end-to-end
+trainable, over an operator set that is smaller than its label count.
+
+Fixing this is a **model change**: removing or redefining the duplicate operator changes the parameter
+set, so ALFNet and every baseline must be retrained from scratch under v4. Do not patch a v3 checkpoint
+and keep quoting v3 numbers. Entry point
 `configs/ALFNet/alfnet.yaml`, which is content-identical
 to `configs/ALFNet/gs.yaml` and therefore the same experiment by hash, so existing `gs` checkpoints load
 under the paper's name. `gs.yaml` stays for that compatibility.

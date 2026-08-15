@@ -17,6 +17,7 @@ from data_provider.ples_protocol import (  # noqa: E402
     main_cohort_rows,
     overlap_blocks,
     paired_effect_arms,
+    paired_effect_cells,
     paired_effects,
     trajectory_span_from_manifest,
 )
@@ -366,23 +367,55 @@ def compare_rows_v2(ours_rows, baseline_rows, main_cohort_ids=None):
     return curves
 
 
-def _pareto_status(treated_delta, control_delta):
-    """Where an endpoint's movement actually came from.
+def arm_status(delta, interval, margin):
+    """Classify one absolute-error arm against its interval and a margin.
 
     Both arms are absolute errors, so a negative delta (ours - baseline) is an
-    improvement on that arm. A contrast can improve while the treated arm is
-    unchanged and only the control arm degrades; that is not a better model and
-    this is what names it.
+    improvement. Deciding this on the point estimate alone -- which an earlier
+    version did -- cannot separate "the control arm degraded" from "the control
+    arm moved by less than the noise", and it classified an exactly-zero delta
+    as a degradation. Four outcomes, from the interval:
+
+      improve     the whole interval is better than -margin
+      degrade     the whole interval is worse than +margin
+      equivalent  the whole interval lies inside [-margin, +margin]
+      uncertain   the interval spans more than one of those
     """
-    treated_better = treated_delta < 0
-    control_better = control_delta < 0
-    if treated_better and control_better:
-        return "both_arms_improve"
-    if treated_better and not control_better:
-        return "treated_improves_control_degrades"
-    if not treated_better and control_better:
-        return "control_improves_treated_degrades"
-    return "both_arms_degrade"
+    if interval is None:
+        return "uncertain"
+    low, high = float(interval["low"]), float(interval["high"])
+    if not all(np.isfinite(value) for value in (delta, low, high)):
+        return "uncertain"
+    if high < -margin:
+        return "improve"
+    if low > margin:
+        return "degrade"
+    if low >= -margin and high <= margin:
+        return "equivalent"
+    return "uncertain"
+
+
+# A contrast may only be credited when neither arm is established as degraded.
+NON_DEGRADED = {"improve", "equivalent"}
+
+
+def pareto_status(treated, control):
+    """Joint verdict over the two arm classifications.
+
+    The gate this exists for: a PLES contrast improves when the treated arm gets
+    better *or* when the control arm gets worse, and only the first is a better
+    model. ``rejected_control_degraded`` is the case a contrast-only reader
+    would have scored as a win.
+    """
+    if treated == "improve" and control in NON_DEGRADED:
+        return "accepted_treated_improves"
+    if control == "degrade":
+        return "rejected_control_degraded"
+    if treated == "degrade":
+        return "rejected_treated_degraded"
+    if treated in NON_DEGRADED and control in NON_DEGRADED:
+        return "no_material_change"
+    return "uncertain"
 
 
 def _advantages_v2(ours_rows, baseline_rows, input_len, main_cohort_ids=None):
@@ -413,13 +446,21 @@ def _advantages_v2(ours_rows, baseline_rows, input_len, main_cohort_ids=None):
                 "baseline_control": float(baseline_arms[name]["control"]),
                 "treated_delta": float(treated_delta),
                 "control_delta": float(control_delta),
-                "pareto": _pareto_status(treated_delta, control_delta),
+                "n_evaluable_cells": len(cells_for(ours_curves, input_len, name)),
             }
     return out
 
 
+def cells_for(curves, input_len, name):
+    return paired_effect_cells(curves, input_len)[name]
+
+
+DEFAULT_ARM_MARGINS = {"MAE": 0.05, "MAPE": 0.25}
+
+
 def bootstrap_advantages_v2(ours_rows, baseline_rows, input_len, samples=2000, seed=2026,
-                            trajectory_span=None, main_cohort_ids=None):
+                            trajectory_span=None, main_cohort_ids=None,
+                            arm_margins=None):
     """Paired advantage intervals on the PLES v3 resampling unit.
 
     This used to draw each origin independently and nest the cohort draw inside
@@ -443,9 +484,16 @@ def bootstrap_advantages_v2(ours_rows, baseline_rows, input_len, samples=2000, s
     # estimates alone cannot tell "the control arm degraded" from "the control
     # arm moved by less than the noise".
     resampled_fields = ("advantage", "treated_delta", "control_delta")
+    arm_margins = DEFAULT_ARM_MARGINS if arm_margins is None else arm_margins
     if samples <= 0:
+        # No interval means no arm can be classified; say uncertain rather than
+        # falling back to a point-estimate verdict.
         return {
-            name: {**entry, **{f"{field}_ci": None for field in resampled_fields}}
+            name: {**entry,
+                   **{f"{field}_ci": None for field in resampled_fields},
+                   "arm_margin": arm_margin_for(name, arm_margins),
+                   "treated_status": "uncertain", "control_status": "uncertain",
+                   "pareto": "uncertain"}
             for name, entry in point.items()
         }
 
@@ -514,19 +562,32 @@ def bootstrap_advantages_v2(ours_rows, baseline_rows, input_len, samples=2000, s
         for name, entry in values.items():
             for field in resampled_fields:
                 draws[(name, field)][sample_index] = entry[field]
-    return {
-        name: {
-            **entry,
-            **{
-                f"{field}_ci": {
-                    "low": float(np.percentile(draws[(name, field)], 2.5)),
-                    "high": float(np.percentile(draws[(name, field)], 97.5)),
-                }
-                for field in resampled_fields
-            },
+    resolved = {}
+    for name, entry in point.items():
+        intervals = {
+            f"{field}_ci": {
+                "low": float(np.percentile(draws[(name, field)], 2.5)),
+                "high": float(np.percentile(draws[(name, field)], 97.5)),
+            }
+            for field in resampled_fields
         }
-        for name, entry in point.items()
-    }
+        margin = arm_margin_for(name, arm_margins)
+        treated = arm_status(entry["treated_delta"], intervals["treated_delta_ci"], margin)
+        control = arm_status(entry["control_delta"], intervals["control_delta_ci"], margin)
+        resolved[name] = {
+            **entry, **intervals,
+            "arm_margin": margin,
+            "treated_status": treated,
+            "control_status": control,
+            "pareto": pareto_status(treated, control),
+        }
+    return resolved
+
+
+def arm_margin_for(name, arm_margins):
+    """Margin for this endpoint's metric. MAPE is a percentage, MAE is not."""
+    metric = name.rsplit("/", 1)[-1]
+    return float(arm_margins.get(metric, arm_margins["MAE"]))
 
 
 def _write_curves(path, curves):
@@ -682,8 +743,11 @@ def main():
                 "OutageFaultPenaltyReduction": "OutageFaultPenalty_baseline - OutageFaultPenalty_ours; higher is better",
                 "treated_delta": "ours_treated - baseline_treated; absolute error, negative is better",
                 "control_delta": "ours_control - baseline_control; absolute error, negative is better",
-                "pareto": "which arms moved; an endpoint that improves only via a "
-                          "degraded control arm is not an improvement",
+                "treated_status/control_status": "improve | degrade | equivalent | "
+                    "uncertain, decided from the arm's 95% CI against arm_margin, "
+                    "not from the point estimate",
+                "pareto": "joint arm verdict; a contrast is credited only when the "
+                          "treated arm improves and the control arm is not degraded",
             },
             "ours": args.ours_label,
             "baseline": args.baseline_label,
@@ -733,8 +797,9 @@ def main():
                     else f"95% CI=[{confidence['low']:.4f}, {confidence['high']:.4f}]")
             print(
                 f"{key}={interval['advantage']:+.4f} | {span} | "
-                f"treatedD={interval['treated_delta']:+.4f} "
-                f"controlD={interval['control_delta']:+.4f} | {interval['pareto']}"
+                f"treatedD={interval['treated_delta']:+.4f}({interval['treated_status']}) "
+                f"controlD={interval['control_delta']:+.4f}({interval['control_status']}) "
+                f"| {interval['pareto']}"
             )
         elif interval["low"] is None or interval["high"] is None:
             print(f"{key} AttenuationGain={interval['point']:.4f} | 95% CI=NA")
