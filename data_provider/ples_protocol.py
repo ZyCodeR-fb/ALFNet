@@ -739,30 +739,65 @@ def _curve_rows_v2(rows):
     return curves
 
 
+def paired_effect_cells(curves, input_len):
+    """The exact post-event cells each PLES endpoint is computed over.
+
+    The contrast and the treated/control arms must be read off the *same* cells.
+    A PLES contrast is gameable on its own -- ``JoinLift`` is
+    ``control - treated``, so degrading the control arm inflates it, and the
+    Fault penalties are ``treated - control``, so degrading the control shrinks
+    them. The arms are what distinguish a real improvement from that, and they
+    only do so if they are selected identically. Both callers take their
+    selection from here rather than repeating the filter.
+    """
+    post = [curve for curve in curves if int(curve["tau"]) >= 0]
+    cells = {
+        "JoinLift": [curve for curve in post if curve["track"] == "join"],
+        "FaultPenalty": [curve for curve in post if curve["track"] == "fault"],
+        "OutageFaultPenalty": [
+            curve
+            for curve in post
+            if curve["track"] == "fault" and int(curve["tau"]) == int(input_len) - 1
+        ],
+    }
+    if not cells["JoinLift"] or not cells["FaultPenalty"]:
+        raise ValueError("PLES requires post-event Join and Fault cells")
+    if not cells["OutageFaultPenalty"]:
+        raise ValueError(f"PLES is missing the settled outage cell tau={int(input_len) - 1}")
+    return cells
+
+
 def paired_effects(curves, input_len, metric="MAPE"):
     """Post-event effects on one metric.
 
     ``OutageFaultPenalty`` replaces the old ``PeakFaultPenalty``. Both answer
     "how bad does a settled outage get", but a maximum over tau is a
     non-smooth functional whose percentile bootstrap is unreliable, whereas the
-    settled cell at ``tau = input_len - 1`` is a plain mean.
+    settled cell at ``tau = input_len - 1`` is a plain mean. A maximum is also
+    not a paired quantity: the two models' maxima land at different tau, so the
+    difference of two maxima compares two different cells.
     """
-    post = [curve for curve in curves if int(curve["tau"]) >= 0]
-    join_lift = [curve["effect"][metric] for curve in post if curve["track"] == "join"]
-    fault_penalty = [curve["effect"][metric] for curve in post if curve["track"] == "fault"]
-    outage = [
-        curve["effect"][metric]
-        for curve in post
-        if curve["track"] == "fault" and int(curve["tau"]) == int(input_len) - 1
-    ]
-    if not join_lift or not fault_penalty:
-        raise ValueError("PLES requires post-event Join and Fault cells")
-    if not outage:
-        raise ValueError(f"PLES is missing the settled outage cell tau={int(input_len) - 1}")
+    cells = paired_effect_cells(curves, input_len)
     return {
-        "JoinLift": float(np.mean(join_lift)),
-        "FaultPenalty": float(np.mean(fault_penalty)),
-        "OutageFaultPenalty": float(np.mean(outage)),
+        name: float(np.mean([curve["effect"][metric] for curve in group]))
+        for name, group in cells.items()
+    }
+
+
+def paired_effect_arms(curves, input_len, metric="MAPE"):
+    """Treated and control absolute error behind each effect, same cells.
+
+    Reported beside the contrast so a change in the contrast can be attributed:
+    an endpoint that improves only because its control arm got worse is not an
+    improvement, and without the arms that case is invisible.
+    """
+    cells = paired_effect_cells(curves, input_len)
+    return {
+        name: {
+            arm: float(np.mean([curve[arm][metric] for curve in group]))
+            for arm in ("treated", "control")
+        }
+        for name, group in cells.items()
     }
 
 
@@ -771,6 +806,16 @@ def _main_cohort_rows(rows, main_cohort_ids):
         return rows
     wanted = {int(value) for value in main_cohort_ids}
     return [row for row in rows if int(row["cohort_id"]) in wanted]
+
+
+# Public names for the two steps a reader outside this module needs in order to
+# reproduce a frozen effect: restrict to the main plan's non-saturated cohorts,
+# then build the calendar-weighted curves. They exist so no caller has to write
+# its own copy -- scripts/plot_counterfactual_shockwave.py did, and its copy
+# drifted on all three of cohort eligibility, calendar weighting and the Outage
+# cell.
+main_cohort_rows = _main_cohort_rows
+build_curve_rows = _curve_rows_v2
 
 
 def summarize_paired_rows(rows, input_len, main_cohort_ids=None):

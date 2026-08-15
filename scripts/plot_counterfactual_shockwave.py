@@ -13,7 +13,11 @@ if str(ROOT) not in sys.path:
 
 from data_provider.ples_protocol import (  # noqa: E402
     PLES_PROTOCOL_VERSION,
+    build_curve_rows,
+    main_cohort_rows,
     overlap_blocks,
+    paired_effect_arms,
+    paired_effects,
     trajectory_span_from_manifest,
 )
 
@@ -86,6 +90,43 @@ def _read_result_bundle(value):
     # used the older filename.
     rows_filename = "paired_event_rows.csv" if version < 2 else "ples_paired_rows.csv"
     return summary, summary_path, _read_rows(summary_path, rows_filename), version
+
+
+def _protocol_plan(summary, summary_path):
+    """``input_len`` and the main plan's cohort ids, from the frozen manifest.
+
+    Both decide *which cells* an effect is computed over, so neither may be
+    guessed. Outage is the fault cell at ``tau = input_len - 1``, and the main
+    plan excludes the saturated cohorts. Raise rather than default: a wrong
+    input_len silently reports a different tau as Outage, and a missing cohort
+    list silently widens every endpoint to cohorts the main table never used.
+    """
+    manifest_path = Path(summary_path).parent / "protocol_manifest.json"
+    if not manifest_path.exists():
+        raise ValueError(
+            f"PLES comparison needs the frozen manifest beside the summary: {manifest_path}"
+        )
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    resolved = manifest.get("resolved") or {}
+    input_len = resolved.get("input_len")
+    main_cohort_ids = resolved.get("main_cohort_ids")
+    if not input_len:
+        raise ValueError(f"{manifest_path} declares no resolved.input_len")
+    if not main_cohort_ids:
+        raise ValueError(f"{manifest_path} declares no resolved.main_cohort_ids")
+    return int(input_len), [int(value) for value in main_cohort_ids]
+
+
+def _paired_protocol_plan(ours_summary, ours_path, baseline_summary, baseline_path):
+    ours = _protocol_plan(ours_summary, ours_path)
+    baseline = _protocol_plan(baseline_summary, baseline_path)
+    if ours != baseline:
+        raise ValueError(
+            "PLES comparison requires both models to declare the same input_len "
+            f"and main cohort plan: {ours} vs {baseline}"
+        )
+    return ours
 
 
 def _trajectory_span(summary, summary_path):
@@ -253,53 +294,30 @@ def bootstrap_gains(ours_rows, baseline_rows, samples=2000, seed=2026):
     }
 
 
-def _cell_mape_v2(row, prefix):
-    count = int(row["count"])
-    if count <= 0:
-        raise ValueError("PLES v3 comparison cell has no valid targets")
-    return 100.0 * float(row[f"{prefix}_ape_sum"]) / count
+# Effect direction. JoinLift is a benefit, so a larger value is better and our
+# advantage is ours - baseline; both Fault penalties are harms, so a smaller
+# value is better and the advantage is baseline - ours.
+HIGHER_IS_BETTER = {"JoinLift": True, "FaultPenalty": False, "OutageFaultPenalty": False}
+ADVANTAGE_NAME = {
+    "JoinLift": "JoinLiftGain",
+    "FaultPenalty": "FaultPenaltyReduction",
+    "OutageFaultPenalty": "OutageFaultPenaltyReduction",
+}
 
 
-def _calendar_balanced_mape_v2(rows, prefix):
-    by_regime = defaultdict(list)
-    for row in rows:
-        by_regime[str(row.get("regime", "all"))].append(_cell_mape_v2(row, prefix))
-    if not by_regime:
-        raise ValueError("PLES v3 comparison has no calendar cells")
-    return float(np.mean([np.mean(values) for values in by_regime.values()]))
+def _curves_for(rows, main_cohort_ids):
+    """Frozen curve construction: main-plan cohorts, then calendar weighting.
+
+    Both steps come from data_provider.ples_protocol. This script used to carry
+    its own copy of each and all three parts had drifted from the protocol it
+    claims to plot: it kept the saturated cohorts the main plan excludes, it
+    weighted calendar regimes equally instead of by their 5/7 and 2/7 shares,
+    and it read Outage off the maximum of the fault curve.
+    """
+    return build_curve_rows(main_cohort_rows(rows, main_cohort_ids))
 
 
-def _effect_curves_v2(rows):
-    grouped = defaultdict(list)
-    for row in rows:
-        grouped[(str(row["track"]), int(row["tau"]), str(row["phase"]))].append(row)
-    curves = []
-    for (track, tau, phase), cell_rows in sorted(
-        grouped.items(), key=lambda item: (item[0][0], item[0][1])
-    ):
-        treated = _calendar_balanced_mape_v2(cell_rows, "treated")
-        control = _calendar_balanced_mape_v2(cell_rows, "control")
-        if track == "join":
-            effect_name = "JoinLift"
-            effect = control - treated
-        elif track == "fault":
-            effect_name = "FaultPenalty"
-            effect = treated - control
-        else:
-            raise ValueError(f"Unsupported PLES v3 track: {track}")
-        curves.append(
-            {
-                "track": track,
-                "tau": tau,
-                "phase": phase,
-                "effect_name": effect_name,
-                "effect_mape": effect,
-            }
-        )
-    return curves
-
-
-def compare_rows_v2(ours_rows, baseline_rows):
+def compare_rows_v2(ours_rows, baseline_rows, main_cohort_ids=None):
     ours_index = _index_rows(ours_rows)
     baseline_index = _index_rows(baseline_rows)
     if set(ours_index) != set(baseline_index):
@@ -310,11 +328,11 @@ def compare_rows_v2(ours_rows, baseline_rows):
 
     ours_curves = {
         (row["track"], row["tau"], row["phase"]): row
-        for row in _effect_curves_v2(ours_rows)
+        for row in _curves_for(ours_rows, main_cohort_ids)
     }
     baseline_curves = {
         (row["track"], row["tau"], row["phase"]): row
-        for row in _effect_curves_v2(baseline_rows)
+        for row in _curves_for(baseline_rows, main_cohort_ids)
     }
     if set(ours_curves) != set(baseline_curves):
         raise ValueError("PLES v3 model curves do not share the same track/tau cells")
@@ -323,39 +341,85 @@ def compare_rows_v2(ours_rows, baseline_rows):
     for key in sorted(ours_curves, key=lambda value: (value[0], value[1])):
         ours = ours_curves[key]
         baseline = baseline_curves[key]
-        if ours["effect_name"] == "JoinLift":
-            advantage = ours["effect_mape"] - baseline["effect_mape"]
+        ours_effect = ours["effect"]["MAPE"]
+        baseline_effect = baseline["effect"]["MAPE"]
+        if HIGHER_IS_BETTER[ours["effect_name"]]:
+            advantage = ours_effect - baseline_effect
         else:
-            advantage = baseline["effect_mape"] - ours["effect_mape"]
+            advantage = baseline_effect - ours_effect
         curves.append(
             {
-                **ours,
-                "ours_effect_mape": ours["effect_mape"],
-                "baseline_effect_mape": baseline["effect_mape"],
+                "track": ours["track"],
+                "tau": ours["tau"],
+                "phase": ours["phase"],
+                "effect_name": ours["effect_name"],
+                "effect_mape": ours_effect,
+                "ours_effect_mape": ours_effect,
+                "baseline_effect_mape": baseline_effect,
                 "advantage_mape": advantage,
+                "ours_treated_mape": ours["treated"]["MAPE"],
+                "ours_control_mape": ours["control"]["MAPE"],
+                "baseline_treated_mape": baseline["treated"]["MAPE"],
+                "baseline_control_mape": baseline["control"]["MAPE"],
             }
         )
     return curves
 
 
-def _advantages_v2(curves):
-    post = [row for row in curves if int(row["tau"]) >= 0]
-    join = [row for row in post if row["effect_name"] == "JoinLift"]
-    fault = [row for row in post if row["effect_name"] == "FaultPenalty"]
-    if not join or not fault:
-        raise ValueError("PLES v3 comparison requires post-event Join and Fault cells")
-    return {
-        "JoinLiftGain": float(np.mean([row["advantage_mape"] for row in join])),
-        "FaultPenaltyReduction": float(np.mean([row["advantage_mape"] for row in fault])),
-        "OutageFaultPenaltyReduction": float(
-            max(row["baseline_effect_mape"] for row in fault)
-            - max(row["ours_effect_mape"] for row in fault)
-        ),
-    }
+def _pareto_status(treated_delta, control_delta):
+    """Where an endpoint's movement actually came from.
+
+    Both arms are absolute errors, so a negative delta (ours - baseline) is an
+    improvement on that arm. A contrast can improve while the treated arm is
+    unchanged and only the control arm degrades; that is not a better model and
+    this is what names it.
+    """
+    treated_better = treated_delta < 0
+    control_better = control_delta < 0
+    if treated_better and control_better:
+        return "both_arms_improve"
+    if treated_better and not control_better:
+        return "treated_improves_control_degrades"
+    if not treated_better and control_better:
+        return "control_improves_treated_degrades"
+    return "both_arms_degrade"
 
 
-def bootstrap_advantages_v2(ours_rows, baseline_rows, samples=2000, seed=2026,
-                            trajectory_span=None):
+def _advantages_v2(ours_rows, baseline_rows, input_len, main_cohort_ids=None):
+    """Paired contrast plus both absolute arms, on the frozen cell selection."""
+    ours_curves = _curves_for(ours_rows, main_cohort_ids)
+    baseline_curves = _curves_for(baseline_rows, main_cohort_ids)
+    out = {}
+    for metric in ("MAPE", "MAE"):
+        ours_effect = paired_effects(ours_curves, input_len, metric)
+        baseline_effect = paired_effects(baseline_curves, input_len, metric)
+        ours_arms = paired_effect_arms(ours_curves, input_len, metric)
+        baseline_arms = paired_effect_arms(baseline_curves, input_len, metric)
+        for name in ours_effect:
+            advantage = (
+                ours_effect[name] - baseline_effect[name]
+                if HIGHER_IS_BETTER[name]
+                else baseline_effect[name] - ours_effect[name]
+            )
+            treated_delta = ours_arms[name]["treated"] - baseline_arms[name]["treated"]
+            control_delta = ours_arms[name]["control"] - baseline_arms[name]["control"]
+            out[f"{ADVANTAGE_NAME[name]}/{metric}"] = {
+                "advantage": float(advantage),
+                "ours_effect": float(ours_effect[name]),
+                "baseline_effect": float(baseline_effect[name]),
+                "ours_treated": float(ours_arms[name]["treated"]),
+                "ours_control": float(ours_arms[name]["control"]),
+                "baseline_treated": float(baseline_arms[name]["treated"]),
+                "baseline_control": float(baseline_arms[name]["control"]),
+                "treated_delta": float(treated_delta),
+                "control_delta": float(control_delta),
+                "pareto": _pareto_status(treated_delta, control_delta),
+            }
+    return out
+
+
+def bootstrap_advantages_v2(ours_rows, baseline_rows, input_len, samples=2000, seed=2026,
+                            trajectory_span=None, main_cohort_ids=None):
     """Paired advantage intervals on the PLES v3 resampling unit.
 
     This used to draw each origin independently and nest the cohort draw inside
@@ -365,9 +429,25 @@ def bootstrap_advantages_v2(ours_rows, baseline_rows, samples=2000, seed=2026,
     origins rather than nested in them. Independent origins shrink the interval;
     nesting a crossed factor distorts it.
     """
-    point = _advantages_v2(compare_rows_v2(ours_rows, baseline_rows))
+    # Restrict to the main plan's cohorts once, here, and resample inside that
+    # set. Two reasons, and the first is not optional: the resampler relabels
+    # cohorts as `cohort_id * 1000 + copy` to keep repeated draws distinct, so a
+    # cohort-id filter applied downstream of it matches nothing and every draw
+    # comes back empty. The second is that the point estimate is a main-plan
+    # quantity, so an interval that resampled the saturated cohorts too would
+    # not be an interval for it.
+    ours_rows = main_cohort_rows(ours_rows, main_cohort_ids)
+    baseline_rows = main_cohort_rows(baseline_rows, main_cohort_ids)
+    point = _advantages_v2(ours_rows, baseline_rows, input_len)
+    # Interval on the contrast and on both arms: a Pareto verdict read off point
+    # estimates alone cannot tell "the control arm degraded" from "the control
+    # arm moved by less than the noise".
+    resampled_fields = ("advantage", "treated_delta", "control_delta")
     if samples <= 0:
-        return {name: {"point": value, "low": None, "high": None} for name, value in point.items()}
+        return {
+            name: {**entry, **{f"{field}_ci": None for field in resampled_fields}}
+            for name, entry in point.items()
+        }
 
     ours_units = defaultdict(lambda: defaultdict(list))
     baseline_units = defaultdict(lambda: defaultdict(list))
@@ -399,7 +479,11 @@ def bootstrap_advantages_v2(ours_rows, baseline_rows, samples=2000, seed=2026,
 
     rng = np.random.default_rng(seed)
     cohort_ids = sorted({int(row["cohort_id"]) for row in ours_rows})
-    draws = {name: np.empty(int(samples), dtype=np.float64) for name in point}
+    draws = {
+        (name, field): np.empty(int(samples), dtype=np.float64)
+        for name in point
+        for field in resampled_fields
+    }
     for sample_index in range(int(samples)):
         sampled_ours = []
         sampled_baseline = []
@@ -426,16 +510,22 @@ def bootstrap_advantages_v2(ours_rows, baseline_rows, samples=2000, seed=2026,
                                 {**row, **replacement_ids}
                                 for row in baseline_units[origin_id][cohort_id]
                             )
-        values = _advantages_v2(compare_rows_v2(sampled_ours, sampled_baseline))
-        for name, value in values.items():
-            draws[name][sample_index] = value
+        values = _advantages_v2(sampled_ours, sampled_baseline, input_len)
+        for name, entry in values.items():
+            for field in resampled_fields:
+                draws[(name, field)][sample_index] = entry[field]
     return {
         name: {
-            "point": point[name],
-            "low": float(np.percentile(values, 2.5)),
-            "high": float(np.percentile(values, 97.5)),
+            **entry,
+            **{
+                f"{field}_ci": {
+                    "low": float(np.percentile(draws[(name, field)], 2.5)),
+                    "high": float(np.percentile(draws[(name, field)], 97.5)),
+                }
+                for field in resampled_fields
+            },
         }
-        for name, values in draws.items()
+        for name, entry in point.items()
     }
 
 
@@ -561,24 +651,39 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     if ours_version >= 2:
-        curves = compare_rows_v2(ours_rows, baseline_rows)
+        input_len, main_cohort_ids = _paired_protocol_plan(
+            ours_summary, ours_path, baseline_summary, baseline_path
+        )
+        curves = compare_rows_v2(ours_rows, baseline_rows, main_cohort_ids)
         intervals = bootstrap_advantages_v2(
             ours_rows,
             baseline_rows,
+            input_len,
             samples=args.bootstrap_samples,
             seed=args.bootstrap_seed,
             trajectory_span=_paired_trajectory_span(
                 ours_summary, ours_path, baseline_summary, baseline_path
             ),
+            main_cohort_ids=main_cohort_ids,
         )
         summary = {
-            "schema_version": 3,
+            "schema_version": 4,
             "protocol": "PLES v3 paired model comparison",
             "protocol_hash": ours_summary["protocol_hash"],
+            "plan": {
+                "input_len": input_len,
+                "main_cohort_ids": main_cohort_ids,
+                "outage_definition": f"FaultPenalty at tau=input_len-1={input_len - 1}",
+                "source": "frozen protocol_manifest.json; not redefined here",
+            },
             "definitions": {
                 "JoinLiftGain": "JoinLift_ours - JoinLift_baseline; higher is better",
                 "FaultPenaltyReduction": "FaultPenalty_baseline - FaultPenalty_ours; higher is better",
                 "OutageFaultPenaltyReduction": "OutageFaultPenalty_baseline - OutageFaultPenalty_ours; higher is better",
+                "treated_delta": "ours_treated - baseline_treated; absolute error, negative is better",
+                "control_delta": "ours_control - baseline_control; absolute error, negative is better",
+                "pareto": "which arms moved; an endpoint that improves only via a "
+                          "degraded control arm is not an improvement",
             },
             "ours": args.ours_label,
             "baseline": args.baseline_label,
@@ -619,12 +724,23 @@ def main():
         json.dump(summary, handle, ensure_ascii=False, indent=2)
     for key in print_keys:
         interval = intervals[key]
-        label = key if ours_version >= 2 else f"{key} AttenuationGain"
-        if interval["low"] is None or interval["high"] is None:
-            print(f"{label}={interval['point']:.4f} | 95% CI=NA")
+        if ours_version >= 2:
+            # v3 reports the contrast and both absolute arms, because a contrast
+            # that improved only by degrading its control arm is not a better
+            # model and the contrast alone cannot show that.
+            confidence = interval["advantage_ci"]
+            span = ("95% CI=NA" if confidence is None
+                    else f"95% CI=[{confidence['low']:.4f}, {confidence['high']:.4f}]")
+            print(
+                f"{key}={interval['advantage']:+.4f} | {span} | "
+                f"treatedD={interval['treated_delta']:+.4f} "
+                f"controlD={interval['control_delta']:+.4f} | {interval['pareto']}"
+            )
+        elif interval["low"] is None or interval["high"] is None:
+            print(f"{key} AttenuationGain={interval['point']:.4f} | 95% CI=NA")
         else:
             print(
-                f"{label}={interval['point']:.4f} | "
+                f"{key} AttenuationGain={interval['point']:.4f} | "
                 f"95% CI=[{interval['low']:.4f}, {interval['high']:.4f}]"
             )
 

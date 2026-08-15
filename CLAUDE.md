@@ -84,8 +84,13 @@ canonical hash will not match.
 Post-hoc analysis and diagnostics:
 
 ```bash
+# formal comparison: three seeds, hierarchical, Holm inside frozen families
+python scripts/multiseed_paired_inference.py --dataset METRLA --output-dir <dir>
+# single-seed diagnostic only -- it asserts both runs share a seed and says so in its output
 python scripts/paired_model_bootstrap.py --model_a <predictions/lifecycle-v3-*/> \
   --model_b <...> --output_dir ./outputs/reports/a_vs_b
+# recomputes every published cell from ples_paired_rows.csv and diffs the frozen tables
+python scripts/verify_collector_recompute.py --output-dir ./outputs/reports/final
 python scripts/collect_lifecycle_results.py <result roots> --output-dir <dir>   # expects seeds 32/42/52
 python scripts/build_ablation_configs.py                                       # regenerates combination YAMLs
 python scripts/build_router_configs.py                                # regenerates gs/g1/gm + both twins
@@ -399,6 +404,21 @@ while two different objectives can never share a checkpoint directory.
   this card's memory ceiling. Profile at bs16, include an unchanged control variant in every profiling run,
   and treat server `s/epoch` as the authoritative speed signal. Parallel server runs cannot be compared on
   wall-clock at all.
+* **A protocol definition must have exactly one implementation.** `plot_counterfactual_shockwave.py` carried
+  its own copy of the PLES aggregation and all three parts of it had drifted from the frozen protocol: it
+  read `OutageFaultPenalty` off the *maximum* of the fault curve instead of the settled cell at
+  `tau = input_len - 1`, it kept the saturated cohorts the main plan excludes, and it weighted calendar
+  regimes equally instead of by their 5/7 and 2/7 shares. The formal PLES pipeline
+  (`ples_protocol.paired_effects`) was correct throughout, so `final_18_tables.json` was never affected —
+  but the two disagreed, and a maximum is not a paired quantity: measured on the finished runs the two
+  models' maxima land at different `tau` in 12 of 18 cells and the contrast flips sign in 2. The plot
+  script now calls `ples_protocol`; do not reintroduce a second copy.
+* **Report both PLES arms, never the contrast alone.** `JoinLift` is `control - treated` and the Fault
+  penalties are `treated - control`, so a model that merely predicts the *control* arm worse scores better
+  on every one of them. This is not hypothetical: on METR-LA s32 the measured `JoinLiftGain/MAE` of +0.358
+  comes with a control arm degraded by +0.234. `paired_effect_arms` and the `pareto` field exist for this,
+  and both are computed off `paired_effect_cells` so the arms and the contrast can never describe
+  different cells.
 * Auxiliary loss terms must be scaled against the measured base loss, not guessed. Base MSE is ~0.157 while
   the tail term is ~1.18 — a weight of 0.1 is *not* small, it is 75% of the objective.
 
