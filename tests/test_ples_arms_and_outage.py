@@ -304,3 +304,60 @@ def test_zero_samples_yields_uncertain_rather_than_a_point_verdict():
     for entry in result.values():
         assert entry["pareto"] == "uncertain"
         assert entry["treated_status"] == "uncertain"
+
+
+# --- identity: the two bundles must be the same experiment -------------------
+
+
+def _bundle(model, seed, dataset="METRLA", fingerprint="fp-1", protocol="p-1"):
+    return {
+        "model": model, "seed": seed,
+        "protocol_hash": protocol, "training_protocol_hash": "t-1",
+        "lce_protocol_hash": "l-1", "ples_protocol_hash": "e-1",
+        "dataset": {"name": dataset, "fingerprint": fingerprint,
+                    "adjacency_hash": "a-1", "timestamps_hash": "s-1",
+                    "test_values_hash": "v-1"},
+    }
+
+
+def test_a_cross_seed_comparison_is_refused():
+    """The live defect: ALFNet s32 vs MoGERNN s52 was accepted.
+
+    A shared protocol hash says both were evaluated under one design; it does
+    not say they are the same experiment. Comparing across seeds attributes a
+    training-randomness difference to the model.
+    """
+    with pytest.raises(ValueError, match="seed"):
+        plot.assert_comparable_bundles(_bundle("ALFNet", 32), _bundle("MoGERNN", 52))
+
+
+def test_a_same_model_comparison_is_refused():
+    with pytest.raises(ValueError, match="needs two models"):
+        plot.assert_comparable_bundles(_bundle("ALFNet", 32), _bundle("ALFNet", 32))
+
+
+def test_a_cross_dataset_comparison_is_refused():
+    with pytest.raises(ValueError, match="dataset.name"):
+        plot.assert_comparable_bundles(
+            _bundle("ALFNet", 32, dataset="METRLA"),
+            _bundle("MoGERNN", 32, dataset="PEMSBAY"))
+
+
+def test_a_different_dataset_fingerprint_is_refused():
+    """Same name, different bytes underneath."""
+    with pytest.raises(ValueError, match="fingerprint"):
+        plot.assert_comparable_bundles(
+            _bundle("ALFNet", 32, fingerprint="fp-1"),
+            _bundle("MoGERNN", 32, fingerprint="fp-2"))
+
+
+def test_mismatched_protocol_hashes_are_refused():
+    left = _bundle("ALFNet", 32)
+    right = _bundle("MoGERNN", 32)
+    right["lce_protocol_hash"] = "l-2"
+    with pytest.raises(ValueError, match="lce_protocol_hash"):
+        plot.assert_comparable_bundles(left, right)
+
+
+def test_the_matched_pair_is_accepted():
+    plot.assert_comparable_bundles(_bundle("ALFNet", 32), _bundle("MoGERNN", 32))

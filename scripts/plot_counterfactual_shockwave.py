@@ -93,6 +93,49 @@ def _read_result_bundle(value):
     return summary, summary_path, _read_rows(summary_path, rows_filename), version
 
 
+def assert_comparable_bundles(ours, baseline):
+    """Refuse a comparison that is not the same experiment on both sides.
+
+    A shared ``protocol_hash`` only says both runs were evaluated under one
+    evaluation design. It says nothing about which dataset, seed or model each
+    side actually is, so it accepted ALFNet METR-LA seed 32 against MoGERNN
+    METR-LA seed **52** -- a comparison that silently mixes a model difference
+    with a training-seed difference and attributes the whole thing to the model.
+
+    The two sides must therefore agree on everything the protocol determines and
+    differ only in the model.
+    """
+    problems = []
+    for field in ("protocol_hash", "training_protocol_hash", "lce_protocol_hash",
+                  "ples_protocol_hash"):
+        left, right = ours.get(field), baseline.get(field)
+        if left != right:
+            problems.append(f"{field}: {left} vs {right}")
+
+    ours_dataset = (ours.get("dataset") or {})
+    baseline_dataset = (baseline.get("dataset") or {})
+    for field in ("name", "fingerprint", "adjacency_hash", "timestamps_hash",
+                  "test_values_hash"):
+        left, right = ours_dataset.get(field), baseline_dataset.get(field)
+        if left != right:
+            problems.append(f"dataset.{field}: {left} vs {right}")
+
+    if ours.get("seed") != baseline.get("seed"):
+        problems.append(
+            f"seed: {ours.get('seed')} vs {baseline.get('seed')} -- a cross-seed "
+            "comparison confounds the model difference with training randomness"
+        )
+    if ours.get("model") == baseline.get("model"):
+        problems.append(
+            f"both sides are {ours.get('model')!r}; a paired comparison needs two models"
+        )
+    if problems:
+        raise ValueError(
+            "PLES comparison refused; the two bundles are not the same experiment:\n  - "
+            + "\n  - ".join(problems)
+        )
+
+
 def _protocol_plan(summary, summary_path):
     """``input_len`` and the main plan's cohort ids, from the frozen manifest.
 
@@ -708,6 +751,10 @@ def main():
             f"PLES schema v{ours_version} predictions predate the maintained protocol "
             f"(v{PLES_PROTOCOL_VERSION}); re-run inference instead of replotting them"
         )
+    # After the schema check on purpose: identity fields are only meaningful once
+    # the schema is one this script understands, and a retired bundle should be
+    # refused for being retired rather than for missing a field it never carried.
+    assert_comparable_bundles(ours_summary, baseline_summary)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
