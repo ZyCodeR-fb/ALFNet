@@ -11,6 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.analysis_identity import (  # noqa: E402
+    assert_shared_design,
+    load_manifest,
+    verify_role,
+)
 from data_provider.ples_protocol import (  # noqa: E402
     PLES_PROTOCOL_VERSION,
     build_curve_rows,
@@ -754,7 +759,14 @@ def main():
     # After the schema check on purpose: identity fields are only meaningful once
     # the schema is one this script understands, and a retired bundle should be
     # refused for being retired rather than for missing a field it never carried.
-    assert_comparable_bundles(ours_summary, baseline_summary)
+    #
+    # Anchored to configs/paper/final_runs.json rather than to the other side:
+    # comparing the two bundles to each other accepted a swap, an arbitrary
+    # model string and an ablation standing in for the mainline.
+    manifest = load_manifest()
+    verify_role(ours_summary, "ours", manifest)
+    verify_role(baseline_summary, "baseline", manifest)
+    assert_shared_design(ours_summary, baseline_summary)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
