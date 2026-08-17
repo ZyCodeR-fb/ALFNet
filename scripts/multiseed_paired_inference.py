@@ -86,9 +86,9 @@ MODEL_A, MODEL_B = "ALFNet", "MoGERNN"
 # tests inject draws directly rather than weakening this production floor.
 MIN_BOOTSTRAP_SAMPLES = 1000
 
-# Frozen multiple-testing families. Anything outside these is exploratory and
-# carries no adjusted p-value: correcting across a set chosen after seeing the
-# results is not a correction.
+# Endpoint groups, fixed in this file for reproducibility. NOT pre-registered
+# and NOT multiple-testing families: v3 had no analysis plan before its test
+# split was read, and no p-value or correction is emitted anywhere.
 PRIMARY_LCE = tuple(("main", row, "MAE") for row in ("Unseen", "Steady", "Join", "Fault"))
 PRIMARY_PLES = tuple(
     ("ples", effect, metric)

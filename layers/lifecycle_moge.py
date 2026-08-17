@@ -1,7 +1,7 @@
 """Lifecycle-routed heterogeneous graph aggregation for ALFGraph.
 
 This replaces the single fixed diffusion operator inside the DCRNN cell with a
-sparsely routed mixture of heterogeneous propagation supports. The router reads
+lifecycle-conditioned mixture over propagation supports. The router reads
 the node's lifecycle state (availability one-hot, state_age, observation mask)
 rather than its raw series: after the shared GRIN imputation a Cold node and a
 Steady node carry similar-looking values, so the raw series can no longer tell
@@ -40,6 +40,12 @@ from torch import nn
 # Availability one-hot (4) + state_age (1) + observation mask (1).
 LIFECYCLE_STATE_CHANNELS = 6
 SQRT_HALF = 0.7071067811865476
+# Five labels, but NOT five distinct operators. `weighted_mean` and
+# `forward_diffusion` are the same intended formula -- A row-normalised by its
+# degree -- and differ only by float roundoff or the 1e-6 clamp on a vanishing
+# row. A symmetric adjacency additionally collapses forward and backward. So a
+# per-expert usage split reported across duplicated labels has no mechanistic
+# meaning. De-duplicating is a v4 model change; see docs/stage2_0_design.md.
 SUPPORT_NAMES = ("identity", "mean", "weighted_mean", "forward_diffusion", "backward_diffusion")
 
 

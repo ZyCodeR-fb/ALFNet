@@ -2,6 +2,44 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+---
+
+## ACTIVE STATUS — read this before trusting anything below
+
+Much of this file documents **v3**, which is now a *historical, topology-known, post-hoc retrospective*.
+It is kept because the runs and their numbers are real and must stay traceable, **not** because it
+describes the current experiment. Where a later section contradicts this banner, this banner wins.
+
+| claim found below | actual status |
+|---|---|
+| "the final experiment" / `final_18` | **v3 retrospective/exploratory.** Not the paper's confirmatory experiment. |
+| PEMS08 is the "confirmation set" | **False now.** Its test split has been read. It is development/exploratory. |
+| METR-LA, PEMS-BAY, PEMS08 identities | **All three are development/exploratory.** All three test splits have been read. |
+| "the frozen model `gs`" | v3's frozen model. **Not** a v4 candidate — it carries the duplicated operator. |
+| 50/10/40 split, LCE v3, PLES v3, LCBT v3.2 | v3 protocols. v4 moves to 60/20/20 with strict node-unseen. |
+| "no need for LCE/PLES v4" | **Superseded.** v4 changes graph scope, split and target policy. |
+| three-seed paired results | **post-hoc descriptive diagnostics only** — no p-value, no significance, no confirmatory claim. |
+
+**The v4 confirmation datasets are PEMS03 and PEMS04**, and they have taken no part in any selection.
+Both must be reported together; picking the better one after the fact is outcome-dependent selection.
+
+**PEMS03/PEMS04 data is NOT fixed.** `data/PEMS03/raw_data.pkl` (SHA256 `2f5c6182…`) still carries
+2016-07-01…2016-09-29 instead of 2018-09-01…2018-11-30, and `data/PEMS04/raw_data.pkl`
+(SHA256 `b8741a79…`) still carries 2016-07-01…2016-08-28 instead of 2018-01-01…2018-02-28. Both still
+use converter-derived spectral `pos_stamp` in place of coordinates. The *original* `.npz`/`.csv` signal
+and edge files show no numeric corruption — the fault is in the derived `raw_data.pkl` metadata. Repair
+is **Stage 2-C**, after the Stage 2-0 specification is agreed. See `docs/stage2_0_design.md`.
+
+**Strict node-unseen means more than "no node-indexed parameter."** It also requires the training
+computation graph, the training schedule and every structural asset to be isolated from held-out nodes.
+v3 does not satisfy this, which is why v3 results are *topology-known* and cannot support a
+strict-node-unseen claim.
+
+Nothing in v3 is deleted or rewritten. Old numbers, old protocol hashes and old artefacts stay exactly
+as they are; only their status is corrected.
+
+---
+
 ## What this repo actually is now
 
 It started as the official MoGERNN implementation (see `README.md`, TR-C 2025). It has since become the
