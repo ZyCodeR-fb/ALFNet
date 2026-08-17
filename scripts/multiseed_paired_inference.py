@@ -803,6 +803,11 @@ def _assert_ples_inputs(point, draws, seed_deltas, per_seed_model, raw_draws, se
 
     if set(per_seed_model) != seed_set:
         _fail(f"per_seed_model seeds {sorted(set(per_seed_model))} != expected {sorted(seed_set)}")
+    # seed_deltas was only *read* at the expected seeds, so an extra seed there
+    # went unnoticed while a missing one surfaced as a bare KeyError. Require the
+    # set to match exactly, like per_seed_model.
+    if set(seed_deltas) != seed_set:
+        _fail(f"seed_deltas seeds {sorted(set(seed_deltas))} != expected {sorted(seed_set)}")
     for seed in seeds:
         if set(per_seed_model[seed]) != models:
             _fail(f"seed {seed}: models {sorted(per_seed_model[seed])} != {sorted(models)}")

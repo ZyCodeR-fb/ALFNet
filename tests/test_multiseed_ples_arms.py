@@ -490,3 +490,21 @@ def test_main_still_refuses_too_few_samples(tmp_path, monkeypatch):
     """The smoke path must not have weakened the production floor."""
     with pytest.raises(SystemExit):
         _main_smoke(tmp_path, monkeypatch, samples=999)
+
+
+def test_an_extra_seed_delta_seed_is_refused():
+    """seed_deltas was only read at the expected seeds, so an extra one passed."""
+    _, point, draws, raw, seed_deltas, per_seed_model = _run(_tensors(2.0, 1.0, 3.0, 1.0))
+    seed_deltas[99] = seed_deltas[SEEDS[0]]
+    with pytest.raises(NonFiniteValue, match="seed_deltas seeds"):
+        build_ples_records(point, draws, seed_deltas, per_seed_model, raw,
+                           SEEDS, CONTRAST, ARM)
+
+
+def test_a_missing_seed_delta_seed_is_refused():
+    """It surfaced as a bare KeyError instead of a contextual failure."""
+    _, point, draws, raw, seed_deltas, per_seed_model = _run(_tensors(2.0, 1.0, 3.0, 1.0))
+    del seed_deltas[SEEDS[-1]]
+    with pytest.raises(NonFiniteValue, match="seed_deltas seeds"):
+        build_ples_records(point, draws, seed_deltas, per_seed_model, raw,
+                           SEEDS, CONTRAST, ARM)
