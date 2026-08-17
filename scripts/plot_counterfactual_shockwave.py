@@ -550,13 +550,140 @@ def _advantages_v2(ours_rows, baseline_rows, input_len, main_cohort_ids=None):
                 "baseline_control": float(baseline_arms[name]["control"]),
                 "treated_delta": float(treated_delta),
                 "control_delta": float(control_delta),
-                "n_evaluable_cells": len(cells_for(ours_curves, input_len, name)),
             }
     return out
 
 
 def cells_for(curves, input_len, name):
     return paired_effect_cells(curves, input_len)[name]
+
+
+COUNT_SEMANTICS = (
+    "Descriptive audit of the observed design, not statistical sample sizes. "
+    "The bootstrap's independent unit is the overlap-connected origin block, "
+    "crossed with a global cohort factor; rows, target elements and tau curves "
+    "are not independent samples of each other. "
+    "paired_valid_target_element_count_sum adds target elements across the "
+    "selected rows and therefore counts one physical episode once per tau and "
+    "track, so it is neither an independent sample count nor a degrees-of-"
+    "freedom figure. No effective sample size is computed or implied. "
+    "The single-seed interval reflects event resampling at one fixed training "
+    "seed and excludes training randomness."
+)
+
+
+def _endpoint_row_selector(effect, input_len):
+    """The rows one endpoint is computed over -- the same selection as its cells."""
+    if effect == "JoinLift":
+        return lambda row: row["track"] == "join" and row["tau"] >= 0
+    if effect == "FaultPenalty":
+        return lambda row: row["track"] == "fault" and row["tau"] >= 0
+    if effect == "OutageFaultPenalty":
+        return lambda row: row["track"] == "fault" and row["tau"] == input_len - 1
+    raise NonFiniteValue(f"no row selector declared for effect {effect!r}")
+
+
+def _design_counts(rows):
+    origins = {row["origin_id"] for row in rows}
+    cohorts = {row["cohort_id"] for row in rows}
+    episodes = {(row["origin_id"], row["cohort_id"]) for row in rows}
+    taus = {row["tau"] for row in rows}
+    return {
+        "unique_origin_count": len(origins),
+        "unique_cohort_count": len(cohorts),
+        "unique_origin_cohort_episode_count": len(episodes),
+        "unique_tau_count": len(taus),
+        "paired_valid_target_element_count_sum": sum(int(row["count"]) for row in rows),
+    }
+
+
+def endpoint_sample_counts(main_rows, curves, input_len):
+    """Per-endpoint counts, on exactly the rows and cells that endpoint uses."""
+    cells = paired_effect_cells(curves, input_len)
+    out = {}
+    for effect in EFFECT_DEFINITION:
+        selector = _endpoint_row_selector(effect, input_len)
+        rows = [row for row in main_rows if selector(row)]
+        if not rows:
+            raise NonFiniteValue(f"{effect}: no source rows in the main plan")
+        group = cells[effect]
+        counts = {
+            "source_row_count": len(rows),
+            **_design_counts(rows),
+            "tau_curve_count": len(group),
+        }
+        # Cross-check the direct row count against the aggregated curves. Two
+        # independent paths to the same figure; a disagreement means the counts
+        # describe a different selection than the statistic does.
+        cell_total = sum(int(curve["cell_count"]) for curve in group)
+        target_total = sum(int(curve["target_count"]) for curve in group)
+        if cell_total != counts["source_row_count"]:
+            raise NonFiniteValue(
+                f"{effect}: curve cell_count sum {cell_total} != source rows "
+                f"{counts['source_row_count']}")
+        if target_total != counts["paired_valid_target_element_count_sum"]:
+            raise NonFiniteValue(
+                f"{effect}: curve target_count sum {target_total} != summed row "
+                f"count {counts['paired_valid_target_element_count_sum']}")
+        if effect == "OutageFaultPenalty" and counts["unique_tau_count"] != 1:
+            raise NonFiniteValue(
+                f"Outage must use only tau={input_len - 1}, found "
+                f"{counts['unique_tau_count']} tau values")
+        out[effect] = counts
+    return out
+
+
+def top_level_sample_counts(raw_rows, main_rows, trajectory_span):
+    """Shared design counts, after main-cohort filtering and before resampling."""
+    origin_times = {row["origin_id"]: int(row["event_time_index"]) for row in main_rows}
+    blocks = overlap_blocks(origin_times, trajectory_span)
+    per_day_type = defaultdict(set)
+    for row in main_rows:
+        day_type = str(row["regime"]).split("/")[0]
+        per_day_type[day_type].add(blocks[row["origin_id"]])
+
+    design = _design_counts(main_rows)
+    counts = {
+        "input": {
+            "raw_row_count_per_model": len(raw_rows),
+            "main_plan_row_count_per_model": len(main_rows),
+            "excluded_non_main_row_count_per_model": len(raw_rows) - len(main_rows),
+        },
+        "paired_design": {
+            "paired_row_count": len(main_rows),
+            "unique_origin_count": design["unique_origin_count"],
+            "unique_cohort_count": design["unique_cohort_count"],
+            "unique_origin_cohort_episode_count":
+                design["unique_origin_cohort_episode_count"],
+            "track_count": len({row["track"] for row in main_rows}),
+            "tau_value_count": design["unique_tau_count"],
+            "min_tau": min(row["tau"] for row in main_rows),
+            "max_tau": max(row["tau"] for row in main_rows),
+        },
+        "bootstrap_units": {
+            "unique_origin_count": design["unique_origin_count"],
+            "overlap_block_count": len(set(blocks.values())),
+            "cohort_count": design["unique_cohort_count"],
+            "day_type_strata": sorted(per_day_type),
+            "blocks_per_day_type": {k: len(v) for k, v in sorted(per_day_type.items())},
+        },
+        "targets": {
+            "paired_valid_target_element_count_sum":
+                design["paired_valid_target_element_count_sum"],
+        },
+    }
+    for group, entries in counts.items():
+        for field, value in entries.items():
+            if isinstance(value, int) and value < 0:
+                raise NonFiniteValue(f"sample_counts.{group}.{field} is negative")
+    if counts["input"]["raw_row_count_per_model"] <= 0:
+        raise NonFiniteValue("sample_counts: no raw rows")
+    if counts["input"]["main_plan_row_count_per_model"] <= 0:
+        raise NonFiniteValue("sample_counts: no main-plan rows")
+    for field in ("unique_origin_count", "overlap_block_count", "cohort_count"):
+        if counts["bootstrap_units"][field] <= 0:
+            raise NonFiniteValue(f"sample_counts.bootstrap_units.{field} must be positive")
+    return counts
 
 
 # The six per-model quantities behind every endpoint. They are resampled on the
@@ -610,8 +737,6 @@ def assert_point_inventory(point):
     expected_fields = set(EXPECTED_POINT_FIELDS)
     for name in EXPECTED_ENDPOINTS:
         fields = set(point[name])
-        # n_evaluable_cells is carried for reporting and is not a statistic.
-        fields.discard("n_evaluable_cells")
         if fields != expected_fields:
             _fail_inventory(
                 f"{name}: point fields missing {sorted(expected_fields - fields)}, "
@@ -795,8 +920,10 @@ def bootstrap_advantages_v2(ours_rows, baseline_rows, input_len, samples=2000, s
         for name, entry in values.items():
             for field in resampled_fields:
                 draws[(name, field)][sample_index] = entry[field]
+    endpoint_counts = endpoint_sample_counts(
+        ours_rows, _curves_for(ours_rows, None), input_len)
     return _build_ples_records(point, draws, resampled_fields, input_len,
-                               arm_margins, contrast_margins)
+                               arm_margins, contrast_margins, endpoint_counts)
 
 
 def _series(point_value, draw_values, label):
@@ -846,7 +973,7 @@ def _algebra(effect, contrast_point, contrast_draws, treated_point, treated_draw
 
 
 def _build_ples_records(point, draws, resampled_fields, input_len,
-                        arm_margins, contrast_margins):
+                        arm_margins, contrast_margins, endpoint_counts=None):
     """The single canonical record per endpoint: both models, both arms, deltas.
 
     There is deliberately no second, arms-free structure. A bare contrast is
@@ -952,6 +1079,19 @@ def _build_ples_records(point, draws, resampled_fields, input_len,
             "arms_pareto_status": arms_pareto_status(treated, control),
             "combined_descriptive_status": combined_status(contrast, treated, control),
         })
+        if endpoint_counts is not None:
+            records[-1]["sample_counts"] = dict(endpoint_counts[effect])
+
+    if endpoint_counts is not None:
+        # MAE and MAPE share one row/cell selection, so their counts must agree.
+        by_effect = defaultdict(list)
+        for record in records:
+            by_effect[record["effect"]].append(record["sample_counts"])
+        for effect, entries in by_effect.items():
+            if any(entry != entries[0] for entry in entries):
+                raise NonFiniteValue(
+                    f"{effect}: MAE and MAPE report different sample counts, so "
+                    "they are not computed over the same selection")
     return records
 
 
@@ -1140,9 +1280,15 @@ def main():
             contrast_margins=contrast_margins,
         )
         summary = {
-            # 6: the flat `advantages` mapping was replaced by canonical
-            # `ples_records`. Incompatible, so the version moves with it.
-            "schema_version": 6,
+            # 7: formal sample_counts added and the row loader contract
+            # tightened. 6 replaced the flat `advantages` mapping with canonical
+            # `ples_records`. Both incompatible, so the version moves with them.
+            "schema_version": 7,
+            "sample_counts": top_level_sample_counts(
+                ours_rows, main_cohort_rows(ours_rows, main_cohort_ids),
+                _paired_trajectory_span(ours_summary, ours_path,
+                                        baseline_summary, baseline_path)),
+            "count_semantics": COUNT_SEMANTICS,
             "protocol": "PLES v3 paired model comparison",
             "post_hoc_diagnostic_only": True,
             "inferential_status": "descriptive_not_formal",

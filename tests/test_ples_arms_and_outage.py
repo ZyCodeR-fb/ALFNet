@@ -173,7 +173,8 @@ def test_both_arms_improving_is_distinguished_from_a_contrast_artifact():
                 "OutageFaultPenaltyReduction/MAPE"):
         assert advantages[key]["treated_delta"] < 0, key
         assert advantages[key]["control_delta"] < 0, key
-        assert advantages[key]["n_evaluable_cells"] >= 1, key
+        assert "n_evaluable_cells" not in advantages[key], (
+            "the misleading tau-curve count must not be a point statistic")
 
 
 # --- arm classification is decided by the interval, not the point ------------
@@ -531,7 +532,7 @@ def _single_seed_main(tmp_path, monkeypatch, samples=1000):
 def test_single_seed_main_writes_the_current_schema(tmp_path, monkeypatch):
     payload = _single_seed_main(tmp_path, monkeypatch)
 
-    assert payload["schema_version"] == 6
+    assert payload["schema_version"] == 7
     assert payload["post_hoc_diagnostic_only"] is True
     assert payload["inferential_status"] == "descriptive_not_formal"
     assert payload["conditional_on_one_trained_seed"] is True
@@ -1075,3 +1076,158 @@ def test_a_duplicate_pair_key_is_refused():
 def test_a_matched_pair_of_row_files_is_accepted():
     plot.assert_rows_match_bundles(_flat_rows(), _summary("ALFNet"),
                                    _flat_rows(model="MoGERNN"), _summary("MoGERNN"))
+
+
+# --- real sample counts (B2.1b-2) -------------------------------------------
+#
+# `n_evaluable_cells` was the number of tau curves left after calendar
+# aggregation -- not origins, cohorts, raw cells or valid targets. Reporting it
+# as an "evaluable" count invited it to be read as a sample size. It is gone,
+# replaced by explicitly named counts that state what they are.
+
+
+def _counts_fixture():
+    """Two origins x two cohorts x both tracks x every tau, one weekday regime.
+
+    Exact expected figures, so the assertions below are arithmetic rather than
+    whatever the code happens to produce:
+      rows        = 2 origins * 2 cohorts * 2 tracks * 4 taus = 32
+      episodes    = 2 origins * 2 cohorts                     = 4
+      targets     = 32 rows * count 10                        = 320
+    """
+    rows = []
+    for origin in (1, 2):
+        for cohort in (1, 2):
+            for track in ("join", "fault"):
+                for tau in range(INPUT_LEN):
+                    rows.append(_row(track, tau, cohort, 2.0, 1.0, origin=origin))
+    return rows
+
+
+def test_top_level_counts_are_exact():
+    rows = _counts_fixture()
+    main = [r for r in rows if r["cohort_id"] == 1]
+    counts = plot.top_level_sample_counts(rows, main, trajectory_span=8)
+
+    assert counts["input"]["raw_row_count_per_model"] == 32
+    assert counts["input"]["main_plan_row_count_per_model"] == 16
+    assert counts["input"]["excluded_non_main_row_count_per_model"] == 16
+
+    design = counts["paired_design"]
+    assert design["paired_row_count"] == 16
+    assert design["unique_origin_count"] == 2
+    assert design["unique_cohort_count"] == 1
+    assert design["unique_origin_cohort_episode_count"] == 2
+    assert design["track_count"] == 2
+    assert design["tau_value_count"] == INPUT_LEN
+    assert design["min_tau"] == 0
+    assert design["max_tau"] == INPUT_LEN - 1
+
+    units = counts["bootstrap_units"]
+    assert units["unique_origin_count"] == 2
+    assert units["overlap_block_count"] >= 1
+    assert units["cohort_count"] == 1
+    assert units["day_type_strata"] == ["Weekday"]
+    assert sum(units["blocks_per_day_type"].values()) == units["overlap_block_count"]
+
+    assert counts["targets"]["paired_valid_target_element_count_sum"] == 16 * 10
+
+
+def test_endpoint_counts_match_their_own_selection():
+    rows = [r for r in _counts_fixture() if r["cohort_id"] == 1]
+    curves = plot._curves_for(rows, None)
+    counts = plot.endpoint_sample_counts(rows, curves, INPUT_LEN)
+
+    # Join and Fault take every post-event tau; Outage takes one.
+    assert counts["JoinLift"]["source_row_count"] == 2 * INPUT_LEN
+    assert counts["FaultPenalty"]["source_row_count"] == 2 * INPUT_LEN
+    assert counts["OutageFaultPenalty"]["source_row_count"] == 2
+    assert counts["OutageFaultPenalty"]["unique_tau_count"] == 1
+    assert counts["JoinLift"]["tau_curve_count"] == INPUT_LEN
+    assert counts["OutageFaultPenalty"]["tau_curve_count"] == 1
+    for effect in ("JoinLift", "FaultPenalty", "OutageFaultPenalty"):
+        assert counts[effect]["unique_origin_count"] == 2
+        assert counts[effect]["paired_valid_target_element_count_sum"] == \
+            counts[effect]["source_row_count"] * 10
+
+
+def test_endpoint_counts_cross_check_against_the_curves():
+    """Two independent paths to the same figure must agree."""
+    rows = [r for r in _counts_fixture() if r["cohort_id"] == 1]
+    curves = plot._curves_for(rows, None)
+    cells = paired_effect_cells(curves, INPUT_LEN)
+    counts = plot.endpoint_sample_counts(rows, curves, INPUT_LEN)
+    for effect, group in cells.items():
+        assert sum(int(c["cell_count"]) for c in group) == \
+            counts[effect]["source_row_count"]
+        assert sum(int(c["target_count"]) for c in group) == \
+            counts[effect]["paired_valid_target_element_count_sum"]
+
+
+def test_a_curve_cell_count_mismatch_fails_closed(monkeypatch):
+    rows = [r for r in _counts_fixture() if r["cohort_id"] == 1]
+    curves = plot._curves_for(rows, None)
+    for curve in curves:
+        curve["cell_count"] = int(curve["cell_count"]) + 1
+    with pytest.raises(plot.NonFiniteValue, match="cell_count sum"):
+        plot.endpoint_sample_counts(rows, curves, INPUT_LEN)
+
+
+def test_an_endpoint_with_no_source_rows_fails_closed():
+    """Join-only rows leave Fault and Outage empty.
+
+    The frozen cell selector raises first, which is the correct place -- the
+    point is that it fails closed rather than reporting counts for an endpoint
+    that has no data, so either guard is acceptable.
+    """
+    rows = [r for r in _counts_fixture()
+            if r["cohort_id"] == 1 and r["track"] == "join"]
+    curves = plot._curves_for(rows, None)
+    with pytest.raises((plot.NonFiniteValue, ValueError)):
+        plot.endpoint_sample_counts(rows, curves, INPUT_LEN)
+
+
+def test_every_record_carries_sample_counts():
+    records = _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+    for record in records:
+        counts = record["sample_counts"]
+        for field in ("source_row_count", "unique_origin_count",
+                      "unique_cohort_count", "unique_origin_cohort_episode_count",
+                      "tau_curve_count", "unique_tau_count",
+                      "paired_valid_target_element_count_sum"):
+            assert isinstance(counts[field], int) and counts[field] >= 0, field
+        assert "n_evaluable_cells" not in counts
+
+
+def test_mae_and_mape_report_identical_counts():
+    records = _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+    for effect in ("JoinLift", "FaultPenalty", "OutageFaultPenalty"):
+        mae = _find(records, effect, "MAE")["sample_counts"]
+        mape = _find(records, effect, "MAPE")["sample_counts"]
+        assert mae == mape
+
+
+def test_main_writes_counts_and_semantics(tmp_path, monkeypatch):
+    payload = _single_seed_main(tmp_path, monkeypatch)
+    assert payload["schema_version"] == 7
+    assert "sample_counts" in payload
+    assert "count_semantics" in payload
+    assert "not statistical sample sizes" in payload["count_semantics"]
+    assert "overlap-connected origin block" in payload["count_semantics"]
+    assert "excludes training randomness" in payload["count_semantics"]
+
+    def _all_ints(node):
+        if isinstance(node, dict):
+            for value in node.values():
+                _all_ints(value)
+        elif isinstance(node, list):
+            for value in node:
+                _all_ints(value)
+        elif isinstance(node, bool):
+            raise AssertionError("counts must not be booleans")
+        elif isinstance(node, (int, float)) and not isinstance(node, str):
+            assert node >= 0
+
+    _all_ints(payload["sample_counts"])
+    for record in payload["ples_records"]:
+        _all_ints(record["sample_counts"])
