@@ -726,22 +726,39 @@ def _series(point, per_seed, draws, seeds, label):
             "interval": {"low": low, "high": high}}
 
 
-def _algebra_residuals(effect, metric, point, per_seed, draws, seeds, label):
-    """contrast - sign * (treated - control), at point, per seed and per draw."""
+def _seed_mean(per_seed_model, model, key, seeds, label):
+    """Plain finite mean over seeds of one model's own value."""
+    values = [per_seed_model[s][model][key] for s in seeds]
+    _require_finite(values, f"{label}: per-seed values")
+    return float(np.mean(values))
+
+
+def _algebra_residuals(effect, metric, point_of, per_seed_of, draws_of, seeds, label):
+    """``contrast - sign * (treated - control)`` at point, per seed and per draw.
+
+    Applied three times per endpoint: once to each model's own raw quantities
+    and once to the comparison deltas. The comparison check alone is not
+    sufficient -- if both models' contrasts were broken the same way, the error
+    cancels in the difference and the comparison residual is exactly zero while
+    neither model's reported effect is its own arms' difference.
+
+    ``*_of`` are accessors so the same arithmetic serves raw and delta values.
+    """
     sign = CONTRAST_SIGN[effect]
+    contrast_key = ("ples", effect, metric)
+    treated_key = ("arm", f"{effect}/treated", metric)
+    control_key = ("arm", f"{effect}/control", metric)
 
-    def _combine(source, getter):
-        return getter(("ples", effect, metric)) - sign * (
-            getter(("arm", f"{effect}/treated", metric))
-            - getter(("arm", f"{effect}/control", metric)))
+    def _residual(getter):
+        return getter(contrast_key) - sign * (getter(treated_key) - getter(control_key))
 
-    point_residual = _combine(point, lambda k: point[k])
-    seed_residuals = [abs(_combine(per_seed[s], lambda k: per_seed[s][k])) for s in seeds]
-    draw_residual = np.abs(
-        draws[("ples", effect, metric)]
-        - sign * (draws[("arm", f"{effect}/treated", metric)]
-                  - draws[("arm", f"{effect}/control", metric)]))
+    point_residual = _residual(point_of)
+    seed_residuals = [abs(_residual(lambda k, s=s: per_seed_of(k, s))) for s in seeds]
+    draw_residual = np.abs(_residual(draws_of))
+    _require_finite([point_residual], f"{label}: algebra point residual")
+    _require_finite(seed_residuals, f"{label}: algebra per-seed residual")
     _require_finite(draw_residual, f"{label}: algebra residual over draws")
+
     worst = max(abs(point_residual), max(seed_residuals, default=0.0),
                 float(np.max(draw_residual)))
     if worst > ALGEBRA_TOLERANCE:
@@ -759,6 +776,82 @@ def _algebra_residuals(effect, metric, point, per_seed, draws, seeds, label):
     }
 
 
+def ples_endpoint_keys():
+    """The PLES contrast and arm keys, in full."""
+    keys = set()
+    for effect in PLES_EFFECTS:
+        for metric in ARM_METRICS:
+            keys.add(("ples", effect, metric))
+            for arm in ("treated", "control"):
+                keys.add(("arm", f"{effect}/{arm}", metric))
+    return keys
+
+
+def _assert_ples_inputs(point, draws, seed_deltas, per_seed_model, raw_draws, seeds):
+    """Exact key sets and consistent draw shapes, before anything is classified.
+
+    Everything here previously surfaced as a bare ``KeyError`` from deep inside
+    the classifier, or -- for an *extra* seed or endpoint -- not at all, because
+    the code only asked whether what it wanted was present.
+    """
+    expected = ples_endpoint_keys()
+    models = {MODEL_A, MODEL_B}
+    seed_set = set(seeds)
+
+    def _fail(message):
+        raise NonFiniteValue(f"PLES input schema: {message}")
+
+    if set(per_seed_model) != seed_set:
+        _fail(f"per_seed_model seeds {sorted(set(per_seed_model))} != expected {sorted(seed_set)}")
+    for seed in seeds:
+        if set(per_seed_model[seed]) != models:
+            _fail(f"seed {seed}: models {sorted(per_seed_model[seed])} != {sorted(models)}")
+        for model in models:
+            found = {k for k in per_seed_model[seed][model] if k[0] in {"ples", "arm"}}
+            if found != expected:
+                _fail(f"seed {seed} model {model}: missing {sorted(expected - found)}, "
+                      f"extra {sorted(found - expected)}")
+
+    if set(raw_draws) != models:
+        _fail(f"raw_draws models {sorted(set(raw_draws))} != {sorted(models)}")
+    for model in models:
+        found = {k for k in raw_draws[model] if k[0] in {"ples", "arm"}}
+        if found != expected:
+            _fail(f"raw_draws[{model}]: missing {sorted(expected - found)}, "
+                  f"extra {sorted(found - expected)}")
+
+    for name, source in (("point", point), ("draws", draws)):
+        found = {k for k in source if k[0] in {"ples", "arm"}}
+        if found != expected:
+            _fail(f"{name}: missing {sorted(expected - found)}, extra {sorted(found - expected)}")
+    for seed in seeds:
+        found = {k for k in seed_deltas[seed] if k[0] in {"ples", "arm"}}
+        if found != expected:
+            _fail(f"seed_deltas[{seed}]: missing {sorted(expected - found)}, "
+                  f"extra {sorted(found - expected)}")
+
+    # Shapes, and the defining relation between raw and delta draws.
+    for key in sorted(expected):
+        arrays = {"delta": np.asarray(draws[key], dtype=np.float64),
+                  MODEL_A: np.asarray(raw_draws[MODEL_A][key], dtype=np.float64),
+                  MODEL_B: np.asarray(raw_draws[MODEL_B][key], dtype=np.float64)}
+        for name, array in arrays.items():
+            if array.ndim != 1:
+                _fail(f"{key} {name}: draws must be one-dimensional, got shape {array.shape}")
+            if array.size == 0:
+                _fail(f"{key} {name}: draws are empty")
+            _require_finite(array, f"{key} {name} draws")
+        sizes = {name: array.size for name, array in arrays.items()}
+        if len(set(sizes.values())) != 1:
+            _fail(f"{key}: draw lengths differ {sizes}")
+        residual = np.abs(arrays["delta"] - (arrays[MODEL_A] - arrays[MODEL_B]))
+        worst = float(np.max(residual))
+        if worst > ALGEBRA_TOLERANCE:
+            _fail(f"{key}: the delta draw is not ALFNet minus MoGERNN "
+                  f"(worst {worst:.3e} > {ALGEBRA_TOLERANCE:g}); it was computed "
+                  "separately or resampled independently")
+
+
 def build_ples_records(point, draws, seed_deltas, per_seed_model, raw_draws, seeds,
                        contrast_margins, arm_margins):
     """One canonical record per PLES endpoint: both models, both arms, deltas.
@@ -767,6 +860,7 @@ def build_ples_records(point, draws, seed_deltas, per_seed_model, raw_draws, see
     gameable -- degrading the control arm improves it -- so a consumer must not
     be able to read one without the arms that qualify it.
     """
+    _assert_ples_inputs(point, draws, seed_deltas, per_seed_model, raw_draws, seeds)
     records = []
     for effect in PLES_EFFECTS:
         for metric in ARM_METRICS:
@@ -790,17 +884,18 @@ def build_ples_records(point, draws, seed_deltas, per_seed_model, raw_draws, see
             for model in (MODEL_A, MODEL_B):
                 per_model[model] = {
                     "contrast": _series(
-                        per_seed_model[seeds[0]][model][contrast_key] * 0
-                        + float(np.mean([per_seed_model[s][model][contrast_key]
-                                         for s in seeds])),
+                        _seed_mean(per_seed_model, model, contrast_key, seeds,
+                                   f"{label} {model} contrast"),
                         {s: per_seed_model[s][model][contrast_key] for s in seeds},
                         raw_draws[model][contrast_key], seeds, f"{label} {model} contrast"),
                     "treated_absolute_error": _series(
-                        float(np.mean([per_seed_model[s][model][treated_key] for s in seeds])),
+                        _seed_mean(per_seed_model, model, treated_key, seeds,
+                                   f"{label} {model} treated"),
                         {s: per_seed_model[s][model][treated_key] for s in seeds},
                         raw_draws[model][treated_key], seeds, f"{label} {model} treated"),
                     "control_absolute_error": _series(
-                        float(np.mean([per_seed_model[s][model][control_key] for s in seeds])),
+                        _seed_mean(per_seed_model, model, control_key, seeds,
+                                   f"{label} {model} control"),
                         {s: per_seed_model[s][model][control_key] for s in seeds},
                         raw_draws[model][control_key], seeds, f"{label} {model} control"),
                 }
@@ -815,8 +910,17 @@ def build_ples_records(point, draws, seed_deltas, per_seed_model, raw_draws, see
                               {s: seed_deltas[s][control_key] for s in seeds},
                               draws[control_key], seeds, f"{label} control delta")
 
-            algebra = _algebra_residuals(effect, metric, point, seed_deltas, draws,
-                                         seeds, label)
+            for model in (MODEL_A, MODEL_B):
+                per_model[model]["algebra_identity"] = _algebra_residuals(
+                    effect, metric,
+                    lambda k, m=model: _seed_mean(per_seed_model, m, k, seeds, label),
+                    lambda k, s, m=model: per_seed_model[s][m][k],
+                    lambda k, m=model: raw_draws[m][k],
+                    seeds, f"{label} {model} raw")
+            algebra = _algebra_residuals(
+                effect, metric,
+                lambda k: point[k], lambda k, s: seed_deltas[s][k], lambda k: draws[k],
+                seeds, f"{label} comparison")
 
             contrast_status = _interval_status(
                 contrast["point"], contrast["interval"]["low"],
@@ -843,7 +947,7 @@ def build_ples_records(point, draws, seed_deltas, per_seed_model, raw_draws, see
                 "treated_delta": treated,
                 "control_delta": control,
                 "contrast_oriented_advantage": float(oriented),
-                "algebra_identity": algebra,
+                "comparison_algebra_identity": algebra,
                 "contrast_margin": contrast_margin,
                 "arm_margin": arm_margin,
                 **tally,
@@ -916,8 +1020,8 @@ def main():
         interval = f"[{record['ci_low']:+.4f},{record['ci_high']:+.4f}]"
         print(f"  {record['family']:<12}{record['row']:<19}{record['metric']:<6}"
               f"{record['delta']:>+10.4f}{interval:>22}"
-              f"   {record['n_favour_alfnet']}/{record['n_favour_baseline']}"
-              f"/{record['n_tie']}/{record['n_evaluable']}"
+              f"   {record['n_favour_alfnet_seeds']}/{record['n_favour_baseline_seeds']}"
+              f"/{record['n_tie_seeds']}/{record['n_evaluable_seeds']}"
               f"{'  U' if record['seed_unanimous'] else '   '}"
               f"  {record['verdict']}")
 
