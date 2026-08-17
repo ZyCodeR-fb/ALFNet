@@ -220,7 +220,7 @@ def _run_plot(ours, baseline, output_dir):
     return subprocess.run(
         [sys.executable, "scripts/plot_counterfactual_shockwave.py",
          "--ours", str(ours), "--baseline", str(baseline),
-         "--output-dir", str(output_dir), "--bootstrap-samples", "0"],
+         "--output-dir", str(output_dir), "--bootstrap-samples", "1000"],
         cwd=ROOT, capture_output=True, text=True,
     )
 

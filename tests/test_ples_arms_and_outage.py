@@ -22,6 +22,8 @@ scores better. The treated/control arms exist to catch that, and the Pareto
 status names it.
 """
 
+import json
+
 import numpy as np
 import pytest
 
@@ -192,27 +194,50 @@ def test_a_missing_or_non_finite_interval_is_uncertain_never_a_win():
     assert plot.arm_status(-1.0, _ci(float("nan"), -1.0), 0.05) == "uncertain"
 
 
-def test_pareto_credits_a_contrast_only_when_treated_improves():
-    assert plot.pareto_status("improve", "equivalent") == "accepted_treated_improves"
-    assert plot.pareto_status("improve", "improve") == "accepted_treated_improves"
-    # the gameable case: contrast looks better purely from a worse control arm
-    assert plot.pareto_status("equivalent", "degrade") == "rejected_control_degraded"
-    assert plot.pareto_status("improve", "degrade") == "rejected_control_degraded"
-    assert plot.pareto_status("degrade", "improve") == "rejected_treated_degraded"
-    assert plot.pareto_status("equivalent", "equivalent") == "no_material_change"
-    assert plot.pareto_status("uncertain", "improve") == "uncertain"
+def test_single_seed_reuses_the_multiseed_status_semantics():
+    """Parity, not a second implementation.
 
+    This file used to carry its own status machine and it had drifted: it
+    classified the arms without ever reading the contrast.
+    """
+    from scripts import multiseed_paired_inference as multiseed
 
-def test_a_degraded_control_arm_is_never_accepted():
-    """No arm classification may rescue a degraded control arm."""
     for treated in ("improve", "degrade", "equivalent", "uncertain"):
-        assert not plot.pareto_status(treated, "degrade").startswith("accepted")
+        for control in ("improve", "degrade", "equivalent", "uncertain"):
+            assert plot.arms_pareto_status(treated, control) == \
+                multiseed.arms_pareto_status(treated, control)
+            for contrast in ("favourable", "degraded", "equivalent", "uncertain"):
+                assert plot.combined_status(contrast, treated, control) == \
+                    multiseed.combined_status(contrast, treated, control)
+
+
+def test_arm_and_contrast_adapters_match_the_multiseed_functions():
+    from scripts import multiseed_paired_inference as multiseed
+
+    for delta, low, high in ((-1.0, -2.0, -0.5), (1.0, 0.5, 2.0),
+                             (0.0, -0.01, 0.01), (0.0, -5.0, 5.0)):
+        assert plot.arm_status(delta, {"low": low, "high": high}, 0.05) == \
+            multiseed._arm_status(delta, low, high, 0.05)
+        assert plot.contrast_status(delta, {"low": low, "high": high}, 0.25) == \
+            multiseed._interval_status(delta, low, high, 0.25, True)
+
+
+def test_no_confirmatory_wording_survives_in_the_status_values():
+    banned = ("accept", "reject", "pass", "fail", "significant", "formal")
+    values = set()
+    for treated in ("improve", "degrade", "equivalent", "uncertain"):
+        for control in ("improve", "degrade", "equivalent", "uncertain"):
+            values.add(plot.arms_pareto_status(treated, control))
+            for contrast in ("favourable", "degraded", "equivalent", "uncertain"):
+                values.add(plot.combined_status(contrast, treated, control))
+    for value in values:
+        assert not any(word in value.lower() for word in banned), value
 
 
 def test_margin_is_selected_per_metric():
-    margins = {"MAE": 0.05, "MAPE": 0.25}
-    assert plot.arm_margin_for("JoinLiftGain/MAE", margins) == 0.05
-    assert plot.arm_margin_for("JoinLiftGain/MAPE", margins) == 0.25
+    margins = {"MAE": 0.05, "MAPE": 0.25, "RMSE": None}
+    assert plot._margin_for_endpoint("JoinLiftGain/MAE", margins) == 0.05
+    assert plot._margin_for_endpoint("JoinLiftGain/MAPE", margins) == 0.25
 
 
 # --- 4. saturated cohorts must not reach a main-plan number ------------------
@@ -287,23 +312,100 @@ def test_control_only_degradation_is_rejected_by_the_full_pipeline():
             row["event_time_index"] = row["origin_id"] * 1000
 
     result = plot.bootstrap_advantages_v2(
-        ours, baseline, INPUT_LEN, samples=120, seed=11, trajectory_span=8,
-        arm_margins={"MAE": 0.01, "MAPE": 0.05})
+        ours, baseline, INPUT_LEN, samples=1000, seed=11, trajectory_span=8,
+        arm_margins={"MAE": 0.01, "MAPE": 0.05, "RMSE": None},
+        contrast_margins={"MAE": 0.01, "MAPE": 0.05, "RMSE": None})
     join = result["JoinLiftGain/MAPE"]
 
     assert join["advantage"] > 0, "fixture must look like a win on the contrast"
+    assert join["contrast_status"] == "favourable"
     assert join["treated_status"] == "equivalent", join["treated_status"]
     assert join["control_status"] == "degrade", join["control_status"]
-    assert join["pareto"] == "rejected_control_degraded"
+    assert join["arms_pareto_status"] == "control_degraded"
+    assert join["combined_descriptive_status"] == \
+        "contrast_favourable_but_control_degraded"
 
 
-def test_zero_samples_yields_uncertain_rather_than_a_point_verdict():
+@pytest.mark.parametrize("samples", [0, -1, 999])
+def test_too_few_samples_are_refused_not_degraded_to_uncertain(samples):
+    """A summary that silently calls every endpoint uncertain looks measured."""
     flat = {tau: 1.0 for tau in range(INPUT_LEN)}
+    with pytest.raises(plot.NonFiniteValue, match="at least 1000"):
+        plot.bootstrap_advantages_v2(
+            _rows(flat, control=3.0), _rows(flat, control=1.0), INPUT_LEN,
+            samples=samples, trajectory_span=8)
+
+
+def test_a_non_integer_sample_count_is_refused():
+    flat = {tau: 1.0 for tau in range(INPUT_LEN)}
+    with pytest.raises(plot.NonFiniteValue, match="must be an integer"):
+        plot.bootstrap_advantages_v2(
+            _rows(flat, control=3.0), _rows(flat, control=1.0), INPUT_LEN,
+            samples=1000.5, trajectory_span=8)
+
+
+def test_both_arms_improve_but_contrast_degrades_is_not_all_conditions_met():
+    """Control improves more than treated, so the contrast genuinely worsens."""
+    flat = {tau: 1.0 for tau in range(INPUT_LEN)}
+    baseline = _rows(flat, control=3.0, join_treated=1.0)
+    ours = _rows(flat, control=1.0, join_treated=0.9)
+
     result = plot.bootstrap_advantages_v2(
-        _rows(flat, control=3.0), _rows(flat, control=1.0), INPUT_LEN, samples=0)
-    for entry in result.values():
-        assert entry["pareto"] == "uncertain"
-        assert entry["treated_status"] == "uncertain"
+        ours, baseline, INPUT_LEN, samples=1000, seed=5, trajectory_span=8,
+        arm_margins={"MAE": 0.01, "MAPE": 0.05, "RMSE": None},
+        contrast_margins={"MAE": 0.01, "MAPE": 0.05, "RMSE": None})
+    join = result["JoinLiftGain/MAPE"]
+
+    assert join["treated_status"] == "improve"
+    assert join["control_status"] == "improve"
+    assert join["arms_pareto_status"] == "treated_improves_control_non_degraded"
+    assert join["contrast_status"] == "degraded"
+    assert join["combined_descriptive_status"] == "contrast_degraded"
+    assert join["combined_descriptive_status"] != "all_conditions_met"
+
+
+def test_contrast_and_arm_margins_move_independently():
+    flat = {tau: 1.0 for tau in range(INPUT_LEN)}
+    ours = _rows(flat, control=1.02, join_treated=0.98)
+    baseline = _rows(flat, control=1.0, join_treated=1.0)
+    tight = {"MAE": 0.001, "MAPE": 0.005, "RMSE": None}
+    wide = {"MAE": 1000.0, "MAPE": 1000.0, "RMSE": None}
+
+    wide_contrast = plot.bootstrap_advantages_v2(
+        ours, baseline, INPUT_LEN, samples=1000, seed=7, trajectory_span=8,
+        arm_margins=tight, contrast_margins=wide)["JoinLiftGain/MAPE"]
+    wide_arm = plot.bootstrap_advantages_v2(
+        ours, baseline, INPUT_LEN, samples=1000, seed=7, trajectory_span=8,
+        arm_margins=wide, contrast_margins=tight)["JoinLiftGain/MAPE"]
+
+    # a wide contrast margin only flattens the contrast verdict
+    assert wide_contrast["contrast_status"] == "equivalent"
+    assert wide_contrast["treated_status"] != "equivalent"
+    # and a wide arm margin only flattens the arms
+    assert wide_arm["treated_status"] == "equivalent"
+    assert wide_arm["control_status"] == "equivalent"
+    assert wide_arm["contrast_status"] != "equivalent"
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_a_non_finite_draw_fails_closed_with_context(bad, monkeypatch):
+    flat = {tau: 1.0 for tau in range(INPUT_LEN)}
+    real = plot._advantages_v2
+    state = {"n": 0}
+
+    def _poison(*args, **kwargs):
+        out = real(*args, **kwargs)
+        state["n"] += 1
+        if state["n"] == 3:
+            for entry in out.values():
+                entry["advantage"] = bad
+        return out
+
+    monkeypatch.setattr(plot, "_advantages_v2", _poison)
+    with pytest.raises(plot.NonFiniteValue, match="non-finite"):
+        plot.bootstrap_advantages_v2(
+            _rows(flat, control=3.0), _rows(flat, control=1.0), INPUT_LEN,
+            samples=1000, seed=3, trajectory_span=8)
 
 
 # --- identity: the two bundles must be the same experiment -------------------
@@ -361,3 +463,102 @@ def test_mismatched_protocol_hashes_are_refused():
 
 def test_the_matched_pair_is_accepted():
     plot.assert_comparable_bundles(_bundle("ALFNet", 32), _bundle("MoGERNN", 32))
+
+
+# --- single-seed main(): summary assembly and JSON write ---------------------
+
+
+def _bundle_dir(tmp_path, name, model, variant, seed, rows):
+    """A minimal maintained-schema PLES v3 bundle on disk."""
+    import csv as _csv
+
+    directory = tmp_path / name
+    directory.mkdir(parents=True)
+    (directory / "ples_effects_summary.json").write_text(json.dumps({
+        "schema_version": 3, "model": model, "model_variant": variant, "seed": seed,
+        "formal_protocol_match": True,
+        "protocol_hash": "p" * 8, "training_protocol_hash": "t" * 8,
+        "lce_protocol_hash": "l" * 8, "ples_protocol_hash": "e" * 8,
+        "dataset": {"name": "METRLA", "fingerprint": "f", "adjacency_hash": "a",
+                    "timestamps_hash": "s", "test_values_hash": "v"},
+        "bootstrap": {"trajectory_span": 8},
+    }), encoding="utf-8")
+    (directory / "protocol_manifest.json").write_text(json.dumps({
+        "resolved": {"input_len": INPUT_LEN, "main_cohort_ids": [1]},
+    }), encoding="utf-8")
+    fields = list(rows[0])
+    with (directory / "ples_paired_rows.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = _csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    return directory
+
+
+def _single_seed_main(tmp_path, monkeypatch, samples=1000):
+    import sys
+
+    flat = {tau: 1.0 for tau in range(INPUT_LEN)}
+    ours = _bundle_dir(tmp_path, "ours", "ALFNet", "gs", 32,
+                       _rows(flat, control=3.0, join_treated=0.5))
+    baseline = _bundle_dir(tmp_path, "base", "MoGERNN", "mg_l3", 32,
+                           _rows(flat, control=3.0, join_treated=1.0))
+    out = tmp_path / "out"
+
+    # plotting is not what this test is about
+    monkeypatch.setattr(plot, "plot_comparison_v2", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", [
+        "plot_counterfactual_shockwave.py", "--ours", str(ours),
+        "--baseline", str(baseline), "--output-dir", str(out),
+        "--bootstrap-samples", str(samples),
+    ])
+    plot.main()
+    return json.loads((out / "paired_model_comparison_summary.json").read_text("utf-8"))
+
+
+def test_single_seed_main_writes_the_current_schema(tmp_path, monkeypatch):
+    payload = _single_seed_main(tmp_path, monkeypatch)
+
+    assert payload["schema_version"] == 5
+    assert payload["post_hoc_diagnostic_only"] is True
+    assert payload["inferential_status"] == "descriptive_not_formal"
+    assert payload["conditional_on_one_trained_seed"] is True
+    assert payload["trained_seed"] == 32
+    assert "does not include training randomness" in payload["interval_scope"]
+
+    # the two margin families are separate top-level fields
+    assert payload["post_hoc_contrast_margins"]["MAE"] == 0.05
+    assert payload["post_hoc_arm_margins"]["MAE"] == 0.05
+
+    for entry in payload["advantages"].values():
+        for field in ("contrast_status", "treated_status", "control_status",
+                      "arms_pareto_status", "combined_descriptive_status"):
+            assert field in entry, field
+        assert "pareto" not in entry
+
+
+def test_single_seed_main_emits_no_confirmatory_wording(tmp_path, monkeypatch):
+    payload = _single_seed_main(tmp_path, monkeypatch)
+    statuses = []
+    for entry in payload["advantages"].values():
+        statuses += [entry["contrast_status"], entry["treated_status"],
+                     entry["control_status"], entry["arms_pareto_status"],
+                     entry["combined_descriptive_status"]]
+    for value in statuses:
+        assert not any(word in value.lower()
+                       for word in ("accept", "reject", "pass", "fail",
+                                    "significant", "formal")), value
+
+
+def test_single_seed_main_output_has_no_non_finite_constant(tmp_path, monkeypatch):
+    _single_seed_main(tmp_path, monkeypatch)
+    raw = (tmp_path / "out" / "paired_model_comparison_summary.json").read_text("utf-8")
+
+    def _reject(name):
+        raise AssertionError(f"non-finite constant {name!r} in written JSON")
+
+    json.loads(raw, parse_constant=_reject)
+
+
+def test_single_seed_cli_refuses_too_few_samples(tmp_path, monkeypatch):
+    with pytest.raises(SystemExit):
+        _single_seed_main(tmp_path, monkeypatch, samples=999)

@@ -16,6 +16,22 @@ from scripts.analysis_identity import (  # noqa: E402
     load_manifest,
     verify_role,
 )
+# The status semantics are defined once, in the multiseed script, and imported
+# here. This file previously carried a second copy that had already drifted:
+# its verdict never read the contrast, so "both arms improved but the contrast
+# clearly worsened" still came back as a clean win. Parity tests pin the two
+# together.
+from scripts.multiseed_paired_inference import (  # noqa: E402
+    MIN_BOOTSTRAP_SAMPLES,
+    NonFiniteValue,
+    arms_pareto_status,
+    combined_status,
+    margin_for,
+)
+from scripts.multiseed_paired_inference import _arm_status as _multiseed_arm_status  # noqa: E402
+from scripts.multiseed_paired_inference import (  # noqa: E402
+    _interval_status as _multiseed_interval_status,
+)
 from data_provider.ples_protocol import (  # noqa: E402
     PLES_PROTOCOL_VERSION,
     build_curve_rows,
@@ -418,52 +434,30 @@ def compare_rows_v2(ours_rows, baseline_rows, main_cohort_ids=None):
 def arm_status(delta, interval, margin):
     """Classify one absolute-error arm against its interval and a margin.
 
-    Both arms are absolute errors, so a negative delta (ours - baseline) is an
-    improvement. Deciding this on the point estimate alone -- which an earlier
-    version did -- cannot separate "the control arm degraded" from "the control
-    arm moved by less than the noise", and it classified an exactly-zero delta
-    as a degradation. Four outcomes, from the interval:
-
-      improve     the whole interval is better than -margin
-      degrade     the whole interval is worse than +margin
-      equivalent  the whole interval lies inside [-margin, +margin]
-      uncertain   the interval spans more than one of those
+    Thin adapter over the multiseed implementation: this file used to carry its
+    own copy of the whole status machine and the two drifted, so the single-seed
+    one classified the arms without ever reading the contrast. Only the calling
+    convention differs here -- an ``{low, high}`` mapping instead of two scalars.
     """
     if interval is None:
         return "uncertain"
-    low, high = float(interval["low"]), float(interval["high"])
-    if not all(np.isfinite(value) for value in (delta, low, high)):
+    return _multiseed_arm_status(delta, interval["low"], interval["high"], margin)
+
+
+def contrast_status(advantage, interval, margin):
+    """Classify the oriented contrast. Positive advantage favours ALFNet.
+
+    ``advantage`` is already oriented so that larger is better on every
+    endpoint, so it is classified as a higher-is-better quantity.
+    """
+    if interval is None:
         return "uncertain"
-    if high < -margin:
-        return "improve"
-    if low > margin:
-        return "degrade"
-    if low >= -margin and high <= margin:
-        return "equivalent"
-    return "uncertain"
+    return _multiseed_interval_status(advantage, interval["low"], interval["high"],
+                                      margin, True)
 
 
 # A contrast may only be credited when neither arm is established as degraded.
 NON_DEGRADED = {"improve", "equivalent"}
-
-
-def pareto_status(treated, control):
-    """Joint verdict over the two arm classifications.
-
-    The gate this exists for: a PLES contrast improves when the treated arm gets
-    better *or* when the control arm gets worse, and only the first is a better
-    model. ``rejected_control_degraded`` is the case a contrast-only reader
-    would have scored as a win.
-    """
-    if treated == "improve" and control in NON_DEGRADED:
-        return "accepted_treated_improves"
-    if control == "degrade":
-        return "rejected_control_degraded"
-    if treated == "degrade":
-        return "rejected_treated_degraded"
-    if treated in NON_DEGRADED and control in NON_DEGRADED:
-        return "no_material_change"
-    return "uncertain"
 
 
 def _advantages_v2(ours_rows, baseline_rows, input_len, main_cohort_ids=None):
@@ -503,12 +497,38 @@ def cells_for(curves, input_len, name):
     return paired_effect_cells(curves, input_len)[name]
 
 
+# Contrast margins and arm margins are separate settings with separate defaults.
+# They share units, which is exactly why one silently became the other before.
+# Both are v3 post-hoc reporting aids, never acceptance thresholds.
 DEFAULT_ARM_MARGINS = {"MAE": 0.05, "MAPE": 0.25}
+DEFAULT_CONTRAST_MARGINS = {"MAE": 0.05, "MAPE": 0.25}
+
+
+def _validate_samples(samples):
+    """Refuse too few draws rather than reporting a degraded interval."""
+    if isinstance(samples, bool) or not isinstance(samples, int):
+        raise NonFiniteValue(f"bootstrap samples must be an integer, got {samples!r}")
+    if samples < MIN_BOOTSTRAP_SAMPLES:
+        raise NonFiniteValue(
+            f"bootstrap samples must be at least {MIN_BOOTSTRAP_SAMPLES} to report "
+            f"a 95% interval; got {samples}")
+
+
+def _checked_draws(values, label):
+    """One-dimensional, non-empty, all finite -- with the endpoint named."""
+    array = np.asarray(values, dtype=np.float64)
+    if array.ndim != 1:
+        raise NonFiniteValue(f"{label}: draws must be one-dimensional, got {array.shape}")
+    if array.size == 0:
+        raise NonFiniteValue(f"{label}: draws are empty")
+    if not np.all(np.isfinite(array)):
+        raise NonFiniteValue(f"{label}: draws contain a non-finite value")
+    return array
 
 
 def bootstrap_advantages_v2(ours_rows, baseline_rows, input_len, samples=2000, seed=2026,
                             trajectory_span=None, main_cohort_ids=None,
-                            arm_margins=None):
+                            arm_margins=None, contrast_margins=None):
     """Paired advantage intervals on the PLES v3 resampling unit.
 
     This used to draw each origin independently and nest the cohort draw inside
@@ -533,17 +553,10 @@ def bootstrap_advantages_v2(ours_rows, baseline_rows, input_len, samples=2000, s
     # arm moved by less than the noise".
     resampled_fields = ("advantage", "treated_delta", "control_delta")
     arm_margins = DEFAULT_ARM_MARGINS if arm_margins is None else arm_margins
-    if samples <= 0:
-        # No interval means no arm can be classified; say uncertain rather than
-        # falling back to a point-estimate verdict.
-        return {
-            name: {**entry,
-                   **{f"{field}_ci": None for field in resampled_fields},
-                   "arm_margin": arm_margin_for(name, arm_margins),
-                   "treated_status": "uncertain", "control_status": "uncertain",
-                   "pareto": "uncertain"}
-            for name, entry in point.items()
-        }
+    contrast_margins = DEFAULT_CONTRAST_MARGINS if contrast_margins is None else contrast_margins
+    # Too few draws is refused, not degraded into "uncertain". A summary that
+    # silently reports every endpoint as uncertain looks like a measurement.
+    _validate_samples(samples)
 
     ours_units = defaultdict(lambda: defaultdict(list))
     baseline_units = defaultdict(lambda: defaultdict(list))
@@ -612,30 +625,44 @@ def bootstrap_advantages_v2(ours_rows, baseline_rows, input_len, samples=2000, s
                 draws[(name, field)][sample_index] = entry[field]
     resolved = {}
     for name, entry in point.items():
-        intervals = {
-            f"{field}_ci": {
-                "low": float(np.percentile(draws[(name, field)], 2.5)),
-                "high": float(np.percentile(draws[(name, field)], 97.5)),
-            }
-            for field in resampled_fields
-        }
-        margin = arm_margin_for(name, arm_margins)
-        treated = arm_status(entry["treated_delta"], intervals["treated_delta_ci"], margin)
-        control = arm_status(entry["control_delta"], intervals["control_delta_ci"], margin)
+        intervals = {}
+        for field in resampled_fields:
+            label = f"{name}/{field}"
+            values = _checked_draws(draws[(name, field)], label)
+            low = float(np.percentile(values, 2.5))
+            high = float(np.percentile(values, 97.5))
+            if not (np.isfinite(low) and np.isfinite(high)):
+                raise NonFiniteValue(f"{label}: interval ends are not finite")
+            if low > high:
+                raise NonFiniteValue(f"{label}: interval low {low} > high {high}")
+            if not np.isfinite(entry[field]):
+                raise NonFiniteValue(f"{label}: point estimate is not finite")
+            intervals[f"{field}_ci"] = {"low": low, "high": high}
+
+        arm_margin = _margin_for_endpoint(name, arm_margins)
+        contrast_margin = _margin_for_endpoint(name, contrast_margins)
+        # Each family reads only its own margin. Sharing one dict is how the
+        # contrast threshold silently became the arm threshold.
+        treated = arm_status(entry["treated_delta"], intervals["treated_delta_ci"], arm_margin)
+        control = arm_status(entry["control_delta"], intervals["control_delta_ci"], arm_margin)
+        contrast = contrast_status(entry["advantage"], intervals["advantage_ci"],
+                                   contrast_margin)
         resolved[name] = {
             **entry, **intervals,
-            "arm_margin": margin,
+            "arm_margin": arm_margin,
+            "contrast_margin": contrast_margin,
+            "contrast_status": contrast,
             "treated_status": treated,
             "control_status": control,
-            "pareto": pareto_status(treated, control),
+            "arms_pareto_status": arms_pareto_status(treated, control),
+            "combined_descriptive_status": combined_status(contrast, treated, control),
         }
     return resolved
 
 
-def arm_margin_for(name, arm_margins):
+def _margin_for_endpoint(name, margins):
     """Margin for this endpoint's metric. MAPE is a percentage, MAE is not."""
-    metric = name.rsplit("/", 1)[-1]
-    return float(arm_margins.get(metric, arm_margins["MAE"]))
+    return margin_for(name.rsplit("/", 1)[-1], margins)
 
 
 def _write_curves(path, curves):
@@ -743,7 +770,24 @@ def main():
     parser.add_argument("--baseline-label", default="MoGERNN")
     parser.add_argument("--bootstrap-samples", type=int, default=2000)
     parser.add_argument("--bootstrap-seed", type=int, default=2026)
+    # Two independent margin families. They share units, which is precisely why
+    # one silently became the other when a single dict served both.
+    parser.add_argument("--post-hoc-contrast-margin-mae", type=float, default=0.05)
+    parser.add_argument("--post-hoc-contrast-margin-mape", type=float, default=0.25)
+    parser.add_argument("--post-hoc-arm-margin-mae", type=float, default=0.05)
+    parser.add_argument("--post-hoc-arm-margin-mape", type=float, default=0.25)
     args = parser.parse_args()
+    for name, value in (
+        ("--post-hoc-contrast-margin-mae", args.post_hoc_contrast_margin_mae),
+        ("--post-hoc-contrast-margin-mape", args.post_hoc_contrast_margin_mape),
+        ("--post-hoc-arm-margin-mae", args.post_hoc_arm_margin_mae),
+        ("--post-hoc-arm-margin-mape", args.post_hoc_arm_margin_mape),
+    ):
+        if not np.isfinite(value) or value < 0:
+            parser.error(f"{name} must be finite and >= 0, got {value!r}")
+    if args.bootstrap_samples < MIN_BOOTSTRAP_SAMPLES:
+        parser.error(f"--bootstrap-samples must be at least {MIN_BOOTSTRAP_SAMPLES} "
+                     f"to report a 95% interval; got {args.bootstrap_samples}")
 
     ours_summary, ours_path, ours_rows, ours_version = _read_result_bundle(args.ours)
     baseline_summary, baseline_path, baseline_rows, baseline_version = _read_result_bundle(args.baseline)
@@ -770,6 +814,13 @@ def main():
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Separate dict objects on purpose: passing one object twice is how the two
+    # families silently became one.
+    contrast_margins = {"MAE": args.post_hoc_contrast_margin_mae,
+                        "MAPE": args.post_hoc_contrast_margin_mape, "RMSE": None}
+    arm_margins = {"MAE": args.post_hoc_arm_margin_mae,
+                   "MAPE": args.post_hoc_arm_margin_mape, "RMSE": None}
+
     if ours_version >= 2:
         input_len, main_cohort_ids = _paired_protocol_plan(
             ours_summary, ours_path, baseline_summary, baseline_path
@@ -785,10 +836,27 @@ def main():
                 ours_summary, ours_path, baseline_summary, baseline_path
             ),
             main_cohort_ids=main_cohort_ids,
+            arm_margins=arm_margins,
+            contrast_margins=contrast_margins,
         )
         summary = {
-            "schema_version": 4,
+            "schema_version": 5,
             "protocol": "PLES v3 paired model comparison",
+            "post_hoc_diagnostic_only": True,
+            "inferential_status": "descriptive_not_formal",
+            "conditional_on_one_trained_seed": True,
+            "trained_seed": ours_summary.get("seed"),
+            "interval_scope": (
+                "overlap-block and cohort resampling of evaluation events at a "
+                "single fixed training seed. It does not include training "
+                "randomness, so it is not an interval for the model difference."
+            ),
+            "post_hoc_contrast_margins": contrast_margins,
+            "post_hoc_arm_margins": arm_margins,
+            "margin_status": (
+                "v3 post-hoc reporting aids chosen after the test split was read; "
+                "not pre-registered and not acceptance thresholds"
+            ),
             "protocol_hash": ours_summary["protocol_hash"],
             "plan": {
                 "input_len": input_len,
@@ -802,11 +870,15 @@ def main():
                 "OutageFaultPenaltyReduction": "OutageFaultPenalty_baseline - OutageFaultPenalty_ours; higher is better",
                 "treated_delta": "ours_treated - baseline_treated; absolute error, negative is better",
                 "control_delta": "ours_control - baseline_control; absolute error, negative is better",
+                "contrast_status": "favourable | degraded | equivalent | uncertain, "
+                    "from the advantage interval against contrast_margin",
                 "treated_status/control_status": "improve | degrade | equivalent | "
                     "uncertain, decided from the arm's 95% CI against arm_margin, "
                     "not from the point estimate",
-                "pareto": "joint arm verdict; a contrast is credited only when the "
-                          "treated arm improves and the control arm is not degraded",
+                "arms_pareto_status": "how the two absolute-error arms moved",
+                "combined_descriptive_status": "all_conditions_met requires contrast "
+                    "favourable AND treated improve AND control non-degraded; it "
+                    "describes which conditions held and adjudicates nothing",
             },
             "ours": args.ours_label,
             "baseline": args.baseline_label,
@@ -844,7 +916,7 @@ def main():
         print_keys = ("Join", "Fault", "LifeMacro")
     _write_curves(output_dir / "paired_model_comparison.csv", curves)
     with (output_dir / "paired_model_comparison_summary.json").open("w", encoding="utf-8") as handle:
-        json.dump(summary, handle, ensure_ascii=False, indent=2)
+        json.dump(summary, handle, ensure_ascii=False, indent=2, allow_nan=False)
     for key in print_keys:
         interval = intervals[key]
         if ours_version >= 2:
@@ -858,7 +930,8 @@ def main():
                 f"{key}={interval['advantage']:+.4f} | {span} | "
                 f"treatedD={interval['treated_delta']:+.4f}({interval['treated_status']}) "
                 f"controlD={interval['control_delta']:+.4f}({interval['control_status']}) "
-                f"| {interval['pareto']}"
+                f"| contrast={interval['contrast_status']}"
+                f" | {interval['combined_descriptive_status']}"
             )
         elif interval["low"] is None or interval["high"] is None:
             print(f"{key} AttenuationGain={interval['point']:.4f} | 95% CI=NA")

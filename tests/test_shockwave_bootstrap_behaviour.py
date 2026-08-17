@@ -72,9 +72,9 @@ BASE_GAP = {origin: 0.0 for origin in CHAINED}
 def test_overlap_blocking_changes_the_interval_it_produces():
     ours = _rows(OURS_GAP, CHAINED)
     baseline = _rows(BASE_GAP, CHAINED)
-    blocked = plot.bootstrap_advantages_v2(ours, baseline, 4, samples=300, seed=7,
+    blocked = plot.bootstrap_advantages_v2(ours, baseline, 4, samples=1000, seed=7,
                                            trajectory_span=72)
-    per_origin = plot.bootstrap_advantages_v2(ours, baseline, 4, samples=300, seed=7,
+    per_origin = plot.bootstrap_advantages_v2(ours, baseline, 4, samples=1000, seed=7,
                                               trajectory_span=1)
     key = "FaultPenaltyReduction/MAPE"
     assert blocked[key]["advantage"] == pytest.approx(per_origin[key]["advantage"])
@@ -99,7 +99,7 @@ def test_missing_span_raises_instead_of_resampling_origins_independently():
     ours = _rows(OURS_GAP, CHAINED)
     baseline = _rows(BASE_GAP, CHAINED)
     with pytest.raises(ValueError, match="trajectory span"):
-        plot.bootstrap_advantages_v2(ours, baseline, 4, samples=10, seed=7,
+        plot.bootstrap_advantages_v2(ours, baseline, 4, samples=1000, seed=7,
                                      trajectory_span=None)
 
 
