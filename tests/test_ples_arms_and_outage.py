@@ -51,11 +51,17 @@ def _phase(track, tau):
     return names[2] if tau == INPUT_LEN - 1 else names[1]
 
 
-def _row(track, tau, cohort, treated, control, regime="Weekday/Midday", origin=1):
+def _row(track, tau, cohort, treated, control, regime="Weekday/Midday", origin=1,
+         model="ALFNet", dataset="METRLA"):
+    """A row carrying the full closed schema the strict loader requires."""
     row = {
+        "dataset": dataset, "model": model,
         "origin_id": origin, "cohort_id": cohort, "track": track, "tau": tau,
         "phase": _phase(track, tau), "count": 10, "regime": regime,
         "calendar_day": "2026-01-01", "event_time_index": origin * 1000,
+        "event_timestamp": "2026-01-01 10:00:00",
+        "cohort_fraction": 0.05, "cohort_style": "clustered", "node_count": 4,
+        "graph_weight": "", "patch_residual_weight": "",
     }
     for field in SUM_FIELDS:
         row[field] = (treated if field.startswith("treated") else control) * 10
@@ -63,7 +69,7 @@ def _row(track, tau, cohort, treated, control, regime="Weekday/Midday", origin=1
 
 
 def _rows(fault_treated_by_tau, control=1.0, cohorts=(1,), regime="Weekday/Midday",
-          join_treated=1.0):
+          join_treated=1.0, model="ALFNet"):
     """Both tracks scripted: fault treated per tau, join treated flat.
 
     ``join_treated`` is a parameter rather than a constant so a test can move
@@ -73,9 +79,11 @@ def _rows(fault_treated_by_tau, control=1.0, cohorts=(1,), regime="Weekday/Midda
     rows = []
     for cohort in cohorts:
         for tau in range(INPUT_LEN):
-            rows.append(_row("join", tau, cohort, join_treated, control, regime))
+            rows.append(_row("join", tau, cohort, join_treated, control, regime,
+                             model=model))
             rows.append(_row("fault", tau, cohort,
-                             fault_treated_by_tau[tau], control, regime))
+                             fault_treated_by_tau[tau], control, regime,
+                             model=model))
     return rows
 
 
@@ -504,9 +512,9 @@ def _single_seed_main(tmp_path, monkeypatch, samples=1000):
 
     flat = {tau: 1.0 for tau in range(INPUT_LEN)}
     ours = _bundle_dir(tmp_path, "ours", "ALFNet", "gs", 32,
-                       _rows(flat, control=3.0, join_treated=0.5))
+                       _rows(flat, control=3.0, join_treated=0.5, model="ALFNet"))
     baseline = _bundle_dir(tmp_path, "base", "MoGERNN", "mg_l3", 32,
-                           _rows(flat, control=3.0, join_treated=1.0))
+                           _rows(flat, control=3.0, join_treated=1.0, model="MoGERNN"))
     out = tmp_path / "out"
 
     # plotting is not what this test is about
@@ -874,3 +882,196 @@ def test_the_oriented_point_follows_the_frozen_orientation():
             assert oriented == pytest.approx(ours - baseline)
         else:
             assert oriented == pytest.approx(-(ours - baseline))
+
+
+# --- the single-seed entry point uses the strict loader (B) ------------------
+#
+# This file used to carry its own permissive parser: a few int/float casts and
+# nothing else. It skipped the closed header, the finite/non-negative checks,
+# the count and cohort_fraction checks and the track/phase consistency check, so
+# a corrupted row reached the statistics unchallenged. There is now one loader.
+
+
+def _write_csv(directory, rows, header=None, extra_lines=()):
+    directory.mkdir(parents=True, exist_ok=True)
+    fields = header if header is not None else list(rows[0])
+    lines = [",".join(fields)]
+    for row in rows:
+        lines.append(",".join(str(row[f]) if f in row else "" for f in fields))
+    lines.extend(extra_lines)
+    (directory / "ples_paired_rows.csv").write_text("\n".join(lines) + "\n",
+                                                    encoding="utf-8")
+    return directory
+
+
+def _bundle_with_rows(tmp_path, name, rows, header=None, model="ALFNet",
+                      variant="gs", seed=32, schema=3):
+    directory = tmp_path / name
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "ples_effects_summary.json").write_text(json.dumps({
+        "schema_version": schema, "model": model, "model_variant": variant,
+        "seed": seed, "formal_protocol_match": True,
+        "protocol_hash": "p" * 8, "training_protocol_hash": "t" * 8,
+        "lce_protocol_hash": "l" * 8, "ples_protocol_hash": "e" * 8,
+        "dataset": {"name": "METRLA", "fingerprint": "f", "adjacency_hash": "a",
+                    "timestamps_hash": "s", "test_values_hash": "v"},
+        "bootstrap": {"trajectory_span": 8},
+    }), encoding="utf-8")
+    (directory / "protocol_manifest.json").write_text(json.dumps({
+        "resolved": {"input_len": INPUT_LEN, "main_cohort_ids": [1]},
+    }), encoding="utf-8")
+    _write_csv(directory, rows, header)
+    return directory
+
+
+def _flat_rows(model="ALFNet"):
+    return _rows({tau: 1.0 for tau in range(INPUT_LEN)}, control=1.0, model=model)
+
+
+def test_the_single_seed_entry_point_rejects_a_duplicate_header(tmp_path):
+    from scripts.paired_model_bootstrap import InvalidSchema
+
+    rows = _flat_rows()
+    header = list(rows[0]) + ["treated_ae_sum"]
+    directory = _bundle_with_rows(tmp_path, "dup", rows, header=header)
+    with pytest.raises(InvalidSchema, match="duplicate column"):
+        plot._read_result_bundle(directory)
+
+
+def test_the_single_seed_entry_point_rejects_a_missing_column(tmp_path):
+    from scripts.paired_model_bootstrap import InvalidSchema
+
+    rows = _flat_rows()
+    header = [f for f in rows[0] if f != "regime"]
+    directory = _bundle_with_rows(tmp_path, "miss", rows, header=header)
+    with pytest.raises(InvalidSchema, match="missing required column"):
+        plot._read_result_bundle(directory)
+
+
+def test_the_single_seed_entry_point_rejects_an_unexpected_column(tmp_path):
+    from scripts.paired_model_bootstrap import InvalidSchema
+
+    rows = _flat_rows()
+    for row in rows:
+        row["smuggled"] = 1
+    directory = _bundle_with_rows(tmp_path, "extra", rows)
+    with pytest.raises(InvalidSchema, match="unexpected column"):
+        plot._read_result_bundle(directory)
+
+
+@pytest.mark.parametrize("field,value,match", [
+    ("treated_ae_sum", "nan", "not finite"),
+    ("treated_ae_sum", "inf", "not finite"),
+    ("treated_ae_sum", "-1.0", "negative"),
+    ("count", "0", "positive integer"),
+    ("node_count", "0", "positive integer"),
+    ("cohort_fraction", "1.5", "cohort_fraction"),
+    ("dataset", "", "dataset"),
+    ("model", "", "model"),
+    ("event_timestamp", "", "event_timestamp"),
+    ("track", "sideways", "track"),
+    ("treated_ae_sum", "oops", "not a valid float"),
+])
+def test_the_single_seed_entry_point_rejects_a_malformed_row(tmp_path, field, value, match):
+    from scripts.paired_model_bootstrap import InvalidRow
+
+    rows = _flat_rows()
+    rows[0][field] = value
+    directory = _bundle_with_rows(tmp_path, f"bad-{field}-{value}", rows)
+    with pytest.raises(InvalidRow, match=match):
+        plot._read_result_bundle(directory)
+
+
+def test_the_single_seed_entry_point_rejects_a_phase_track_mismatch(tmp_path):
+    from scripts.paired_model_bootstrap import InvalidRow
+
+    rows = _flat_rows()
+    rows[0]["track"] = "join"
+    rows[0]["phase"] = "Outage"
+    directory = _bundle_with_rows(tmp_path, "phase", rows)
+    with pytest.raises(InvalidRow, match="not a join phase"):
+        plot._read_result_bundle(directory)
+
+
+def test_a_retired_schema_is_refused_before_any_row_is_read(tmp_path):
+    """Refused for being retired, not for a confusing column error."""
+    rows = _flat_rows()
+    directory = _bundle_with_rows(tmp_path, "old", rows, schema=2)
+    with pytest.raises(ValueError, match="predate the maintained protocol"):
+        plot._read_result_bundle(directory)
+
+
+def test_there_is_no_fallback_to_the_retired_row_filename(tmp_path):
+    """A maintained bundle without ples_paired_rows.csv is broken, not old."""
+    directory = tmp_path / "nofile"
+    directory.mkdir(parents=True)
+    (directory / "ples_effects_summary.json").write_text(json.dumps({
+        "schema_version": 3, "model": "ALFNet", "seed": 32,
+        "dataset": {"name": "METRLA"},
+    }), encoding="utf-8")
+    (directory / "paired_event_rows.csv").write_text("anything\n", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="ples_paired_rows.csv"):
+        plot._read_result_bundle(directory)
+
+
+# --- rows must belong to their bundle and describe one design ---------------
+
+
+def _summary(model="ALFNet", dataset="METRLA"):
+    return {"model": model, "dataset": {"name": dataset}}
+
+
+def test_a_row_model_that_contradicts_the_summary_is_refused():
+    ours = _flat_rows(model="SomethingElse")
+    baseline = _flat_rows(model="MoGERNN")
+    with pytest.raises(ValueError, match="row model"):
+        plot.assert_rows_match_bundles(ours, _summary("ALFNet"),
+                                       baseline, _summary("MoGERNN"))
+
+
+def test_a_row_dataset_that_contradicts_the_summary_is_refused():
+    ours = _flat_rows()
+    for row in ours:
+        row["dataset"] = "PEMSBAY"
+    baseline = _flat_rows(model="MoGERNN")
+    with pytest.raises(ValueError, match="row dataset"):
+        plot.assert_rows_match_bundles(ours, _summary("ALFNet"),
+                                       baseline, _summary("MoGERNN"))
+
+
+def test_a_missing_paired_row_is_refused():
+    ours = _flat_rows()
+    baseline = _flat_rows(model="MoGERNN")[:-1]
+    with pytest.raises(ValueError, match="same paired cells"):
+        plot.assert_rows_match_bundles(ours, _summary("ALFNet"),
+                                       baseline, _summary("MoGERNN"))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("event_timestamp", "2099-01-01 00:00:00"),
+    ("regime", "Weekend/Midday"),
+    ("cohort_style", "scattered"),
+    ("node_count", 99),
+    ("count", 77),
+])
+def test_a_protocol_field_that_differs_between_models_is_refused(field, value):
+    ours = _flat_rows()
+    baseline = _flat_rows(model="MoGERNN")
+    baseline[0][field] = value
+    with pytest.raises(ValueError, match=field):
+        plot.assert_rows_match_bundles(ours, _summary("ALFNet"),
+                                       baseline, _summary("MoGERNN"))
+
+
+def test_a_duplicate_pair_key_is_refused():
+    ours = _flat_rows()
+    ours.append(dict(ours[0]))
+    baseline = _flat_rows(model="MoGERNN")
+    with pytest.raises(ValueError, match="duplicate paired row"):
+        plot.assert_rows_match_bundles(ours, _summary("ALFNet"),
+                                       baseline, _summary("MoGERNN"))
+
+
+def test_a_matched_pair_of_row_files_is_accepted():
+    plot.assert_rows_match_bundles(_flat_rows(), _summary("ALFNet"),
+                                   _flat_rows(model="MoGERNN"), _summary("MoGERNN"))

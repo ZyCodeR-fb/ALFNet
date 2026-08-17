@@ -31,6 +31,7 @@ from scripts.multiseed_paired_inference import (  # noqa: E402
     combined_status,
     margin_for,
 )
+from scripts.paired_model_bootstrap import read_rows as strict_read_rows  # noqa: E402
 from scripts.multiseed_paired_inference import _arm_status as _multiseed_arm_status  # noqa: E402
 from scripts.multiseed_paired_inference import (  # noqa: E402
     _interval_status as _multiseed_interval_status,
@@ -77,25 +78,16 @@ def _read_summary(value):
         return json.load(handle), path
 
 
-def _read_rows(summary_path, filename="paired_event_rows.csv"):
-    path = summary_path.parent / filename
-    rows = []
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        for raw in csv.DictReader(handle):
-            row = dict(raw)
-            for key in ("origin_id", "cohort_id", "tau", "count"):
-                if row.get(key) not in {None, ""}:
-                    row[key] = int(row[key])
-            for key in SUM_FIELDS:
-                if row.get(key) not in {None, ""}:
-                    row[key] = float(row[key])
-            rows.append(row)
-    if not rows:
-        raise ValueError(f"PLES paired rows are empty: {path}")
-    return rows
-
-
 def _read_result_bundle(value):
+    """Read a bundle's summary, then its rows through the strict loader.
+
+    The schema version is resolved *before* any row is parsed. A retired bundle
+    is refused here rather than being fed to the maintained loader, which would
+    report a confusing column error instead of "this export predates the
+    protocol". There is deliberately no fallback to the retired
+    ``paired_event_rows.csv``: a maintained bundle that lacks
+    ``ples_paired_rows.csv`` is broken, not old.
+    """
     path = Path(value)
     if path.is_dir():
         v2_path = path / "ples_effects_summary.json"
@@ -111,10 +103,77 @@ def _read_result_bundle(value):
     with summary_path.open("r", encoding="utf-8") as handle:
         summary = json.load(handle)
     version = int(summary.get("schema_version", version))
-    # v2 and v3 both write ples_paired_rows.csv; only the original v1 export
-    # used the older filename.
-    rows_filename = "paired_event_rows.csv" if version < 2 else "ples_paired_rows.csv"
-    return summary, summary_path, _read_rows(summary_path, rows_filename), version
+    if version < PLES_PROTOCOL_VERSION:
+        raise ValueError(
+            f"PLES schema v{version} predictions predate the maintained protocol "
+            f"(v{PLES_PROTOCOL_VERSION}); re-run inference instead of replotting them"
+        )
+    # One loader for both analysis entry points. This file used to carry its own
+    # permissive parser, which skipped the closed-header, finite/non-negative and
+    # track/phase checks entirely -- so a corrupted row reached the statistics.
+    rows, rows_path = strict_read_rows(summary_path.parent)
+    return summary, summary_path, rows, version, rows_path
+
+
+# Fields the frozen protocol fixes. They are model independent, so a difference
+# between the two sides means the rows did not come from one evaluation design.
+PAIRED_PROTOCOL_FIELDS = (
+    "dataset", "origin_id", "calendar_day", "regime", "event_time_index",
+    "event_timestamp", "cohort_id", "cohort_fraction", "cohort_style",
+    "track", "tau", "phase", "node_count", "count",
+)
+
+
+def assert_rows_match_bundles(ours_rows, ours_summary, baseline_rows, baseline_summary):
+    """The rows must be the runs their summaries claim, and one shared design.
+
+    A strict parser proves each row is well formed. It cannot prove the file
+    belongs to this bundle, nor that the two sides describe the same events --
+    only the error sums and the model label may differ between them.
+    """
+    def _identity(rows, summary, side):
+        model = summary.get("model")
+        dataset = (summary.get("dataset") or {}).get("name")
+        for row in rows:
+            if row["model"] != model:
+                raise ValueError(
+                    f"{side}: row model {row['model']!r} != summary model {model!r} "
+                    f"[origin_id={row['origin_id']} cohort_id={row['cohort_id']} "
+                    f"track={row['track']} tau={row['tau']}]")
+            if row["dataset"] != dataset:
+                raise ValueError(
+                    f"{side}: row dataset {row['dataset']!r} != summary dataset "
+                    f"{dataset!r} [origin_id={row['origin_id']}]")
+
+    _identity(ours_rows, ours_summary, "ours")
+    _identity(baseline_rows, baseline_summary, "baseline")
+
+    def _indexed(rows, side):
+        indexed = {}
+        for row in rows:
+            key = (row["origin_id"], row["cohort_id"], row["track"], row["tau"])
+            if key in indexed:
+                raise ValueError(f"{side}: duplicate paired row {key}")
+            indexed[key] = row
+        return indexed
+
+    ours_index = _indexed(ours_rows, "ours")
+    baseline_index = _indexed(baseline_rows, "baseline")
+    if set(ours_index) != set(baseline_index):
+        missing = sorted(set(ours_index) - set(baseline_index))[:5]
+        extra = sorted(set(baseline_index) - set(ours_index))[:5]
+        raise ValueError(
+            f"the two row files do not describe the same paired cells; "
+            f"only in ours {missing}, only in baseline {extra}")
+
+    for key, ours_row in ours_index.items():
+        baseline_row = baseline_index[key]
+        for field in PAIRED_PROTOCOL_FIELDS:
+            if ours_row[field] != baseline_row[field]:
+                raise ValueError(
+                    f"paired cell {key}: {field} differs between the two models "
+                    f"({ours_row[field]!r} vs {baseline_row[field]!r}); the "
+                    "protocol fixes this field, so the rows are not one design")
 
 
 def assert_comparable_bundles(ours, baseline):
@@ -1025,8 +1084,10 @@ def main():
         parser.error(f"--bootstrap-samples must be at least {MIN_BOOTSTRAP_SAMPLES} "
                      f"to report a 95% interval; got {args.bootstrap_samples}")
 
-    ours_summary, ours_path, ours_rows, ours_version = _read_result_bundle(args.ours)
-    baseline_summary, baseline_path, baseline_rows, baseline_version = _read_result_bundle(args.baseline)
+    ours_summary, ours_path, ours_rows, ours_version, ours_rows_path = \
+        _read_result_bundle(args.ours)
+    baseline_summary, baseline_path, baseline_rows, baseline_version, baseline_rows_path = \
+        _read_result_bundle(args.baseline)
     if ours_version != baseline_version:
         raise ValueError("PLES comparison requires both models to use the same protocol version")
     if ours_summary["protocol_hash"] != baseline_summary["protocol_hash"]:
@@ -1047,6 +1108,9 @@ def main():
     verify_role(ours_summary, "ours", manifest)
     verify_role(baseline_summary, "baseline", manifest)
     assert_shared_design(ours_summary, baseline_summary)
+    # A strict parser proves each row is well formed; it cannot prove the file
+    # belongs to this bundle or that both sides describe the same events.
+    assert_rows_match_bundles(ours_rows, ours_summary, baseline_rows, baseline_summary)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
