@@ -516,6 +516,94 @@ DELTA_SOURCES = {
 # can recover the effect and its orientation.
 EFFECT_OF_ADVANTAGE = {value: key for key, value in ADVANTAGE_NAME.items()}
 
+# The endpoint inventory is derived from the frozen effect and metric
+# definitions, never from whatever the run happened to produce. Taking
+# "expected" from the observed keys makes the completeness check vacuous: a
+# dropped endpoint agrees with itself.
+EXPECTED_METRICS = ("MAPE", "MAE")
+EXPECTED_ENDPOINTS = tuple(
+    f"{ADVANTAGE_NAME[effect]}/{metric}"
+    for effect in EFFECT_DEFINITION
+    for metric in EXPECTED_METRICS
+)
+# Every point field the current statistics consume.
+EXPECTED_POINT_FIELDS = RAW_FIELDS + ("advantage", "treated_delta", "control_delta")
+
+
+def _fail_inventory(message):
+    raise NonFiniteValue(f"PLES inventory: {message}")
+
+
+def assert_point_inventory(point):
+    """Exact endpoint and field sets on one ``_advantages_v2`` result.
+
+    Checked before the resampling loop as well as inside the record builder: the
+    loop calls ``_advantages_v2`` once per replicate and indexes its fields
+    directly, so a missing field would otherwise surface as a bare ``KeyError``
+    from deep inside the sampler rather than as a named inventory failure.
+    """
+    expected_endpoints = set(EXPECTED_ENDPOINTS)
+    found = set(point)
+    if found != expected_endpoints:
+        _fail_inventory(f"point endpoints missing {sorted(expected_endpoints - found)}, "
+                        f"extra {sorted(found - expected_endpoints)}")
+
+    expected_fields = set(EXPECTED_POINT_FIELDS)
+    for name in EXPECTED_ENDPOINTS:
+        fields = set(point[name])
+        # n_evaluable_cells is carried for reporting and is not a statistic.
+        fields.discard("n_evaluable_cells")
+        if fields != expected_fields:
+            _fail_inventory(
+                f"{name}: point fields missing {sorted(expected_fields - fields)}, "
+                f"extra {sorted(fields - expected_fields)}")
+
+
+def _assert_inventory(point, draws, resampled_fields):
+    """Exact endpoint and field sets, before any percentile or classification."""
+    def _fail(message):
+        _fail_inventory(message)
+
+    assert_point_inventory(point)
+    expected_fields = set(EXPECTED_POINT_FIELDS)
+
+    if set(resampled_fields) != set(EXPECTED_POINT_FIELDS):
+        _fail(f"resampled fields {sorted(set(resampled_fields))} != expected "
+              f"{sorted(expected_fields)}")
+
+    expected_draws = {(name, field)
+                      for name in EXPECTED_ENDPOINTS for field in resampled_fields}
+    found_draws = set(draws)
+    if found_draws != expected_draws:
+        _fail(f"draws missing {sorted(expected_draws - found_draws)[:5]}, "
+              f"extra {sorted(found_draws - expected_draws)[:5]}")
+
+
+def _derived_points(entry, higher_is_better, label):
+    """Comparison points, derived from the raw model points rather than trusted.
+
+    The draw level already derives its deltas by subtraction, but the point
+    level took ``treated_delta``/``control_delta``/``advantage`` on faith. That
+    is not fail-closed: shifting both arm deltas by the same amount leaves
+    ``treated - control`` unchanged, so the comparison algebra residual stays
+    zero while neither point is the raw model difference any more.
+    """
+    derived = {
+        "contrast_delta": entry["ours_effect"] - entry["baseline_effect"],
+        "treated_delta": entry["ours_treated"] - entry["baseline_treated"],
+        "control_delta": entry["ours_control"] - entry["baseline_control"],
+    }
+    derived["advantage"] = (derived["contrast_delta"] if higher_is_better
+                            else -derived["contrast_delta"])
+    for field in ("treated_delta", "control_delta", "advantage"):
+        drift = abs(entry[field] - derived[field])
+        if not np.isfinite(drift) or drift > ALGEBRA_TOLERANCE:
+            raise NonFiniteValue(
+                f"{label}/{field}: reported point {entry[field]!r} is not the raw "
+                f"model difference {derived[field]!r} (drift {drift:.3e} > "
+                f"{ALGEBRA_TOLERANCE:g})")
+    return derived
+
 
 # Contrast margins and arm margins are separate settings with separate defaults.
 # They share units, which is exactly why one silently became the other before.
@@ -568,6 +656,9 @@ def bootstrap_advantages_v2(ours_rows, baseline_rows, input_len, samples=2000, s
     ours_rows = main_cohort_rows(ours_rows, main_cohort_ids)
     baseline_rows = main_cohort_rows(baseline_rows, main_cohort_ids)
     point = _advantages_v2(ours_rows, baseline_rows, input_len)
+    # Before the loop: the sampler indexes these fields directly, so a missing
+    # one must be named here rather than escaping as a KeyError from inside it.
+    assert_point_inventory(point)
     # Interval on the contrast and on both arms: a Pareto verdict read off point
     # estimates alone cannot tell "the control arm degraded" from "the control
     # arm moved by less than the noise".
@@ -703,12 +794,14 @@ def _build_ples_records(point, draws, resampled_fields, input_len,
     gameable -- degrading the control arm improves it -- so a consumer must not
     be able to read one without the arms that qualify it.
     """
+    _assert_inventory(point, draws, resampled_fields)
     records = []
-    for name in sorted(point):
+    for name in EXPECTED_ENDPOINTS:
         entry = point[name]
         advantage_name, metric = name.rsplit("/", 1)
         effect = EFFECT_OF_ADVANTAGE[advantage_name]
         higher_is_better = HIGHER_IS_BETTER[effect]
+        derived_point = _derived_points(entry, higher_is_better, name)
 
         column = {field: _checked_draws(draws[(name, field)], f"{name}/{field}")
                   for field in resampled_fields}
@@ -734,7 +827,7 @@ def _build_ples_records(point, draws, resampled_fields, input_len,
                 f"{name}/advantage: the oriented advantage is not the signed "
                 f"contrast delta (worst {drift:.3e})")
 
-        contrast_delta_point = entry["ours_effect"] - entry["baseline_effect"]
+        contrast_delta_point = derived_point["contrast_delta"]
         models = {}
         for label, prefix in (("ALFNet", "ours"), ("MoGERNN", "baseline")):
             models[label] = {
@@ -756,17 +849,17 @@ def _build_ples_records(point, draws, resampled_fields, input_len,
         comparison = {
             "contrast_delta": _series(contrast_delta_point, derived["contrast_delta"],
                                       f"{name} contrast delta"),
-            "treated_delta": _series(entry["treated_delta"], derived["treated_delta"],
+            "treated_delta": _series(derived_point["treated_delta"], derived["treated_delta"],
                                      f"{name} treated delta"),
-            "control_delta": _series(entry["control_delta"], derived["control_delta"],
+            "control_delta": _series(derived_point["control_delta"], derived["control_delta"],
                                      f"{name} control delta"),
-            "contrast_oriented_advantage": _series(entry["advantage"], oriented,
+            "contrast_oriented_advantage": _series(derived_point["advantage"], oriented,
                                                    f"{name} oriented advantage"),
         }
         comparison_algebra = _algebra(
             effect, contrast_delta_point, derived["contrast_delta"],
-            entry["treated_delta"], derived["treated_delta"],
-            entry["control_delta"], derived["control_delta"],
+            derived_point["treated_delta"], derived["treated_delta"],
+            derived_point["control_delta"], derived["control_delta"],
             f"{name} comparison")
 
         arm_margin = _margin_for_endpoint(name, arm_margins)
@@ -775,13 +868,14 @@ def _build_ples_records(point, draws, resampled_fields, input_len,
         # contrast threshold silently became the arm threshold.
         advantage_interval = comparison["contrast_oriented_advantage"][
             "nominal_95_percentile_interval"]
-        treated = arm_status(entry["treated_delta"],
+        treated = arm_status(derived_point["treated_delta"],
                              comparison["treated_delta"]["nominal_95_percentile_interval"],
                              arm_margin)
-        control = arm_status(entry["control_delta"],
+        control = arm_status(derived_point["control_delta"],
                              comparison["control_delta"]["nominal_95_percentile_interval"],
                              arm_margin)
-        contrast = contrast_status(entry["advantage"], advantage_interval, contrast_margin)
+        contrast = contrast_status(derived_point["advantage"], advantage_interval,
+                                   contrast_margin)
 
         records.append({
             "effect": effect,
@@ -982,7 +1076,9 @@ def main():
             contrast_margins=contrast_margins,
         )
         summary = {
-            "schema_version": 5,
+            # 6: the flat `advantages` mapping was replaced by canonical
+            # `ples_records`. Incompatible, so the version moves with it.
+            "schema_version": 6,
             "protocol": "PLES v3 paired model comparison",
             "post_hoc_diagnostic_only": True,
             "inferential_status": "descriptive_not_formal",

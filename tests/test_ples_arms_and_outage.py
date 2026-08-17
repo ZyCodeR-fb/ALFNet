@@ -523,7 +523,7 @@ def _single_seed_main(tmp_path, monkeypatch, samples=1000):
 def test_single_seed_main_writes_the_current_schema(tmp_path, monkeypatch):
     payload = _single_seed_main(tmp_path, monkeypatch)
 
-    assert payload["schema_version"] == 5
+    assert payload["schema_version"] == 6
     assert payload["post_hoc_diagnostic_only"] is True
     assert payload["inferential_status"] == "descriptive_not_formal"
     assert payload["conditional_on_one_trained_seed"] is True
@@ -703,7 +703,8 @@ def test_a_delta_that_is_not_the_raw_difference_fails_closed(monkeypatch):
         return out
 
     monkeypatch.setattr(plot, "_advantages_v2", _corrupt)
-    with pytest.raises(plot.NonFiniteValue, match="not ALFNet minus"):
+    # Caught at the point-derivation guard, which runs before the draw check.
+    with pytest.raises(plot.NonFiniteValue, match="not the raw model difference"):
         _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
 
 
@@ -734,3 +735,142 @@ def test_outage_still_reads_only_the_settled_tau():
     penalty = _find(records, "FaultPenalty", "MAE")
     assert outage["models"]["ALFNet"]["treated_absolute_error"]["point"] != \
         pytest.approx(penalty["models"]["ALFNet"]["treated_absolute_error"]["point"])
+
+
+# --- exact inventory and point-level derivation (H2) -------------------------
+
+
+def _corrupting(mutate):
+    """Wrap _advantages_v2 so a test can perturb its output in place."""
+    real = plot._advantages_v2
+
+    def _wrapped(*args, **kwargs):
+        out = real(*args, **kwargs)
+        mutate(out)
+        return out
+
+    return _wrapped
+
+
+def test_the_expected_inventory_is_six_endpoints_from_the_frozen_definitions():
+    assert len(plot.EXPECTED_ENDPOINTS) == 6
+    assert set(plot.EXPECTED_ENDPOINTS) == {
+        f"{plot.ADVANTAGE_NAME[effect]}/{metric}"
+        for effect in ("JoinLift", "FaultPenalty", "OutageFaultPenalty")
+        for metric in ("MAE", "MAPE")}
+    assert set(plot.EXPECTED_POINT_FIELDS) == {
+        "ours_effect", "baseline_effect", "ours_treated", "baseline_treated",
+        "ours_control", "baseline_control", "advantage", "treated_delta",
+        "control_delta"}
+
+
+def test_records_are_always_exactly_six_without_duplicates():
+    records = _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+    keys = [(r["effect"], r["metric"]) for r in records]
+    assert len(records) == 6
+    assert len(set(keys)) == 6
+
+
+def test_a_missing_point_endpoint_fails_closed(monkeypatch):
+    def _drop(out):
+        out.pop("JoinLiftGain/MAE")
+
+    monkeypatch.setattr(plot, "_advantages_v2", _corrupting(_drop))
+    with pytest.raises(plot.NonFiniteValue, match="point endpoints missing"):
+        _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+
+
+def test_an_unknown_point_endpoint_fails_closed(monkeypatch):
+    def _add(out):
+        out["InventedGain/MAE"] = dict(out["JoinLiftGain/MAE"])
+
+    monkeypatch.setattr(plot, "_advantages_v2", _corrupting(_add))
+    with pytest.raises(plot.NonFiniteValue, match="extra"):
+        _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+
+
+def test_a_missing_point_field_fails_closed(monkeypatch):
+    def _drop_field(out):
+        out["JoinLiftGain/MAE"].pop("ours_treated")
+
+    monkeypatch.setattr(plot, "_advantages_v2", _corrupting(_drop_field))
+    with pytest.raises(plot.NonFiniteValue, match="point fields missing"):
+        _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+
+
+def test_an_unknown_point_field_fails_closed(monkeypatch):
+    def _add_field(out):
+        out["JoinLiftGain/MAE"]["smuggled_statistic"] = 1.0
+
+    monkeypatch.setattr(plot, "_advantages_v2", _corrupting(_add_field))
+    with pytest.raises(plot.NonFiniteValue, match="point fields"):
+        _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+
+
+def test_a_missing_draw_field_fails_closed():
+    from scripts import plot_counterfactual_shockwave as module
+
+    point = {name: {field: 1.0 for field in module.EXPECTED_POINT_FIELDS}
+             for name in module.EXPECTED_ENDPOINTS}
+    draws = {(name, field): np.ones(10)
+             for name in module.EXPECTED_ENDPOINTS
+             for field in module.EXPECTED_POINT_FIELDS}
+    draws.pop((module.EXPECTED_ENDPOINTS[0], "ours_effect"))
+    with pytest.raises(module.NonFiniteValue, match="draws missing"):
+        module._build_ples_records(point, draws, module.EXPECTED_POINT_FIELDS,
+                                   INPUT_LEN, {"MAE": 0.05, "MAPE": 0.25, "RMSE": None},
+                                   {"MAE": 0.05, "MAPE": 0.25, "RMSE": None})
+
+
+def test_an_extra_draw_field_fails_closed():
+    from scripts import plot_counterfactual_shockwave as module
+
+    point = {name: {field: 1.0 for field in module.EXPECTED_POINT_FIELDS}
+             for name in module.EXPECTED_ENDPOINTS}
+    draws = {(name, field): np.ones(10)
+             for name in module.EXPECTED_ENDPOINTS
+             for field in module.EXPECTED_POINT_FIELDS}
+    draws[(module.EXPECTED_ENDPOINTS[0], "smuggled")] = np.ones(10)
+    with pytest.raises(module.NonFiniteValue, match="draws missing|extra"):
+        module._build_ples_records(point, draws, module.EXPECTED_POINT_FIELDS,
+                                   INPUT_LEN, {"MAE": 0.05, "MAPE": 0.25, "RMSE": None},
+                                   {"MAE": 0.05, "MAPE": 0.25, "RMSE": None})
+
+
+def test_a_shifted_point_delta_fails_closed_even_when_algebra_cancels(monkeypatch):
+    """The case the comparison algebra alone cannot see.
+
+    Shifting treated_delta and control_delta by the same amount leaves
+    ``treated - control`` unchanged, so the comparison residual stays zero --
+    but neither point is the raw model difference any more.
+    """
+    def _shift_both(out):
+        for entry in out.values():
+            entry["treated_delta"] += 1.0
+            entry["control_delta"] += 1.0
+
+    monkeypatch.setattr(plot, "_advantages_v2", _corrupting(_shift_both))
+    with pytest.raises(plot.NonFiniteValue, match="not the raw model difference"):
+        _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+
+
+def test_a_corrupted_oriented_advantage_point_fails_closed(monkeypatch):
+    def _shift(out):
+        for entry in out.values():
+            entry["advantage"] += 1.0
+
+    monkeypatch.setattr(plot, "_advantages_v2", _corrupting(_shift))
+    with pytest.raises(plot.NonFiniteValue, match="advantage.*not the raw model"):
+        _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+
+
+def test_the_oriented_point_follows_the_frozen_orientation():
+    records = _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+    for record in records:
+        ours = record["models"]["ALFNet"]["contrast"]["point"]
+        baseline = record["models"]["MoGERNN"]["contrast"]["point"]
+        oriented = record["comparison"]["contrast_oriented_advantage"]["point"]
+        if record["effect"] == "JoinLift":
+            assert oriented == pytest.approx(ours - baseline)
+        else:
+            assert oriented == pytest.approx(-(ours - baseline))
