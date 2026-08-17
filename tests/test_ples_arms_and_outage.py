@@ -175,6 +175,11 @@ def _ci(low, high):
     return {"low": low, "high": high}
 
 
+def _find(records, effect, metric):
+    """bootstrap_advantages_v2 now returns a list of canonical records."""
+    return next(r for r in records if r["effect"] == effect and r["metric"] == metric)
+
+
 def test_arm_status_uses_the_interval_not_the_point_estimate():
     """A clearly negative point estimate whose interval spans zero is uncertain."""
     assert plot.arm_status(-0.9, _ci(-2.0, +0.5), 0.05) == "uncertain"
@@ -315,9 +320,9 @@ def test_control_only_degradation_is_rejected_by_the_full_pipeline():
         ours, baseline, INPUT_LEN, samples=1000, seed=11, trajectory_span=8,
         arm_margins={"MAE": 0.01, "MAPE": 0.05, "RMSE": None},
         contrast_margins={"MAE": 0.01, "MAPE": 0.05, "RMSE": None})
-    join = result["JoinLiftGain/MAPE"]
+    join = _find(result, "JoinLift", "MAPE")
 
-    assert join["advantage"] > 0, "fixture must look like a win on the contrast"
+    assert join["comparison"]["contrast_oriented_advantage"]["point"] > 0
     assert join["contrast_status"] == "favourable"
     assert join["treated_status"] == "equivalent", join["treated_status"]
     assert join["control_status"] == "degrade", join["control_status"]
@@ -354,7 +359,7 @@ def test_both_arms_improve_but_contrast_degrades_is_not_all_conditions_met():
         ours, baseline, INPUT_LEN, samples=1000, seed=5, trajectory_span=8,
         arm_margins={"MAE": 0.01, "MAPE": 0.05, "RMSE": None},
         contrast_margins={"MAE": 0.01, "MAPE": 0.05, "RMSE": None})
-    join = result["JoinLiftGain/MAPE"]
+    join = _find(result, "JoinLift", "MAPE")
 
     assert join["treated_status"] == "improve"
     assert join["control_status"] == "improve"
@@ -371,12 +376,12 @@ def test_contrast_and_arm_margins_move_independently():
     tight = {"MAE": 0.001, "MAPE": 0.005, "RMSE": None}
     wide = {"MAE": 1000.0, "MAPE": 1000.0, "RMSE": None}
 
-    wide_contrast = plot.bootstrap_advantages_v2(
+    wide_contrast = _find(plot.bootstrap_advantages_v2(
         ours, baseline, INPUT_LEN, samples=1000, seed=7, trajectory_span=8,
-        arm_margins=tight, contrast_margins=wide)["JoinLiftGain/MAPE"]
-    wide_arm = plot.bootstrap_advantages_v2(
+        arm_margins=tight, contrast_margins=wide), "JoinLift", "MAPE")
+    wide_arm = _find(plot.bootstrap_advantages_v2(
         ours, baseline, INPUT_LEN, samples=1000, seed=7, trajectory_span=8,
-        arm_margins=wide, contrast_margins=tight)["JoinLiftGain/MAPE"]
+        arm_margins=wide, contrast_margins=tight), "JoinLift", "MAPE")
 
     # a wide contrast margin only flattens the contrast verdict
     assert wide_contrast["contrast_status"] == "equivalent"
@@ -529,17 +534,31 @@ def test_single_seed_main_writes_the_current_schema(tmp_path, monkeypatch):
     assert payload["post_hoc_contrast_margins"]["MAE"] == 0.05
     assert payload["post_hoc_arm_margins"]["MAE"] == 0.05
 
-    for entry in payload["advantages"].values():
+    assert "advantages" not in payload, "the old flat structure must be gone"
+    records = payload["ples_records"]
+    assert len(records) == 6
+    assert {(r["effect"], r["metric"]) for r in records} == {
+        (e, m) for e in ("JoinLift", "FaultPenalty", "OutageFaultPenalty")
+        for m in ("MAE", "MAPE")}
+    for entry in records:
         for field in ("contrast_status", "treated_status", "control_status",
                       "arms_pareto_status", "combined_descriptive_status"):
             assert field in entry, field
         assert "pareto" not in entry
+        for model in ("ALFNet", "MoGERNN"):
+            for quantity in ("contrast", "treated_absolute_error",
+                             "control_absolute_error"):
+                block = entry["models"][model][quantity]
+                assert "point" in block
+                assert set(block["nominal_95_percentile_interval"]) == {"low", "high"}
+            assert "algebra_identity" in entry["models"][model]
+        assert "comparison_algebra_identity" in entry
 
 
 def test_single_seed_main_emits_no_confirmatory_wording(tmp_path, monkeypatch):
     payload = _single_seed_main(tmp_path, monkeypatch)
     statuses = []
-    for entry in payload["advantages"].values():
+    for entry in payload["ples_records"]:
         statuses += [entry["contrast_status"], entry["treated_status"],
                      entry["control_status"], entry["arms_pareto_status"],
                      entry["combined_descriptive_status"]]
@@ -562,3 +581,156 @@ def test_single_seed_main_output_has_no_non_finite_constant(tmp_path, monkeypatc
 def test_single_seed_cli_refuses_too_few_samples(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         _single_seed_main(tmp_path, monkeypatch, samples=999)
+
+
+# --- raw model draws, same replicate, three-layer algebra --------------------
+
+
+def _bootstrap(ours, baseline, samples=1000, seed=13, **kw):
+    return plot.bootstrap_advantages_v2(
+        ours, baseline, INPUT_LEN, samples=samples, seed=seed,
+        trajectory_span=8, **kw)
+
+
+def _varied(join_treated, control, fault_scale=1.0):
+    """Two origins with different values so draws actually vary."""
+    rows = []
+    for origin, bump in ((1, 0.0), (2, 0.7)):
+        for tau in range(INPUT_LEN):
+            rows.append(_row("join", tau, 1, join_treated + bump, control + bump,
+                             origin=origin))
+            rows.append(_row("fault", tau, 1, fault_scale + bump, control + bump,
+                             origin=origin))
+    return rows
+
+
+def test_every_record_carries_both_models_raw_contrast_and_arms():
+    records = _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+    assert len(records) == 6
+    for record in records:
+        for model in ("ALFNet", "MoGERNN"):
+            block = record["models"][model]
+            for quantity in ("contrast", "treated_absolute_error",
+                             "control_absolute_error"):
+                assert "point" in block[quantity]
+                interval = block[quantity]["nominal_95_percentile_interval"]
+                assert interval["low"] <= interval["high"]
+        for quantity in ("contrast_delta", "treated_delta", "control_delta",
+                         "contrast_oriented_advantage"):
+            assert "point" in record["comparison"][quantity]
+
+
+def test_the_oriented_advantage_follows_the_endpoint_orientation():
+    records = _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+    for record in records:
+        delta = record["comparison"]["contrast_delta"]["point"]
+        oriented = record["comparison"]["contrast_oriented_advantage"]["point"]
+        if record["effect"] == "JoinLift":
+            assert oriented == pytest.approx(delta)
+        else:
+            assert oriented == pytest.approx(-delta)
+
+
+def test_the_contrast_delta_point_is_the_raw_model_difference():
+    records = _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+    for record in records:
+        ours = record["models"]["ALFNet"]["contrast"]["point"]
+        baseline = record["models"]["MoGERNN"]["contrast"]["point"]
+        assert record["comparison"]["contrast_delta"]["point"] == \
+            pytest.approx(ours - baseline)
+        for arm, quantity in (("treated_delta", "treated_absolute_error"),
+                              ("control_delta", "control_absolute_error")):
+            assert record["comparison"][arm]["point"] == pytest.approx(
+                record["models"]["ALFNet"][quantity]["point"]
+                - record["models"]["MoGERNN"][quantity]["point"])
+
+
+def test_all_three_algebra_identities_are_reported_and_within_tolerance():
+    records = _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.2))
+    for record in records:
+        expected = ("contrast = control - treated"
+                    if record["effect"] == "JoinLift" else "contrast = treated - control")
+        checks = [record["comparison_algebra_identity"],
+                  record["models"]["ALFNet"]["algebra_identity"],
+                  record["models"]["MoGERNN"]["algebra_identity"]]
+        for algebra in checks:
+            assert algebra["formula"] == expected
+            assert abs(algebra["point_residual"]) <= algebra["tolerance"]
+            assert algebra["max_abs_per_draw_residual"] <= algebra["tolerance"]
+
+
+def test_a_broken_raw_model_identity_fails_closed(monkeypatch):
+    """Both models corrupted identically: the comparison residual stays zero.
+
+    Only the per-model identities can see this, which is why the comparison
+    check alone is insufficient.
+    """
+    real = plot._advantages_v2
+
+    def _corrupt(*args, **kwargs):
+        out = real(*args, **kwargs)
+        for entry in out.values():
+            entry["ours_effect"] += 1.0
+            entry["baseline_effect"] += 1.0
+        return out
+
+    monkeypatch.setattr(plot, "_advantages_v2", _corrupt)
+    with pytest.raises(plot.NonFiniteValue, match="not the signed difference"):
+        _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+
+
+def test_a_single_model_corruption_fails_closed(monkeypatch):
+    real = plot._advantages_v2
+
+    def _corrupt(*args, **kwargs):
+        out = real(*args, **kwargs)
+        for entry in out.values():
+            entry["ours_effect"] += 1.0
+        return out
+
+    monkeypatch.setattr(plot, "_advantages_v2", _corrupt)
+    with pytest.raises(plot.NonFiniteValue):
+        _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+
+
+def test_a_delta_that_is_not_the_raw_difference_fails_closed(monkeypatch):
+    real = plot._advantages_v2
+
+    def _corrupt(*args, **kwargs):
+        out = real(*args, **kwargs)
+        for entry in out.values():
+            entry["treated_delta"] += 1.0
+        return out
+
+    monkeypatch.setattr(plot, "_advantages_v2", _corrupt)
+    with pytest.raises(plot.NonFiniteValue, match="not ALFNet minus"):
+        _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_a_non_finite_raw_draw_fails_closed(bad, monkeypatch):
+    real = plot._advantages_v2
+    state = {"n": 0}
+
+    def _poison(*args, **kwargs):
+        out = real(*args, **kwargs)
+        state["n"] += 1
+        if state["n"] == 4:
+            for entry in out.values():
+                entry["ours_treated"] = bad
+        return out
+
+    monkeypatch.setattr(plot, "_advantages_v2", _poison)
+    with pytest.raises(plot.NonFiniteValue):
+        _bootstrap(_varied(0.5, 1.0), _varied(1.0, 1.0))
+
+
+def test_outage_still_reads_only_the_settled_tau():
+    """treated rises with tau, so Outage must not equal the Decay-wide mean."""
+    ours = _rows({0: 1.0, 1: 2.0, 2: 3.0, 3: 9.0}, control=1.0)
+    baseline = _rows({0: 1.0, 1: 2.0, 2: 3.0, 3: 4.0}, control=1.0)
+    records = _bootstrap(ours, baseline)
+    outage = _find(records, "OutageFaultPenalty", "MAE")
+    penalty = _find(records, "FaultPenalty", "MAE")
+    assert outage["models"]["ALFNet"]["treated_absolute_error"]["point"] != \
+        pytest.approx(penalty["models"]["ALFNet"]["treated_absolute_error"]["point"])

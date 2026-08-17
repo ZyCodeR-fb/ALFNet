@@ -22,6 +22,9 @@ from scripts.analysis_identity import (  # noqa: E402
 # clearly worsened" still came back as a clean win. Parity tests pin the two
 # together.
 from scripts.multiseed_paired_inference import (  # noqa: E402
+    ALGEBRA_TOLERANCE,
+    CONTRAST_SIGN,
+    EFFECT_DEFINITION,
     MIN_BOOTSTRAP_SAMPLES,
     NonFiniteValue,
     arms_pareto_status,
@@ -497,6 +500,23 @@ def cells_for(curves, input_len, name):
     return paired_effect_cells(curves, input_len)[name]
 
 
+# The six per-model quantities behind every endpoint. They are resampled on the
+# same replicate as the comparison so that a raw interval is never produced by a
+# second, independent bootstrap.
+RAW_FIELDS = ("ours_effect", "baseline_effect",
+              "ours_treated", "baseline_treated",
+              "ours_control", "baseline_control")
+# Which raw pair each comparison quantity is the difference of.
+DELTA_SOURCES = {
+    "contrast_delta": ("ours_effect", "baseline_effect"),
+    "treated_delta": ("ours_treated", "baseline_treated"),
+    "control_delta": ("ours_control", "baseline_control"),
+}
+# ADVANTAGE_NAME maps a PLES effect to its reported name; invert it so a record
+# can recover the effect and its orientation.
+EFFECT_OF_ADVANTAGE = {value: key for key, value in ADVANTAGE_NAME.items()}
+
+
 # Contrast margins and arm margins are separate settings with separate defaults.
 # They share units, which is exactly why one silently became the other before.
 # Both are v3 post-hoc reporting aids, never acceptance thresholds.
@@ -551,7 +571,9 @@ def bootstrap_advantages_v2(ours_rows, baseline_rows, input_len, samples=2000, s
     # Interval on the contrast and on both arms: a Pareto verdict read off point
     # estimates alone cannot tell "the control arm degraded" from "the control
     # arm moved by less than the noise".
-    resampled_fields = ("advantage", "treated_delta", "control_delta")
+    # Every raw model quantity is resampled on the same replicate as the
+    # comparison, so a raw interval never comes from a second bootstrap.
+    resampled_fields = RAW_FIELDS + ("advantage", "treated_delta", "control_delta")
     arm_margins = DEFAULT_ARM_MARGINS if arm_margins is None else arm_margins
     contrast_margins = DEFAULT_CONTRAST_MARGINS if contrast_margins is None else contrast_margins
     # Too few draws is refused, not degraded into "uncertain". A summary that
@@ -623,41 +645,161 @@ def bootstrap_advantages_v2(ours_rows, baseline_rows, input_len, samples=2000, s
         for name, entry in values.items():
             for field in resampled_fields:
                 draws[(name, field)][sample_index] = entry[field]
-    resolved = {}
-    for name, entry in point.items():
-        intervals = {}
-        for field in resampled_fields:
-            label = f"{name}/{field}"
-            values = _checked_draws(draws[(name, field)], label)
-            low = float(np.percentile(values, 2.5))
-            high = float(np.percentile(values, 97.5))
-            if not (np.isfinite(low) and np.isfinite(high)):
-                raise NonFiniteValue(f"{label}: interval ends are not finite")
-            if low > high:
-                raise NonFiniteValue(f"{label}: interval low {low} > high {high}")
-            if not np.isfinite(entry[field]):
-                raise NonFiniteValue(f"{label}: point estimate is not finite")
-            intervals[f"{field}_ci"] = {"low": low, "high": high}
+    return _build_ples_records(point, draws, resampled_fields, input_len,
+                               arm_margins, contrast_margins)
+
+
+def _series(point_value, draw_values, label):
+    """point plus a nominal 95% percentile interval, fully validated."""
+    values = _checked_draws(draw_values, label)
+    if not np.isfinite(point_value):
+        raise NonFiniteValue(f"{label}: point estimate is not finite")
+    low = float(np.percentile(values, 2.5))
+    high = float(np.percentile(values, 97.5))
+    if not (np.isfinite(low) and np.isfinite(high)):
+        raise NonFiniteValue(f"{label}: interval ends are not finite")
+    if low > high:
+        raise NonFiniteValue(f"{label}: interval low {low} > high {high}")
+    return {"point": float(point_value),
+            "nominal_95_percentile_interval": {"low": low, "high": high}}
+
+
+def _algebra(effect, contrast_point, contrast_draws, treated_point, treated_draws,
+             control_point, control_draws, label):
+    """``contrast - sign * (treated - control)`` at the point and per draw.
+
+    Applied to each model's own raw quantities as well as to the comparison
+    deltas. The comparison check alone is not enough: if both models' contrasts
+    are broken the same way the error cancels in the difference, leaving a
+    comparison residual of exactly zero over two wrong effects.
+    """
+    sign = CONTRAST_SIGN[effect]
+    point_residual = contrast_point - sign * (treated_point - control_point)
+    if not np.isfinite(point_residual):
+        raise NonFiniteValue(f"{label}: algebra point residual is not finite")
+    draw_residual = np.abs(contrast_draws - sign * (treated_draws - control_draws))
+    if not np.all(np.isfinite(draw_residual)):
+        raise NonFiniteValue(f"{label}: algebra residual over draws is not finite")
+    worst = max(abs(point_residual), float(np.max(draw_residual)))
+    if worst > ALGEBRA_TOLERANCE:
+        raise NonFiniteValue(
+            f"{label}: the reported contrast is not the signed difference of its "
+            f"arms (worst residual {worst:.3e} > {ALGEBRA_TOLERANCE:g}); the "
+            "contrast and the arms did not come from the same draw")
+    return {
+        "formula": ("contrast = control - treated" if sign < 0
+                    else "contrast = treated - control"),
+        "point_residual": float(point_residual),
+        "max_abs_per_draw_residual": float(np.max(draw_residual)),
+        "tolerance": ALGEBRA_TOLERANCE,
+    }
+
+
+def _build_ples_records(point, draws, resampled_fields, input_len,
+                        arm_margins, contrast_margins):
+    """The single canonical record per endpoint: both models, both arms, deltas.
+
+    There is deliberately no second, arms-free structure. A bare contrast is
+    gameable -- degrading the control arm improves it -- so a consumer must not
+    be able to read one without the arms that qualify it.
+    """
+    records = []
+    for name in sorted(point):
+        entry = point[name]
+        advantage_name, metric = name.rsplit("/", 1)
+        effect = EFFECT_OF_ADVANTAGE[advantage_name]
+        higher_is_better = HIGHER_IS_BETTER[effect]
+
+        column = {field: _checked_draws(draws[(name, field)], f"{name}/{field}")
+                  for field in resampled_fields}
+        sizes = {field: array.size for field, array in column.items()}
+        if len(set(sizes.values())) != 1:
+            raise NonFiniteValue(f"{name}: draw lengths differ {sizes}")
+
+        # Comparison draws are the raw model draws subtracted within the
+        # replicate, never a separately computed quantity.
+        derived = {}
+        for delta_name, (ours_field, baseline_field) in DELTA_SOURCES.items():
+            derived[delta_name] = column[ours_field] - column[baseline_field]
+        for delta_name in ("treated_delta", "control_delta"):
+            drift = float(np.max(np.abs(derived[delta_name] - column[delta_name])))
+            if drift > ALGEBRA_TOLERANCE:
+                raise NonFiniteValue(
+                    f"{name}/{delta_name}: the reported delta is not ALFNet minus "
+                    f"MoGERNN (worst {drift:.3e}); it was computed separately")
+        oriented = derived["contrast_delta"] if higher_is_better else -derived["contrast_delta"]
+        drift = float(np.max(np.abs(oriented - column["advantage"])))
+        if drift > ALGEBRA_TOLERANCE:
+            raise NonFiniteValue(
+                f"{name}/advantage: the oriented advantage is not the signed "
+                f"contrast delta (worst {drift:.3e})")
+
+        contrast_delta_point = entry["ours_effect"] - entry["baseline_effect"]
+        models = {}
+        for label, prefix in (("ALFNet", "ours"), ("MoGERNN", "baseline")):
+            models[label] = {
+                "contrast": _series(entry[f"{prefix}_effect"],
+                                    column[f"{prefix}_effect"], f"{name} {label} contrast"),
+                "treated_absolute_error": _series(
+                    entry[f"{prefix}_treated"], column[f"{prefix}_treated"],
+                    f"{name} {label} treated"),
+                "control_absolute_error": _series(
+                    entry[f"{prefix}_control"], column[f"{prefix}_control"],
+                    f"{name} {label} control"),
+                "algebra_identity": _algebra(
+                    effect, entry[f"{prefix}_effect"], column[f"{prefix}_effect"],
+                    entry[f"{prefix}_treated"], column[f"{prefix}_treated"],
+                    entry[f"{prefix}_control"], column[f"{prefix}_control"],
+                    f"{name} {label} raw"),
+            }
+
+        comparison = {
+            "contrast_delta": _series(contrast_delta_point, derived["contrast_delta"],
+                                      f"{name} contrast delta"),
+            "treated_delta": _series(entry["treated_delta"], derived["treated_delta"],
+                                     f"{name} treated delta"),
+            "control_delta": _series(entry["control_delta"], derived["control_delta"],
+                                     f"{name} control delta"),
+            "contrast_oriented_advantage": _series(entry["advantage"], oriented,
+                                                   f"{name} oriented advantage"),
+        }
+        comparison_algebra = _algebra(
+            effect, contrast_delta_point, derived["contrast_delta"],
+            entry["treated_delta"], derived["treated_delta"],
+            entry["control_delta"], derived["control_delta"],
+            f"{name} comparison")
 
         arm_margin = _margin_for_endpoint(name, arm_margins)
         contrast_margin = _margin_for_endpoint(name, contrast_margins)
         # Each family reads only its own margin. Sharing one dict is how the
         # contrast threshold silently became the arm threshold.
-        treated = arm_status(entry["treated_delta"], intervals["treated_delta_ci"], arm_margin)
-        control = arm_status(entry["control_delta"], intervals["control_delta_ci"], arm_margin)
-        contrast = contrast_status(entry["advantage"], intervals["advantage_ci"],
-                                   contrast_margin)
-        resolved[name] = {
-            **entry, **intervals,
-            "arm_margin": arm_margin,
+        advantage_interval = comparison["contrast_oriented_advantage"][
+            "nominal_95_percentile_interval"]
+        treated = arm_status(entry["treated_delta"],
+                             comparison["treated_delta"]["nominal_95_percentile_interval"],
+                             arm_margin)
+        control = arm_status(entry["control_delta"],
+                             comparison["control_delta"]["nominal_95_percentile_interval"],
+                             arm_margin)
+        contrast = contrast_status(entry["advantage"], advantage_interval, contrast_margin)
+
+        records.append({
+            "effect": effect,
+            "metric": metric,
+            "definition": EFFECT_DEFINITION[effect]["formula"],
+            "orientation": EFFECT_DEFINITION[effect]["orientation"],
+            "models": models,
+            "comparison": comparison,
+            "comparison_algebra_identity": comparison_algebra,
             "contrast_margin": contrast_margin,
+            "arm_margin": arm_margin,
             "contrast_status": contrast,
             "treated_status": treated,
             "control_status": control,
             "arms_pareto_status": arms_pareto_status(treated, control),
             "combined_descriptive_status": combined_status(contrast, treated, control),
-        }
-    return resolved
+        })
+    return records
 
 
 def _margin_for_endpoint(name, margins):
@@ -882,7 +1024,10 @@ def main():
             },
             "ours": args.ours_label,
             "baseline": args.baseline_label,
-            "advantages": intervals,
+            # One canonical structure. The old flat `advantages` mapping is gone:
+            # keeping both would let a consumer read a bare contrast and skip the
+            # arms that qualify it.
+            "ples_records": intervals,
         }
         plot_comparison_v2(
             curves,
@@ -890,7 +1035,7 @@ def main():
             args.ours_label,
             args.baseline_label,
         )
-        print_keys = tuple(intervals)
+        print_keys = None
     else:
         curves = compare_rows(ours_rows, baseline_rows)
         intervals = bootstrap_gains(
@@ -917,29 +1062,34 @@ def main():
     _write_curves(output_dir / "paired_model_comparison.csv", curves)
     with (output_dir / "paired_model_comparison_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, ensure_ascii=False, indent=2, allow_nan=False)
-    for key in print_keys:
-        interval = intervals[key]
-        if ours_version >= 2:
-            # v3 reports the contrast and both absolute arms, because a contrast
-            # that improved only by degrading its control arm is not a better
-            # model and the contrast alone cannot show that.
-            confidence = interval["advantage_ci"]
-            span = ("95% CI=NA" if confidence is None
-                    else f"95% CI=[{confidence['low']:.4f}, {confidence['high']:.4f}]")
+    if ours_version >= 2:
+        # v3 reports the contrast and both absolute arms, because a contrast that
+        # improved only by degrading its control arm is not a better model and
+        # the contrast alone cannot show that.
+        for record in intervals:
+            advantage = record["comparison"]["contrast_oriented_advantage"]
+            span = advantage["nominal_95_percentile_interval"]
+            treated = record["comparison"]["treated_delta"]["point"]
+            control = record["comparison"]["control_delta"]["point"]
             print(
-                f"{key}={interval['advantage']:+.4f} | {span} | "
-                f"treatedD={interval['treated_delta']:+.4f}({interval['treated_status']}) "
-                f"controlD={interval['control_delta']:+.4f}({interval['control_status']}) "
-                f"| contrast={interval['contrast_status']}"
-                f" | {interval['combined_descriptive_status']}"
+                f"{record['effect']}/{record['metric']}="
+                f"{advantage['point']:+.4f} | "
+                f"95% CI=[{span['low']:.4f}, {span['high']:.4f}] | "
+                f"treatedD={treated:+.4f}({record['treated_status']}) "
+                f"controlD={control:+.4f}({record['control_status']}) "
+                f"| contrast={record['contrast_status']}"
+                f" | {record['combined_descriptive_status']}"
             )
-        elif interval["low"] is None or interval["high"] is None:
-            print(f"{key} AttenuationGain={interval['point']:.4f} | 95% CI=NA")
-        else:
-            print(
-                f"{key} AttenuationGain={interval['point']:.4f} | "
-                f"95% CI=[{interval['low']:.4f}, {interval['high']:.4f}]"
-            )
+    else:
+        for key in print_keys:
+            interval = intervals[key]
+            if interval["low"] is None or interval["high"] is None:
+                print(f"{key} AttenuationGain={interval['point']:.4f} | 95% CI=NA")
+            else:
+                print(
+                    f"{key} AttenuationGain={interval['point']:.4f} | "
+                    f"95% CI=[{interval['low']:.4f}, {interval['high']:.4f}]"
+                )
 
 
 if __name__ == "__main__":

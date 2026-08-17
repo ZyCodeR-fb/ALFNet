@@ -76,12 +76,19 @@ def test_overlap_blocking_changes_the_interval_it_produces():
                                            trajectory_span=72)
     per_origin = plot.bootstrap_advantages_v2(ours, baseline, 4, samples=1000, seed=7,
                                               trajectory_span=1)
-    key = "FaultPenaltyReduction/MAPE"
-    assert blocked[key]["advantage"] == pytest.approx(per_origin[key]["advantage"])
-    blocked_width = (blocked[key]["advantage_ci"]["high"]
-                     - blocked[key]["advantage_ci"]["low"])
-    per_origin_width = (per_origin[key]["advantage_ci"]["high"]
-                        - per_origin[key]["advantage_ci"]["low"])
+    def _advantage(records):
+        """bootstrap_advantages_v2 returns canonical records, not a mapping."""
+        record = next(r for r in records
+                      if r["effect"] == "FaultPenalty" and r["metric"] == "MAPE")
+        return record["comparison"]["contrast_oriented_advantage"]
+
+    blocked_advantage = _advantage(blocked)
+    per_origin_advantage = _advantage(per_origin)
+    assert blocked_advantage["point"] == pytest.approx(per_origin_advantage["point"])
+    blocked_width = (blocked_advantage["nominal_95_percentile_interval"]["high"]
+                     - blocked_advantage["nominal_95_percentile_interval"]["low"])
+    per_origin_width = (per_origin_advantage["nominal_95_percentile_interval"]["high"]
+                        - per_origin_advantage["nominal_95_percentile_interval"]["low"])
     # Guard against a degenerate fixture: if the advantage does not vary across
     # origins both intervals collapse to zero and the comparison below is
     # vacuous, which is how the previous version of this test passed while the
