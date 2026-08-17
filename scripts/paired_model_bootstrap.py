@@ -77,10 +77,25 @@ PRIMARY_FAMILY = (("Unseen", "MAE"), ("Steady", "MAE"), ("Join", "MAE"), ("Fault
 LOWER_IS_BETTER_EFFECTS = {"FaultPenalty", "OutageFaultPenalty"}
 
 
+LEGACY_NOTICE = (
+    "scripts/paired_model_bootstrap.py is DEPRECATED and frozen as legacy.\n"
+    "It emits p_bootstrap, a Holm transform and significance-shaped verdicts, none\n"
+    "of which v3 can support: they come from a single training seed and an\n"
+    "uncalibrated tail area. Use scripts/multiseed_paired_inference.py, which\n"
+    "reports point estimates, percentile intervals, seed tallies and PLES arms as\n"
+    "post-hoc descriptive diagnostics.\n"
+    "Re-run with --i-understand-this-is-deprecated-legacy-output to proceed."
+)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Paired origin->cohort bootstrap between two frozen LCE/PLES v3 result bundles.",
+        description="DEPRECATED legacy single-seed paired bootstrap. "
+                    "Use scripts/multiseed_paired_inference.py.",
     )
+    parser.add_argument("--i-understand-this-is-deprecated-legacy-output",
+                        action="store_true", dest="allow_legacy",
+                        help="required acknowledgement; without it this script refuses to run")
     parser.add_argument("--model_a", required=True, help="Result directory of the model under test.")
     parser.add_argument("--model_b", required=True, help="Result directory of the reference model.")
     parser.add_argument("--input_len", type=int, default=12)
@@ -93,11 +108,70 @@ def parse_args():
         default=1e-9,
         help="Relative tolerance when replaying the frozen summaries from the row file.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.allow_legacy:
+        parser.error(LEGACY_NOTICE)
+    if args.bootstrap_samples < 1000:
+        parser.error("--bootstrap_samples must be at least 1000 to report a 95% interval")
+    return args
 
 
 class InvalidRow(ValueError):
     """A raw CSV row that cannot be trusted to enter any statistic."""
+
+
+class InvalidSchema(ValueError):
+    """The CSV header itself is wrong, so no row from it can be trusted."""
+
+
+# The schema is declared, versioned and closed. An unexpected column is refused
+# rather than ignored: a renamed or added field is a protocol change, and
+# silently dropping it hides that.
+ROW_SCHEMA_VERSION = 1
+REQUIRED_COLUMNS = (
+    "dataset", "model", "origin_id", "calendar_day", "regime", "event_time_index",
+    "event_timestamp", "cohort_id", "cohort_fraction", "cohort_style", "track",
+    "tau", "phase", "node_count", "count",
+    "treated_ape_sum", "control_ape_sum", "treated_ae_sum", "control_ae_sum",
+    "treated_se_sum", "control_se_sum",
+)
+OPTIONAL_COLUMNS = ("graph_weight", "patch_residual_weight")
+REQUIRED_TEXT = ("dataset", "model", "calendar_day", "regime", "event_timestamp",
+                 "cohort_style", "track", "phase")
+VALID_TRACKS = {"join", "fault"}
+VALID_PHASES = {"Pre", "Cold", "Warm", "Ready", "Onset", "Decay", "Outage"}
+TRACK_PHASES = {"join": {"Pre", "Cold", "Warm", "Ready"},
+                "fault": {"Pre", "Onset", "Decay", "Outage"}}
+
+
+def _validate_header(fieldnames, path):
+    """Refuse a header before a single row is parsed.
+
+    ``csv.DictReader`` silently keeps the last value for a duplicated column
+    name, so a file with two ``treated_ae_sum`` columns -- the first NaN, the
+    second finite -- would validate cleanly while the reader used a value the
+    file does not unambiguously contain. Duplicates are therefore rejected
+    outright rather than resolved.
+    """
+    if fieldnames is None:
+        raise InvalidSchema(f"{path}: no header row")
+    seen, duplicates = set(), []
+    for name in fieldnames:
+        if name in seen:
+            duplicates.append(name)
+        seen.add(name)
+    if duplicates:
+        raise InvalidSchema(
+            f"{path}: duplicate column(s) {sorted(set(duplicates))}; csv.DictReader "
+            "would silently keep only the last, so the file is ambiguous")
+    missing = [name for name in REQUIRED_COLUMNS if name not in seen]
+    if missing:
+        raise InvalidSchema(f"{path}: missing required column(s) {missing}")
+    unexpected = sorted(seen - set(REQUIRED_COLUMNS) - set(OPTIONAL_COLUMNS))
+    if unexpected:
+        raise InvalidSchema(
+            f"{path}: unexpected column(s) {unexpected}; the row schema is closed "
+            f"(v{ROW_SCHEMA_VERSION}) so a new field is a protocol change, not a no-op")
 
 
 def _validate_row(row, path, line_number):
@@ -144,34 +218,65 @@ def _validate_row(row, path, line_number):
         if value is not None and not math.isfinite(value):
             _fail(field, value, "is present but not finite")
 
-    for field in ("track", "phase", "regime", "dataset"):
-        if not row.get(field):
-            _fail(field, row.get(field), "is required and must be non-empty")
+    for field in REQUIRED_TEXT:
+        value = row.get(field)
+        if value is None or not str(value).strip():
+            _fail(field, value, "is required and must be non-empty")
+
+    track, phase = str(row["track"]), str(row["phase"])
+    if track not in VALID_TRACKS:
+        _fail("track", track, f"must be one of {sorted(VALID_TRACKS)}")
+    if phase not in VALID_PHASES:
+        _fail("phase", phase, f"must be one of {sorted(VALID_PHASES)}")
+    if phase not in TRACK_PHASES[track]:
+        _fail("phase", phase, f"is not a {track} phase; expected one of "
+                              f"{sorted(TRACK_PHASES[track])}")
 
 
-def _read_rows(result_dir, validate=True):
+def _coerce(row, key, caster, path, line_number):
+    raw = row.get(key)
+    try:
+        return caster(raw)
+    except (TypeError, ValueError):
+        raise InvalidRow(
+            f"{path}:{line_number}: {key}={raw!r} is not a valid "
+            f"{caster.__name__} [origin_id={row.get('origin_id')!r} "
+            f"cohort_id={row.get('cohort_id')!r} track={row.get('track')!r} "
+            f"tau={row.get('tau')!r}]"
+        ) from None
+
+
+def read_rows(result_dir):
+    """Parse and fully validate one frozen row file. The only production entry."""
     path = Path(result_dir) / "ples_paired_rows.csv"
     if not path.exists():
         raise FileNotFoundError(f"PLES row file not found: {path}")
     rows = []
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
+        _validate_header(reader.fieldnames, path)
         for line_number, raw in enumerate(reader, start=2):  # 1 is the header
             row = dict(raw)
-            for key in ("origin_id", "cohort_id", "tau", "count", "node_count", "event_time_index"):
-                row[key] = int(row[key])
+            for key in ("origin_id", "cohort_id", "tau", "count", "node_count",
+                        "event_time_index"):
+                row[key] = _coerce(row, key, int, path, line_number)
             for key in SUM_FIELDS + ("cohort_fraction",):
-                row[key] = float(row[key])
+                row[key] = _coerce(row, key, float, path, line_number)
             # The CSV round-trip stores these as text, but the production
             # aggregation expects float-or-None.
             for key in ("graph_weight", "patch_residual_weight"):
-                row[key] = None if row.get(key) in {None, ""} else float(row[key])
-            if validate:
-                _validate_row(row, path, line_number)
+                row[key] = (None if row.get(key) in {None, ""}
+                            else _coerce(row, key, float, path, line_number))
+            _validate_row(row, path, line_number)
             rows.append(row)
     if not rows:
         raise ValueError(f"PLES paired rows are empty: {path}")
     return rows, path
+
+
+# Historical name. There is deliberately no `validate=False`: the bypass existed
+# for fixtures and was reachable from production.
+_read_rows = read_rows
 
 
 def _trajectory_span(result_dir, input_len):

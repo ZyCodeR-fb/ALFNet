@@ -120,15 +120,6 @@ def test_the_error_names_the_file_line_and_cell(tmp_path):
     assert "METRLA" in message and "ALFNet" in message
 
 
-def test_validation_can_be_disabled_only_explicitly(tmp_path):
-    """The escape hatch exists for fixtures, and is never the default."""
-    directory = _write(tmp_path / "off", [_row(treated_ae_sum="nan")])
-    with pytest.raises(InvalidRow):
-        _read_rows(directory)
-    rows, _ = _read_rows(directory, validate=False)
-    assert len(rows) == 1
-
-
 # --- CLI guards, through real argv -------------------------------------------
 
 
@@ -192,3 +183,140 @@ def test_build_records_refuses_empty_draws():
     margins = {"MAE": 0.05, "MAPE": 0.25, "RMSE": None}
     with pytest.raises(NonFiniteValue, match="no bootstrap draws"):
         build_records({key: -1.0}, {key: np.array([])}, {32: {key: -1.0}}, [32], margins)
+
+
+# --- schema: the header is refused before any row is parsed ------------------
+
+
+def _write_raw(directory, header, lines):
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "ples_paired_rows.csv"
+    path.write_text("\n".join([header, *lines]) + "\n", encoding="utf-8")
+    return directory
+
+
+def test_a_duplicate_column_is_refused(tmp_path):
+    """csv.DictReader keeps only the last, so the file is ambiguous.
+
+    The concrete hazard: a first NaN column and a second finite column of the
+    same name would validate cleanly on a value the file does not unambiguously
+    contain.
+    """
+    from scripts.paired_model_bootstrap import InvalidSchema
+
+    header = HEADER + ",treated_ae_sum"
+    row = ",".join(str(v) for v in _row().values()) + ",1.0"
+    with pytest.raises(InvalidSchema, match="duplicate column"):
+        _read_rows(_write_raw(tmp_path / "dup", header, [row]))
+
+
+def test_a_missing_required_column_is_refused(tmp_path):
+    from scripts.paired_model_bootstrap import InvalidSchema
+
+    fields = HEADER.split(",")
+    fields.remove("regime")
+    values = _row()
+    del values["regime"]
+    with pytest.raises(InvalidSchema, match="missing required column"):
+        _read_rows(_write_raw(tmp_path / "miss", ",".join(fields),
+                              [",".join(str(v) for v in values.values())]))
+
+
+def test_an_unexpected_column_is_refused(tmp_path):
+    """A new field is a protocol change, not something to drop silently."""
+    from scripts.paired_model_bootstrap import InvalidSchema
+
+    header = HEADER + ",surprise"
+    row = ",".join(str(v) for v in _row().values()) + ",7"
+    with pytest.raises(InvalidSchema, match="unexpected column"):
+        _read_rows(_write_raw(tmp_path / "extra", header, [row]))
+
+
+def test_a_non_numeric_value_names_the_file_line_and_field(tmp_path):
+    with pytest.raises(InvalidRow, match="not a valid float"):
+        _read_rows(_write(tmp_path / "oops", [_row(treated_ae_sum="oops")]))
+
+
+@pytest.mark.parametrize("field", ["model", "calendar_day", "event_timestamp",
+                                   "cohort_style", "dataset", "regime"])
+def test_an_empty_critical_string_is_refused(tmp_path, field):
+    with pytest.raises(InvalidRow, match=field):
+        _read_rows(_write(tmp_path / f"s-{field}", [_row(**{field: ""})]))
+
+
+def test_a_phase_that_does_not_belong_to_its_track_is_refused(tmp_path):
+    """`Outage` is a fault phase; on a join row it is a protocol violation."""
+    with pytest.raises(InvalidRow, match="not a join phase"):
+        _read_rows(_write(tmp_path / "ph", [_row(track="join", phase="Outage")]))
+
+
+def test_an_unknown_track_or_phase_is_refused(tmp_path):
+    with pytest.raises(InvalidRow, match="track"):
+        _read_rows(_write(tmp_path / "tk", [_row(track="sideways")]))
+    with pytest.raises(InvalidRow, match="phase"):
+        _read_rows(_write(tmp_path / "pz", [_row(phase="Lukewarm")]))
+
+
+def test_there_is_no_production_validation_bypass():
+    """`validate=False` was reachable from production; it is gone."""
+    import inspect
+
+    from scripts.paired_model_bootstrap import read_rows
+
+    assert "validate" not in inspect.signature(read_rows).parameters
+
+
+# --- endpoint inventory comes from the protocol, not from the run ------------
+
+
+def test_the_inventory_is_114_endpoints_and_126_with_arms():
+    from scripts.multiseed_paired_inference import expected_endpoint_keys
+
+    assert len(expected_endpoint_keys(12, include_ples_arms=False)) == 114
+    assert len(expected_endpoint_keys(12, include_ples_arms=True)) == 126
+
+
+def test_a_missing_endpoint_is_caught_even_when_every_source_lacks_it():
+    """The check used to compare the run against itself, so this passed."""
+    from scripts.multiseed_paired_inference import (
+        NonFiniteValue,
+        assert_endpoint_inventory,
+        expected_endpoint_keys,
+    )
+
+    full = expected_endpoint_keys(12)
+    assert_endpoint_inventory(full, 12, "complete")
+
+    missing = set(full)
+    missing.discard(("main", "Unseen", "MAE"))
+    with pytest.raises(NonFiniteValue, match="inventory mismatch"):
+        assert_endpoint_inventory(missing, 12, "missing one")
+
+    extra = set(full) | {("main", "Invented", "MAE")}
+    with pytest.raises(NonFiniteValue, match="inventory mismatch"):
+        assert_endpoint_inventory(extra, 12, "extra one")
+
+
+# --- the legacy single-seed CLI refuses to produce new active reports --------
+
+
+def test_the_legacy_paired_bootstrap_cli_is_deprecated():
+    result = subprocess.run(
+        [sys.executable, "scripts/paired_model_bootstrap.py",
+         "--model_a", "x", "--model_b", "y"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "DEPRECATED" in result.stderr, result.stderr
+
+
+def test_the_legacy_cli_also_requires_enough_draws():
+    result = subprocess.run(
+        [sys.executable, "scripts/paired_model_bootstrap.py",
+         "--model_a", "x", "--model_b", "y",
+         "--i-understand-this-is-deprecated-legacy-output",
+         "--bootstrap_samples", "10"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "at least 1000" in result.stderr, result.stderr

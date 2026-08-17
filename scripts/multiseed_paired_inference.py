@@ -286,6 +286,45 @@ EFFECT_DEFINITION = {
 }
 
 
+def expected_endpoint_keys(input_len, include_ples_arms=True):
+    """The endpoint inventory, derived from the protocol rather than observed.
+
+    Taking "expected" from whatever the run produced makes the completeness
+    check vacuous: if point, draws and every seed all lack the same endpoint,
+    comparing them to each other still passes. This is generated from
+    ``input_len`` alone, so a silently dropped endpoint is caught.
+
+    At input_len=12 this is 114 keys, or 126 with the PLES arms.
+    """
+    keys = set()
+    for metric in ("MAPE", "MAE", "RMSE"):
+        for name in ("Unseen", "Steady", "Join", "Fault", "LifeAvg", "WorstGroup"):
+            keys.add(("main", name, metric))
+        for phase in ("Cold", "Warm", "Ready", "Onset", "Decay", "Outage"):
+            keys.add(("phase", phase, metric))
+        for label in ("Join", "Fault"):
+            for k in range(1, int(input_len) + 1):
+                keys.add(("trajectory", f"{label}_k{k}", metric))
+    for metric in ARM_METRICS:
+        for effect in PLES_EFFECTS:
+            keys.add(("ples", effect, metric))
+            if include_ples_arms:
+                for arm in ("treated", "control"):
+                    keys.add(("arm", f"{effect}/{arm}", metric))
+    return keys
+
+
+def assert_endpoint_inventory(observed, input_len, what, include_ples_arms=True):
+    expected = expected_endpoint_keys(input_len, include_ples_arms)
+    observed = set(observed)
+    if observed != expected:
+        raise NonFiniteValue(
+            f"{what}: endpoint inventory mismatch against the protocol "
+            f"(expected {len(expected)}, got {len(observed)}); "
+            f"missing {sorted(expected - observed)[:5]}, "
+            f"extra {sorted(observed - expected)[:5]}")
+
+
 def compute_arms(tensor, weights):
     """Treated and control absolute error behind each PLES endpoint.
 
@@ -489,7 +528,7 @@ def _descriptive_verdict(delta, low, high, higher_is_better, margin, seeds_favou
     return f"favours {direction}{scale}"
 
 
-def _assert_key_sets_agree(point, draws, seed_deltas, seeds):
+def _assert_key_sets_agree(point, draws, seed_deltas, seeds, input_len=None):
     """point, draws and every seed must describe exactly the same endpoints.
 
     A missing endpoint in one of them would otherwise be scored on a quietly
@@ -506,10 +545,12 @@ def _assert_key_sets_agree(point, draws, seed_deltas, seeds):
                             f"extra {sorted(set(seed_deltas[seed]) - expected)}")
     if problems:
         raise NonFiniteValue("endpoint key sets disagree:\n  - " + "\n  - ".join(problems))
+    if input_len is not None:
+        assert_endpoint_inventory(point, input_len, "point estimates")
 
 
-def build_records(point, draws, seed_deltas, seeds, margins):
-    _assert_key_sets_agree(point, draws, seed_deltas, seeds)
+def build_records(point, draws, seed_deltas, seeds, margins, input_len=None):
+    _assert_key_sets_agree(point, draws, seed_deltas, seeds, input_len)
     family_of = {key: name for name, keys in FAMILIES.items() for key in keys}
     records = []
     # Arm keys are reported by build_ples_records beside their contrast; emitting
@@ -738,7 +779,8 @@ def main():
                "MAPE": args.post_hoc_margin_mape,
                # no independent basis for an RMSE threshold; describe direction only
                "RMSE": None}
-    records = build_records(point, draws, seed_deltas, seeds, margins)
+    input_len = provenance[seeds[0]]["input_len"]
+    records = build_records(point, draws, seed_deltas, seeds, margins, input_len)
     # Contrast margins and arm margins are separate configuration on purpose:
     # sharing a number because the units match is how one silently becomes the
     # other. Both are post-hoc for v3.
