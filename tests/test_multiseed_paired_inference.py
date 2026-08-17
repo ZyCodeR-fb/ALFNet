@@ -117,12 +117,12 @@ def test_direction_is_respected_for_higher_is_better_endpoints():
 def test_seed_agreement_is_reported_in_fields_not_buried_in_prose():
     """The tally is structured, so a reader cannot mistake a 2/3 split."""
     split = _records(-1.0, [-1.0] * 50, [-1.0, -1.0, +0.4])[0]
-    assert split["n_favour_alfnet"] == 2
-    assert split["n_favour_baseline"] == 1
+    assert split["n_favour_alfnet_seeds"] == 2
+    assert split["n_favour_baseline_seeds"] == 1
     assert split["seed_unanimous"] is False
 
     agreed = _records(-1.0, [-1.0] * 50, [-1.0, -1.0, -0.4])[0]
-    assert agreed["n_favour_alfnet"] == 3
+    assert agreed["n_favour_alfnet_seeds"] == 3
     assert agreed["seed_unanimous"] is True
 
 
@@ -159,7 +159,7 @@ def test_synthetic_null_is_not_described_as_a_difference():
     draws = rng.normal(0.0, 1.0, 4000)
     record = _records(0.0, draws, [0.0, 0.0, 0.0])[0]
     assert record["verdict"] == "no difference"
-    assert record["n_tie"] == 3
+    assert record["n_tie_seeds"] == 3
 
 
 def test_a_clear_fixed_effect_is_described_with_the_right_sign():
@@ -269,7 +269,7 @@ def test_one_block_and_cohort_draw_is_shared_by_every_seed_and_both_models(monke
                for s in SEEDS}
 
     seen.clear()
-    module.crossed_bootstrap(tensors, SEEDS, samples=1, seed=7)
+    module.crossed_bootstrap(tensors, SEEDS, samples=1, seed=7)  # returns (draws, raw)
     weight_vectors = {entry[1] for entry in seen}
     assert len(weight_vectors) == 1, (
         f"a replicate used {len(weight_vectors)} weight vectors; seeds, blocks "
@@ -327,12 +327,12 @@ def test_ties_are_not_counted_for_either_model():
     from scripts.multiseed_paired_inference import seed_tally
 
     tally = seed_tally([+1.0, 0.0, 0.0], higher_is_better=False)
-    assert tally == {"n_favour_alfnet": 0, "n_favour_baseline": 1, "n_tie": 2,
-                     "n_nonfinite": 0, "n_evaluable": 3}
+    assert tally == {"n_favour_alfnet_seeds": 0, "n_favour_baseline_seeds": 1,
+                     "n_tie_seeds": 2, "n_nonfinite_seeds": 0, "n_evaluable_seeds": 3}
 
     record = _records(0.3333, [0.3] * 50, [+1.0, 0.0, 0.0])[0]
-    assert record["n_tie"] == 2
-    assert record["n_favour_baseline"] == 1
+    assert record["n_tie_seeds"] == 2
+    assert record["n_favour_baseline_seeds"] == 1
     assert record["seed_unanimous"] is False
     assert "all 3 seeds agree" not in record["verdict"]
 
@@ -437,7 +437,7 @@ def test_seed_multiplicity_actually_reaches_the_number(monkeypatch):
 
     monkeypatch.setattr(module.np.random, "default_rng", lambda seed: _RNG())
     tensors = {s: {MODEL_A: _T(effects[s]), MODEL_B: _T(0.0)} for s in SEEDS}
-    draws = module.crossed_bootstrap(tensors, SEEDS, samples=1, seed=0)
+    draws, _raw = module.crossed_bootstrap(tensors, SEEDS, samples=1, seed=0)
 
     expected = (2 * effects[32] + effects[52]) / 3
     assert draws[KEY][0] == pytest.approx(expected), (

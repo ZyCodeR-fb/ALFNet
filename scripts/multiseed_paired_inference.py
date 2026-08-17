@@ -109,19 +109,31 @@ def parse_args():
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--bootstrap-samples", type=int, default=2000)
     parser.add_argument("--bootstrap-seed", type=int, default=2026)
+    # Contrast margins and arm margins are separate settings. They happen to
+    # share units, which is exactly why one silently became the other before.
+    # All four are v3 post-hoc reporting aids, never acceptance thresholds.
     parser.add_argument("--post-hoc-margin-mae", type=float, default=0.05,
-                        help="MAE difference below which a direction is called negligible. "
-                             "POST-HOC: chosen after the v3 test split was read, so it is "
-                             "a reporting aid, not an acceptance threshold")
-    parser.add_argument("--post-hoc-margin-mape", type=float, default=0.25)
+                        help="LCE MAE margin (post-hoc reporting aid)")
+    parser.add_argument("--post-hoc-margin-mape", type=float, default=0.25,
+                        help="LCE MAPE margin (post-hoc reporting aid)")
+    parser.add_argument("--post-hoc-contrast-margin-mae", type=float, default=0.05)
+    parser.add_argument("--post-hoc-contrast-margin-mape", type=float, default=0.25)
+    parser.add_argument("--post-hoc-arm-margin-mae", type=float, default=0.05)
+    parser.add_argument("--post-hoc-arm-margin-mape", type=float, default=0.25)
     args = parser.parse_args()
     if args.bootstrap_samples < MIN_BOOTSTRAP_SAMPLES:
         parser.error(
             f"--bootstrap-samples must be at least {MIN_BOOTSTRAP_SAMPLES} to report a "
             f"95% interval; got {args.bootstrap_samples}"
         )
-    for name, value in (("--post-hoc-margin-mae", args.post_hoc_margin_mae),
-                        ("--post-hoc-margin-mape", args.post_hoc_margin_mape)):
+    for name, value in (
+        ("--post-hoc-margin-mae", args.post_hoc_margin_mae),
+        ("--post-hoc-margin-mape", args.post_hoc_margin_mape),
+        ("--post-hoc-contrast-margin-mae", args.post_hoc_contrast_margin_mae),
+        ("--post-hoc-contrast-margin-mape", args.post_hoc_contrast_margin_mape),
+        ("--post-hoc-arm-margin-mae", args.post_hoc_arm_margin_mae),
+        ("--post-hoc-arm-margin-mape", args.post_hoc_arm_margin_mape),
+    ):
         if not np.isfinite(value) or value < 0:
             parser.error(f"{name} must be finite and >= 0, got {value!r}")
     return args
@@ -390,18 +402,24 @@ def _weights(tensor, rng, cohort_multiplicity):
     return weights
 
 
-def per_seed_deltas(tensors, seeds):
-    """Observed ALFNet - MoGERNN at each seed, plus each model's own arm values."""
-    out, absolute = {}, {}
+def per_seed_values(tensors, seeds):
+    """Each model's own statistics at each seed, and their difference.
+
+    The raw per-model value is kept for *every* endpoint, not only the arms. It
+    was previously discarded for the PLES contrasts, so a reader could see the
+    ALFNet-minus-MoGERNN gap on JoinLift but not what either model's JoinLift
+    actually was -- and a contrast is not interpretable without them.
+    """
+    deltas, per_model = {}, {}
     for seed in seeds:
-        ones_a = np.ones(tensors[seed][MODEL_A].n_rows, dtype=np.float64)
-        ones_b = np.ones(tensors[seed][MODEL_B].n_rows, dtype=np.float64)
-        stats_a = statistics_and_arms(tensors[seed][MODEL_A], ones_a)
-        stats_b = statistics_and_arms(tensors[seed][MODEL_B], ones_b)
-        out[seed] = {key: stats_a[key] - stats_b[key] for key in stats_a}
-        absolute[seed] = {MODEL_A: {k: v for k, v in stats_a.items() if k[0] == "arm"},
-                          MODEL_B: {k: v for k, v in stats_b.items() if k[0] == "arm"}}
-    return out, absolute
+        stats = {}
+        for model in (MODEL_A, MODEL_B):
+            ones = np.ones(tensors[seed][model].n_rows, dtype=np.float64)
+            stats[model] = statistics_and_arms(tensors[seed][model], ones)
+        deltas[seed] = {key: stats[MODEL_A][key] - stats[MODEL_B][key]
+                        for key in stats[MODEL_A]}
+        per_model[seed] = stats
+    return deltas, per_model
 
 
 def crossed_bootstrap(tensors, seeds, samples, seed):
@@ -423,7 +441,8 @@ def crossed_bootstrap(tensors, seeds, samples, seed):
         raise NonFiniteValue(f"crossed_bootstrap needs samples > 0, got {samples}")
     rng = np.random.default_rng(seed)
     reference = tensors[seeds[0]][MODEL_A]
-    keys, draws = None, None
+    keys = None
+    raw = {MODEL_A: None, MODEL_B: None}
     for index in range(samples):
         seed_multiplicity = defaultdict(float)
         for drawn in rng.choice(seeds, size=len(seeds), replace=True):
@@ -432,19 +451,26 @@ def crossed_bootstrap(tensors, seeds, samples, seed):
         cohorts = _cohort_multiplicity(reference, rng)
         weights = _weights(reference, rng, cohorts)
 
-        accumulated = defaultdict(float)
+        per_model = {MODEL_A: defaultdict(float), MODEL_B: defaultdict(float)}
         total = sum(seed_multiplicity.values())
         for drawn, repeats in seed_multiplicity.items():
-            stats_a = statistics_and_arms(tensors[drawn][MODEL_A], weights)
-            stats_b = statistics_and_arms(tensors[drawn][MODEL_B], weights)
-            for key in stats_a:
-                accumulated[key] += repeats * (stats_a[key] - stats_b[key]) / total
-        if draws is None:
-            keys = sorted(accumulated)
-            draws = {key: np.empty(samples, dtype=np.float64) for key in keys}
-        for key in keys:
-            draws[key][index] = accumulated[key]
-    return draws
+            for model in (MODEL_A, MODEL_B):
+                stats = statistics_and_arms(tensors[drawn][model], weights)
+                for key, value in stats.items():
+                    per_model[model][key] += repeats * value / total
+        if keys is None:
+            keys = sorted(per_model[MODEL_A])
+            raw = {model: {key: np.empty(samples, dtype=np.float64) for key in keys}
+                   for model in (MODEL_A, MODEL_B)}
+        for model in (MODEL_A, MODEL_B):
+            for key in keys:
+                raw[model][key][index] = per_model[model][key]
+
+    # The comparison draw is the difference of the two raw draws *within the
+    # replicate*, never a separately resampled quantity. Deriving it here is
+    # what makes the algebra identity checkable per draw rather than assumed.
+    draws = {key: raw[MODEL_A][key] - raw[MODEL_B][key] for key in keys}
+    return draws, raw
 
 
 class NonFiniteValue(SystemExit):
@@ -485,20 +511,25 @@ def seed_tally(directions, higher_is_better):
             favour_a += 1
         else:
             favour_b += 1
+    # Named "_seeds" throughout: these count *training seeds*, not rows, origins
+    # or blocks. The unsuffixed names read like sample sizes and were misleading.
+    # Real row/origin/block/cohort counts are deliberately absent rather than
+    # approximated; they arrive with B2.1b.
     return {
-        "n_favour_alfnet": favour_a,
-        "n_favour_baseline": favour_b,
-        "n_tie": tie,
-        "n_nonfinite": nonfinite,
-        "n_evaluable": favour_a + favour_b + tie,
+        "n_favour_alfnet_seeds": favour_a,
+        "n_favour_baseline_seeds": favour_b,
+        "n_tie_seeds": tie,
+        "n_nonfinite_seeds": nonfinite,
+        "n_evaluable_seeds": favour_a + favour_b + tie,
     }
 
 
 def _unanimous(tally, seed_count):
     """Every seed evaluable, and all of them on the same side."""
-    if tally["n_evaluable"] != seed_count:
+    if tally["n_evaluable_seeds"] != seed_count:
         return False
-    return seed_count in (tally["n_favour_alfnet"], tally["n_favour_baseline"])
+    return seed_count in (tally["n_favour_alfnet_seeds"],
+                          tally["n_favour_baseline_seeds"])
 
 
 def _descriptive_verdict(delta, low, high, higher_is_better, margin, seeds_favouring,
@@ -553,9 +584,10 @@ def build_records(point, draws, seed_deltas, seeds, margins, input_len=None):
     _assert_key_sets_agree(point, draws, seed_deltas, seeds, input_len)
     family_of = {key: name for name, keys in FAMILIES.items() for key in keys}
     records = []
-    # Arm keys are reported by build_ples_records beside their contrast; emitting
-    # them here as well would double-count them as standalone endpoints.
-    for key in sorted(k for k in draws if k[0] != "arm"):
+    # LCE only. Every PLES quantity lives in the canonical ples_records, which
+    # always carries both arms: a bare PLES contrast published here would let a
+    # consumer read the gameable number without the arms that qualify it.
+    for key in sorted(k for k in draws if k[0] not in {"arm", "ples"}):
         table, row, metric = key
         delta_draws = np.asarray(draws[key], dtype=np.float64)
         # Order matters and used to be wrong: the percentile was taken over
@@ -570,9 +602,9 @@ def build_records(point, draws, seed_deltas, seeds, margins, input_len=None):
         higher_is_better = key in HIGHER_IS_BETTER
         directions = [seed_deltas[s][key] for s in seeds]
         tally = seed_tally(directions, higher_is_better)
-        if tally["n_nonfinite"]:
+        if tally["n_nonfinite_seeds"]:
             raise NonFiniteValue(
-                f"{table}/{row}/{metric}: {tally['n_nonfinite']} of {len(seeds)} "
+                f"{table}/{row}/{metric}: {tally['n_nonfinite_seeds']} of {len(seeds)} "
                 "per-seed deltas are non-finite; refusing to score this endpoint"
             )
         _require_finite(point[key], f"point estimate {table}/{row}/{metric}")
@@ -586,7 +618,7 @@ def build_records(point, draws, seed_deltas, seeds, margins, input_len=None):
             "higher_is_better": higher_is_better,
             "per_seed_delta": {str(s): float(seed_deltas[s][key]) for s in seeds},
             **tally,
-            "seeds_favouring_alfnet": tally["n_favour_alfnet"],
+            "seeds_favouring_alfnet": tally["n_favour_alfnet_seeds"],
             "seed_count": len(seeds),
             "seed_unanimous": _unanimous(tally, len(seeds)),
         })
@@ -666,80 +698,162 @@ def combined_status(contrast, treated, control):
     return "uncertain"
 
 
-def build_ples_records(point, draws, seed_deltas, seed_absolute, seeds,
+ALGEBRA_TOLERANCE = 1e-9
+
+# contrast = control - treated for a lift, treated - control for a penalty
+CONTRAST_SIGN = {"JoinLift": -1.0, "FaultPenalty": +1.0, "OutageFaultPenalty": +1.0}
+
+
+def _series(point, per_seed, draws, seeds, label):
+    """point / per_seed / interval for one quantity, fully validated."""
+    values = np.asarray(draws, dtype=np.float64)
+    if values.size == 0:
+        raise NonFiniteValue(f"{label}: no bootstrap draws")
+    _require_finite(values, f"{label}: draws")
+    _require_finite(point, f"{label}: point")
+    seed_values = {}
+    for seed in seeds:
+        if seed not in per_seed:
+            raise NonFiniteValue(f"{label}: missing seed {seed}")
+        _require_finite(per_seed[seed], f"{label}: per-seed value at seed {seed}")
+        seed_values[str(seed)] = float(per_seed[seed])
+    low = float(np.percentile(values, 2.5))
+    high = float(np.percentile(values, 97.5))
+    _require_finite([low, high], f"{label}: interval ends")
+    if low > high:
+        raise NonFiniteValue(f"{label}: interval low {low} > high {high}")
+    return {"point": float(point), "per_seed": seed_values,
+            "interval": {"low": low, "high": high}}
+
+
+def _algebra_residuals(effect, metric, point, per_seed, draws, seeds, label):
+    """contrast - sign * (treated - control), at point, per seed and per draw."""
+    sign = CONTRAST_SIGN[effect]
+
+    def _combine(source, getter):
+        return getter(("ples", effect, metric)) - sign * (
+            getter(("arm", f"{effect}/treated", metric))
+            - getter(("arm", f"{effect}/control", metric)))
+
+    point_residual = _combine(point, lambda k: point[k])
+    seed_residuals = [abs(_combine(per_seed[s], lambda k: per_seed[s][k])) for s in seeds]
+    draw_residual = np.abs(
+        draws[("ples", effect, metric)]
+        - sign * (draws[("arm", f"{effect}/treated", metric)]
+                  - draws[("arm", f"{effect}/control", metric)]))
+    _require_finite(draw_residual, f"{label}: algebra residual over draws")
+    worst = max(abs(point_residual), max(seed_residuals, default=0.0),
+                float(np.max(draw_residual)))
+    if worst > ALGEBRA_TOLERANCE:
+        raise NonFiniteValue(
+            f"{label}: the reported contrast is not the signed difference of its "
+            f"arms (worst residual {worst:.3e} > {ALGEBRA_TOLERANCE:g}); the "
+            "contrast and the arms did not come from the same draw")
+    return {
+        "formula": ("contrast = control - treated" if sign < 0
+                    else "contrast = treated - control"),
+        "point_residual": float(point_residual),
+        "max_abs_per_seed_residual": float(max(seed_residuals, default=0.0)),
+        "max_abs_per_draw_residual": float(np.max(draw_residual)),
+        "tolerance": ALGEBRA_TOLERANCE,
+    }
+
+
+def build_ples_records(point, draws, seed_deltas, per_seed_model, raw_draws, seeds,
                        contrast_margins, arm_margins):
-    """One record per PLES endpoint carrying the contrast and both arms.
+    """One canonical record per PLES endpoint: both models, both arms, deltas.
 
-    Contrast and arms come from the same draws by construction: they were
-    computed together in ``statistics_and_arms`` from one weight vector.
+    There is no second, arms-free PLES verdict anywhere. A bare contrast is
+    gameable -- degrading the control arm improves it -- so a consumer must not
+    be able to read one without the arms that qualify it.
     """
-    def _interval(key):
-        values = np.asarray(draws[key], dtype=np.float64)
-        if values.size == 0:
-            raise NonFiniteValue(f"{key}: no bootstrap draws")
-        _require_finite(values, f"draws {key}")
-        return float(np.percentile(values, 2.5)), float(np.percentile(values, 97.5))
-
     records = []
     for effect in PLES_EFFECTS:
         for metric in ARM_METRICS:
+            label = f"{effect}/{metric}"
             contrast_key = ("ples", effect, metric)
             treated_key = ("arm", f"{effect}/treated", metric)
             control_key = ("arm", f"{effect}/control", metric)
             for key in (contrast_key, treated_key, control_key):
-                if key not in draws or key not in point:
-                    raise NonFiniteValue(f"missing endpoint {key}")
+                for name, source in (("point", point), ("draws", draws)):
+                    if key not in source:
+                        raise NonFiniteValue(f"{label}: {name} is missing {key}")
+                for model in (MODEL_A, MODEL_B):
+                    if key not in raw_draws[model]:
+                        raise NonFiniteValue(f"{label}: raw draws missing {key} for {model}")
 
             higher_is_better = EFFECT_DEFINITION[effect]["orientation"] == "higher_is_better"
             contrast_margin = margin_for(metric, contrast_margins)
             arm_margin = margin_for(metric, arm_margins)
 
-            contrast_low, contrast_high = _interval(contrast_key)
-            treated_low, treated_high = _interval(treated_key)
-            control_low, control_high = _interval(control_key)
+            per_model = {}
+            for model in (MODEL_A, MODEL_B):
+                per_model[model] = {
+                    "contrast": _series(
+                        per_seed_model[seeds[0]][model][contrast_key] * 0
+                        + float(np.mean([per_seed_model[s][model][contrast_key]
+                                         for s in seeds])),
+                        {s: per_seed_model[s][model][contrast_key] for s in seeds},
+                        raw_draws[model][contrast_key], seeds, f"{label} {model} contrast"),
+                    "treated_absolute_error": _series(
+                        float(np.mean([per_seed_model[s][model][treated_key] for s in seeds])),
+                        {s: per_seed_model[s][model][treated_key] for s in seeds},
+                        raw_draws[model][treated_key], seeds, f"{label} {model} treated"),
+                    "control_absolute_error": _series(
+                        float(np.mean([per_seed_model[s][model][control_key] for s in seeds])),
+                        {s: per_seed_model[s][model][control_key] for s in seeds},
+                        raw_draws[model][control_key], seeds, f"{label} {model} control"),
+                }
 
-            contrast = _interval_status(point[contrast_key], contrast_low, contrast_high,
-                                        contrast_margin, higher_is_better)
-            treated = _arm_status(point[treated_key], treated_low, treated_high, arm_margin)
-            control = _arm_status(point[control_key], control_low, control_high, arm_margin)
+            contrast = _series(point[contrast_key],
+                               {s: seed_deltas[s][contrast_key] for s in seeds},
+                               draws[contrast_key], seeds, f"{label} contrast delta")
+            treated = _series(point[treated_key],
+                              {s: seed_deltas[s][treated_key] for s in seeds},
+                              draws[treated_key], seeds, f"{label} treated delta")
+            control = _series(point[control_key],
+                              {s: seed_deltas[s][control_key] for s in seeds},
+                              draws[control_key], seeds, f"{label} control delta")
 
-            # oriented so positive always favours ALFNet, whatever the endpoint
-            oriented = point[contrast_key] if higher_is_better else -point[contrast_key]
-            tally = seed_tally([seed_deltas[s][contrast_key] for s in seeds], higher_is_better)
-            if tally["n_nonfinite"]:
-                raise NonFiniteValue(f"{contrast_key}: non-finite per-seed contrast")
+            algebra = _algebra_residuals(effect, metric, point, seed_deltas, draws,
+                                         seeds, label)
 
+            contrast_status = _interval_status(
+                contrast["point"], contrast["interval"]["low"],
+                contrast["interval"]["high"], contrast_margin, higher_is_better)
+            treated_status = _arm_status(
+                treated["point"], treated["interval"]["low"],
+                treated["interval"]["high"], arm_margin)
+            control_status = _arm_status(
+                control["point"], control["interval"]["low"],
+                control["interval"]["high"], arm_margin)
+
+            tally = seed_tally([seed_deltas[s][contrast_key] for s in seeds],
+                               higher_is_better)
+            if tally["n_nonfinite_seeds"]:
+                raise NonFiniteValue(f"{label}: non-finite per-seed contrast")
+
+            oriented = contrast["point"] if higher_is_better else -contrast["point"]
             records.append({
                 "effect": effect, "metric": metric,
                 "definition": EFFECT_DEFINITION[effect]["formula"],
                 "orientation": EFFECT_DEFINITION[effect]["orientation"],
-                "contrast_delta": float(point[contrast_key]),
+                "models": per_model,
+                "contrast_delta": contrast,
+                "treated_delta": treated,
+                "control_delta": control,
                 "contrast_oriented_advantage": float(oriented),
-                "contrast_ci": {"low": contrast_low, "high": contrast_high},
+                "algebra_identity": algebra,
                 "contrast_margin": contrast_margin,
                 "arm_margin": arm_margin,
-                "treated_delta": float(point[treated_key]),
-                "treated_ci": {"low": treated_low, "high": treated_high},
-                "control_delta": float(point[control_key]),
-                "control_ci": {"low": control_low, "high": control_high},
-                "absolute": {
-                    model: {
-                        arm: {str(s): float(seed_absolute[s][model][("arm", f"{effect}/{arm}", metric)])
-                              for s in seeds}
-                        for arm in ("treated", "control")
-                    }
-                    for model in (MODEL_A, MODEL_B)
-                },
-                "per_seed_contrast": {str(s): float(seed_deltas[s][contrast_key]) for s in seeds},
-                "per_seed_treated_delta": {str(s): float(seed_deltas[s][treated_key]) for s in seeds},
-                "per_seed_control_delta": {str(s): float(seed_deltas[s][control_key]) for s in seeds},
                 **tally,
                 "seed_unanimous": _unanimous(tally, len(seeds)),
-                "contrast_status": contrast,
-                "arms_pareto_status": arms_pareto_status(treated, control),
-                "treated_status": treated,
-                "control_status": control,
-                "combined_descriptive_status": combined_status(contrast, treated, control),
+                "contrast_status": contrast_status,
+                "treated_status": treated_status,
+                "control_status": control_status,
+                "arms_pareto_status": arms_pareto_status(treated_status, control_status),
+                "combined_descriptive_status": combined_status(
+                    contrast_status, treated_status, control_status),
             })
     return records
 
@@ -768,24 +882,28 @@ def main():
     seeds, bundles = load_seed_bundles(args.dataset, args.output_root)
     tensors, provenance = build_tensors(seeds, bundles)
 
-    seed_deltas, seed_absolute = per_seed_deltas(tensors, seeds)
+    seed_deltas, per_seed_model = per_seed_values(tensors, seeds)
     point = {
         key: float(np.mean([seed_deltas[s][key] for s in seeds]))
         for key in seed_deltas[seeds[0]]
     }
-    draws = crossed_bootstrap(tensors, seeds, args.bootstrap_samples,
-                                   args.bootstrap_seed)
+    draws, raw_draws = crossed_bootstrap(tensors, seeds, args.bootstrap_samples,
+                                         args.bootstrap_seed)
     margins = {"MAE": args.post_hoc_margin_mae,
                "MAPE": args.post_hoc_margin_mape,
                # no independent basis for an RMSE threshold; describe direction only
                "RMSE": None}
+    contrast_margins = {"MAE": args.post_hoc_contrast_margin_mae,
+                        "MAPE": args.post_hoc_contrast_margin_mape, "RMSE": None}
+    arm_margins = {"MAE": args.post_hoc_arm_margin_mae,
+                   "MAPE": args.post_hoc_arm_margin_mape, "RMSE": None}
     input_len = provenance[seeds[0]]["input_len"]
     records = build_records(point, draws, seed_deltas, seeds, margins, input_len)
     # Contrast margins and arm margins are separate configuration on purpose:
     # sharing a number because the units match is how one silently becomes the
     # other. Both are post-hoc for v3.
-    ples_records = build_ples_records(point, draws, seed_deltas, seed_absolute,
-                                      seeds, margins, margins)
+    ples_records = build_ples_records(point, draws, seed_deltas, per_seed_model,
+                                      raw_draws, seeds, contrast_margins, arm_margins)
 
     print(f"MultiSeedPairedInference: {MODEL_A} vs {MODEL_B} | {args.dataset}")
     print(f"  seeds={seeds} | samples={args.bootstrap_samples} | "
@@ -808,13 +926,16 @@ def main():
           f"   combined")
     for record in ples_records:
         print(f"  {record['effect'] + '/' + record['metric']:<28}"
-              f"{record['contrast_delta']:>+10.4f}{record['treated_delta']:>+10.4f}"
-              f"{record['control_delta']:>+10.4f}   {record['combined_descriptive_status']}")
+              f"{record['contrast_delta']['point']:>+10.4f}"
+              f"{record['treated_delta']['point']:>+10.4f}"
+              f"{record['control_delta']['point']:>+10.4f}"
+              f"   {record['combined_descriptive_status']}")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     destination = output_dir / f"{args.dataset}_multiseed_paired.json"
     destination.write_text(json.dumps({
+        "schema_version": 4,
         "analysis": "three-seed crossed paired bootstrap, v3 post-hoc",
         "post_hoc_diagnostic_only": True,
         "inferential_status": "descriptive_not_formal",
@@ -836,9 +957,14 @@ def main():
         },
         "point_estimate": "mean over seeds of (ALFNet - MoGERNN); equals the "
                           "difference of the two published three-seed means",
-        "endpoint_groups": {name: [list(k) for k in keys] for name, keys in FAMILIES.items()},
+        "endpoint_groups": {
+            "lce_primary": [list(k) for k in PRIMARY_LCE],
+            "ples_descriptive": [list(k) for k in PRIMARY_PLES],
+        },
         "endpoint_groups_status": "code-fixed post-hoc grouping, not pre-registered",
-        "post_hoc_margins": margins,
+        "post_hoc_lce_margins": margins,
+        "post_hoc_contrast_margins": contrast_margins,
+        "post_hoc_arm_margins": arm_margins,
         "margin_status": "chosen after the v3 test split was read; post-hoc, not "
                          "pre-registered, and not usable as an acceptance threshold",
         "power_note": "n_seed=3. The exact two-sided sign-flip null over three "
@@ -853,7 +979,8 @@ def main():
                                   "would be read as one.",
         "provenance": provenance,
         "records": records,
-        "ples_arm_records": ples_records,
+        "records_scope": "LCE main/phase/trajectory only; PLES lives in ples_records",
+        "ples_records": ples_records,
         "ples_status_definitions": {
             "contrast_status": "favourable | degraded | equivalent | uncertain, "
                                "from the contrast interval against contrast_margin",

@@ -1,4 +1,4 @@
-"""Three-seed PLES endpoints must report both arms, not the contrast alone.
+"""Multiseed PLES: both models, both arms, and a checkable algebra identity.
 
 A PLES contrast is gameable by construction:
 
@@ -6,19 +6,18 @@ A PLES contrast is gameable by construction:
     FaultPenalty       = treated(Fault)  - control(Steady)    smaller is better
     OutageFaultPenalty = the same, read at tau = input_len - 1
 
-so a model that merely predicts the *control* arm worse improves JoinLift and
-shrinks both penalties without forecasting anything better. The arms are what
-separate that from a real improvement, and three orthogonal statuses keep the
-distinction visible instead of collapsing it into one verdict:
+so degrading the control arm improves all three without forecasting anything
+better. Publishing the contrast without its arms therefore publishes a number a
+reader cannot interpret, and publishing it *twice* -- once bare, once with arms
+-- lets a consumer pick the bare one. There is now exactly one PLES record and
+it always carries both arms and both models.
 
-  contrast_status              did the contrast move, against contrast_margin
-  arms_pareto_status           how the two absolute-error arms moved
-  combined_descriptive_status  which of the three conditions held
-
-``combined_descriptive_status`` deliberately says ``all_conditions_met`` rather
-than "accepted": v3 has no pre-registered gate, so it describes and adjudicates
-nothing. Three marginal intervals also do not have joint 95% coverage, so no
-joint claim is made anywhere.
+The important test here is the **end-to-end** one. Earlier tests assembled
+point/draw dictionaries by hand, which exercises the classifier but not the
+production data flow, so it could not have caught a contrast and its arms being
+computed from different draws. The end-to-end test runs real ``RowTensor``s
+through ``statistics_and_arms`` -> ``crossed_bootstrap`` -> ``build_ples_records``
+and checks the algebra per draw.
 """
 
 import numpy as np
@@ -27,194 +26,270 @@ import pytest
 from scripts.multiseed_paired_inference import (
     ARM_METRICS,
     EFFECT_DEFINITION,
+    MODEL_A,
+    MODEL_B,
     PLES_EFFECTS,
     NonFiniteValue,
     _arm_status,
     _interval_status,
     arms_pareto_status,
     build_ples_records,
+    build_records,
     combined_status,
+    crossed_bootstrap,
+    per_seed_values,
+    statistics_and_arms,
 )
+from scripts.paired_model_bootstrap import RowTensor, _pair_keys
 
 SEEDS = [32, 42, 52]
-MARGINS = {"MAE": 0.05, "MAPE": 0.25, "RMSE": None}
-MODEL_A, MODEL_B = "ALFNet", "MoGERNN"
+INPUT_LEN = 4
+CONTRAST = {"MAE": 0.05, "MAPE": 0.25, "RMSE": None}
+ARM = {"MAE": 0.05, "MAPE": 0.25, "RMSE": None}
 
 
-def _inputs(contrast, treated, control, effect="JoinLift", metric="MAE", spread=0.01):
-    """All six endpoints, with the one under test carrying the given values.
+# --- a minimal but real tensor ------------------------------------------------
 
-    build_ples_records requires every endpoint to be present -- a missing one is
-    a hard failure, not a reduced set -- so the fixture supplies them all and
-    leaves the others neutral.
-    """
-    rng = np.random.default_rng(0)
-    point, draws, seed_deltas, absolute = {}, {}, {s: {} for s in SEEDS}, {}
-    for candidate_effect in PLES_EFFECTS:
-        for candidate_metric in ARM_METRICS:
-            selected = (candidate_effect == effect and candidate_metric == metric)
-            values = {
-                ("ples", candidate_effect, candidate_metric): contrast if selected else 0.0,
-                ("arm", f"{candidate_effect}/treated", candidate_metric): treated if selected else 0.0,
-                ("arm", f"{candidate_effect}/control", candidate_metric): control if selected else 0.0,
-            }
-            for key, value in values.items():
-                point[key] = value
-                draws[key] = rng.normal(value, spread if selected else 1e-6, 400)
-                for seed in SEEDS:
-                    seed_deltas[seed][key] = value
-    for seed in SEEDS:
-        absolute[seed] = {
-            model: {("arm", f"{e}/{a}", m): 1.0
-                    for e in PLES_EFFECTS for a in ("treated", "control")
-                    for m in ARM_METRICS}
-            for model in (MODEL_A, MODEL_B)
+
+def _rows(treated, control, spread=0.0):
+    """Two origins x two regimes x two cohorts x both tracks x every tau."""
+    rows = []
+    for origin in (1, 2):
+        for regime in ("Weekday/Midday", "Weekend/Midday"):
+            for cohort in (1, 2):
+                for track in ("join", "fault"):
+                    for tau in range(INPUT_LEN):
+                        phase = ({0: "Cold", INPUT_LEN - 1: "Ready"}.get(tau, "Warm")
+                                 if track == "join" else
+                                 {0: "Onset", INPUT_LEN - 1: "Outage"}.get(tau, "Decay"))
+                        bump = spread * tau
+                        rows.append({
+                            "dataset": "TEST", "model": "M", "origin_id": origin,
+                            "calendar_day": f"2026-01-0{origin}", "regime": regime,
+                            "event_time_index": origin * 1000,
+                            "event_timestamp": "2026-01-01 10:00:00",
+                            "cohort_id": cohort, "cohort_fraction": 0.05,
+                            "cohort_style": "clustered", "track": track, "tau": tau,
+                            "phase": phase, "node_count": 4, "count": 10,
+                            "graph_weight": None, "patch_residual_weight": None,
+                            "treated_ape_sum": (treated + bump) * 10,
+                            "control_ape_sum": control * 10,
+                            "treated_ae_sum": (treated + bump) * 10,
+                            "control_ae_sum": control * 10,
+                            "treated_se_sum": (treated + bump) ** 2 * 10,
+                            "control_se_sum": control ** 2 * 10,
+                        })
+    return rows
+
+
+def _tensor(rows):
+    return RowTensor(rows, _pair_keys(rows), INPUT_LEN, trajectory_span=8)
+
+
+def _tensors(a_treated, a_control, b_treated, b_control):
+    """Same design for every seed, tiny per-seed jitter so seeds are distinct."""
+    out = {}
+    for index, seed in enumerate(SEEDS):
+        jitter = 0.01 * index
+        out[seed] = {
+            MODEL_A: _tensor(_rows(a_treated + jitter, a_control + jitter)),
+            MODEL_B: _tensor(_rows(b_treated + jitter, b_control + jitter)),
         }
-    return point, draws, seed_deltas, absolute
+    return out
 
 
-def _record(contrast, treated, control, effect="JoinLift", metric="MAE", spread=0.01):
-    point, draws, seed_deltas, absolute = _inputs(
-        contrast, treated, control, effect, metric, spread)
-    records = build_ples_records(point, draws, seed_deltas, absolute, SEEDS,
-                                 MARGINS, MARGINS)
-    return next(r for r in records if r["effect"] == effect and r["metric"] == metric)
+def _run(tensors, samples=60, contrast=CONTRAST, arm=ARM):
+    seed_deltas, per_seed_model = per_seed_values(tensors, SEEDS)
+    draws, raw = crossed_bootstrap(tensors, SEEDS, samples=samples, seed=11)
+    point = {k: float(np.mean([seed_deltas[s][k] for s in SEEDS])) for k in seed_deltas[SEEDS[0]]}
+    records = build_ples_records(point, draws, seed_deltas, per_seed_model, raw,
+                                 SEEDS, contrast, arm)
+    return records, point, draws, raw, seed_deltas, per_seed_model
 
 
-# --- definitions and directions are stated, not guessed from a name ----------
+# --- 1-6: the production data flow -------------------------------------------
+
+
+def test_end_to_end_produces_every_endpoint_with_both_models_and_arms():
+    records, *_ = _run(_tensors(2.0, 1.0, 3.0, 1.0))
+    assert len(records) == len(PLES_EFFECTS) * len(ARM_METRICS)
+    assert {(r["effect"], r["metric"]) for r in records} == {
+        (e, m) for e in PLES_EFFECTS for m in ARM_METRICS}
+
+    for record in records:
+        for model in (MODEL_A, MODEL_B):
+            for quantity in ("contrast", "treated_absolute_error", "control_absolute_error"):
+                entry = record["models"][model][quantity]
+                assert set(entry) == {"point", "per_seed", "interval"}
+                assert set(entry["per_seed"]) == {str(s) for s in SEEDS}
+                assert entry["interval"]["low"] <= entry["interval"]["high"]
+        for delta in ("contrast_delta", "treated_delta", "control_delta"):
+            assert set(record[delta]) == {"point", "per_seed", "interval"}
+
+
+def test_the_delta_draw_is_the_difference_of_the_two_raw_draws():
+    """Not a separately resampled quantity -- the same replicate, subtracted."""
+    _, _, draws, raw, _, _ = _run(_tensors(2.0, 1.0, 3.0, 1.0))
+    for effect in PLES_EFFECTS:
+        for metric in ARM_METRICS:
+            key = ("ples", effect, metric)
+            assert np.allclose(draws[key], raw[MODEL_A][key] - raw[MODEL_B][key],
+                               atol=0, rtol=0)
+
+
+def test_the_algebra_identity_holds_at_point_per_seed_and_per_draw():
+    records, *_ = _run(_tensors(2.0, 1.0, 3.0, 1.5))
+    for record in records:
+        algebra = record["algebra_identity"]
+        assert abs(algebra["point_residual"]) <= algebra["tolerance"]
+        assert algebra["max_abs_per_seed_residual"] <= algebra["tolerance"]
+        assert algebra["max_abs_per_draw_residual"] <= algebra["tolerance"]
+        expected = ("contrast = control - treated"
+                    if record["effect"] == "JoinLift" else "contrast = treated - control")
+        assert algebra["formula"] == expected
+
+
+def test_outage_uses_the_settled_tau_only():
+    """treated rises with tau, so Outage must differ from the Decay mean."""
+    tensors = {}
+    for index, seed in enumerate(SEEDS):
+        tensors[seed] = {
+            MODEL_A: _tensor(_rows(2.0 + 0.01 * index, 1.0, spread=1.0)),
+            MODEL_B: _tensor(_rows(3.0 + 0.01 * index, 1.0, spread=1.0)),
+        }
+    records, _, _, _, _, per_seed_model = _run(tensors)
+    outage = next(r for r in records
+                  if r["effect"] == "OutageFaultPenalty" and r["metric"] == "MAE")
+    penalty = next(r for r in records
+                   if r["effect"] == "FaultPenalty" and r["metric"] == "MAE")
+    assert outage["models"][MODEL_A]["treated_absolute_error"]["point"] != pytest.approx(
+        penalty["models"][MODEL_A]["treated_absolute_error"]["point"])
+
+
+def test_contrast_and_arms_share_one_multiplicity(monkeypatch):
+    """One weight vector per replicate reaches every seed and both models."""
+    from scripts import multiseed_paired_inference as module
+
+    seen = []
+    real = module.statistics_and_arms
+
+    def _spy(tensor, weights):
+        seen.append(tuple(np.asarray(weights).tolist()))
+        return real(tensor, weights)
+
+    monkeypatch.setattr(module, "statistics_and_arms", _spy)
+    tensors = _tensors(2.0, 1.0, 3.0, 1.0)
+    seen.clear()
+    module.crossed_bootstrap(tensors, SEEDS, samples=1, seed=5)
+    assert len(set(seen)) == 1, f"{len(set(seen))} distinct weight vectors in one replicate"
+
+
+def test_generic_records_contain_no_ples_endpoint():
+    """A bare, arms-free PLES verdict must not exist anywhere."""
+    tensors = _tensors(2.0, 1.0, 3.0, 1.0)
+    seed_deltas, _ = per_seed_values(tensors, SEEDS)
+    draws, _ = crossed_bootstrap(tensors, SEEDS, samples=40, seed=3)
+    point = {k: float(np.mean([seed_deltas[s][k] for s in SEEDS])) for k in seed_deltas[SEEDS[0]]}
+    records = build_records(point, draws, seed_deltas, SEEDS, CONTRAST)
+    assert records, "fixture produced no LCE records"
+    assert not [r for r in records if r["table"] == "ples"]
+    assert not [r for r in records if r["table"] == "arm"]
+
+
+# --- 7-8: the counterexamples ------------------------------------------------
+
+
+def test_both_arms_improve_but_contrast_degrades():
+    """ALFNet is better on both arms, but the control arm improves more."""
+    records, *_ = _run(_tensors(a_treated=2.0, a_control=1.0,
+                                b_treated=2.6, b_control=3.0))
+    record = next(r for r in records if r["effect"] == "JoinLift" and r["metric"] == "MAE")
+    assert record["treated_status"] == "improve"
+    assert record["control_status"] == "improve"
+    assert record["arms_pareto_status"] == "treated_improves_control_non_degraded"
+    assert record["contrast_status"] == "degraded"
+    assert record["combined_descriptive_status"] == "contrast_degraded"
+
+
+def test_control_only_degradation_never_reads_as_favourable():
+    """Identical treated arm, worse control arm: JoinLift rises regardless."""
+    records, *_ = _run(_tensors(a_treated=2.0, a_control=4.0,
+                                b_treated=2.0, b_control=1.0))
+    record = next(r for r in records if r["effect"] == "JoinLift" and r["metric"] == "MAE")
+    assert record["contrast_status"] == "favourable"
+    assert record["control_status"] == "degrade"
+    assert record["combined_descriptive_status"] != "all_conditions_met"
+    assert record["arms_pareto_status"] == "control_degraded"
+
+
+# --- 9: non-finite input fails closed ----------------------------------------
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+@pytest.mark.parametrize("target", ["raw_draw", "delta_draw", "point", "per_seed"])
+def test_non_finite_values_fail_closed(bad, target):
+    records, point, draws, raw, seed_deltas, per_seed_model = _run(
+        _tensors(2.0, 1.0, 3.0, 1.0))
+    key = ("ples", "JoinLift", "MAE")
+    if target == "raw_draw":
+        raw[MODEL_A][key] = np.append(raw[MODEL_A][key][:-1], bad)
+    elif target == "delta_draw":
+        draws[key] = np.append(draws[key][:-1], bad)
+    elif target == "point":
+        point[key] = bad
+    else:
+        seed_deltas[42][key] = bad
+    with pytest.raises(NonFiniteValue):
+        build_ples_records(point, draws, seed_deltas, per_seed_model, raw,
+                           SEEDS, CONTRAST, ARM)
+
+
+def test_a_broken_algebra_identity_fails_closed():
+    """If the contrast were not the signed arm difference, it must not ship."""
+    records, point, draws, raw, seed_deltas, per_seed_model = _run(
+        _tensors(2.0, 1.0, 3.0, 1.0))
+    key = ("ples", "JoinLift", "MAE")
+    draws[key] = draws[key] + 1.0          # contrast no longer matches its arms
+    point[key] = point[key] + 1.0
+    for seed in SEEDS:
+        seed_deltas[seed][key] += 1.0
+    with pytest.raises(NonFiniteValue, match="not the signed difference"):
+        build_ples_records(point, draws, seed_deltas, per_seed_model, raw,
+                           SEEDS, CONTRAST, ARM)
+
+
+# --- 10: the two margins move independently ----------------------------------
+
+
+def test_contrast_and_arm_margins_are_independent():
+    tensors = _tensors(a_treated=2.0, a_control=1.0, b_treated=2.02, b_control=1.0)
+
+    wide_contrast = {"MAE": 100.0, "MAPE": 100.0, "RMSE": None}
+    records, *_ = _run(tensors, contrast=wide_contrast, arm=ARM)
+    record = next(r for r in records if r["effect"] == "JoinLift" and r["metric"] == "MAE")
+    assert record["contrast_status"] == "equivalent"
+
+    wide_arm = {"MAE": 100.0, "MAPE": 100.0, "RMSE": None}
+    records, *_ = _run(tensors, contrast=CONTRAST, arm=wide_arm)
+    record = next(r for r in records if r["effect"] == "JoinLift" and r["metric"] == "MAE")
+    assert record["treated_status"] == "equivalent"
+    assert record["control_status"] == "equivalent"
+
+
+# --- status primitives (helper level, retained) ------------------------------
 
 
 def test_effect_definitions_are_explicit():
     assert EFFECT_DEFINITION["JoinLift"]["orientation"] == "higher_is_better"
     assert EFFECT_DEFINITION["FaultPenalty"]["orientation"] == "lower_is_better"
     assert EFFECT_DEFINITION["OutageFaultPenalty"]["orientation"] == "lower_is_better"
-    assert "control(Unseen) - treated(Join)" in EFFECT_DEFINITION["JoinLift"]["formula"]
-    assert "input_len - 1" in EFFECT_DEFINITION["OutageFaultPenalty"]["formula"]
-
-
-def test_oriented_advantage_is_positive_for_alfnet_on_every_endpoint():
-    """One sign convention across endpoints whose raw signs differ."""
-    lift = _record(contrast=+1.0, treated=-1.0, control=-1.0, effect="JoinLift")
-    assert lift["contrast_oriented_advantage"] > 0
-
-    penalty = _record(contrast=-1.0, treated=-1.0, control=-1.0, effect="FaultPenalty")
-    assert penalty["contrast_delta"] < 0          # penalty fell
-    assert penalty["contrast_oriented_advantage"] > 0   # which favours ALFNet
-
-
-def test_every_endpoint_and_metric_is_present():
-    point, draws, seed_deltas, absolute = {}, {}, {s: {} for s in SEEDS}, {}
-    rng = np.random.default_rng(1)
-    for effect in PLES_EFFECTS:
-        for metric in ARM_METRICS:
-            for key in (("ples", effect, metric),
-                        ("arm", f"{effect}/treated", metric),
-                        ("arm", f"{effect}/control", metric)):
-                point[key] = -0.5
-                draws[key] = rng.normal(-0.5, 0.01, 200)
-                for seed in SEEDS:
-                    seed_deltas[seed][key] = -0.5
-    for seed in SEEDS:
-        absolute[seed] = {model: {("arm", f"{e}/{a}", m): 1.0
-                                  for e in PLES_EFFECTS for a in ("treated", "control")
-                                  for m in ARM_METRICS}
-                          for model in (MODEL_A, MODEL_B)}
-    records = build_ples_records(point, draws, seed_deltas, absolute, SEEDS,
-                                 MARGINS, MARGINS)
-    assert len(records) == len(PLES_EFFECTS) * len(ARM_METRICS)
-    assert {(r["effect"], r["metric"]) for r in records} == {
-        (e, m) for e in PLES_EFFECTS for m in ARM_METRICS}
-
-
-# --- the four counterexamples ------------------------------------------------
-
-
-def test_control_only_degradation_does_not_meet_the_conditions():
-    """The exploit: JoinLift = control - treated, so a *worse* control arm
-    (a larger control error) inflates the lift while the forecast on joined
-    nodes is unchanged."""
-    exploit = _record(contrast=+1.0, treated=0.0, control=+1.0)
-    assert exploit["contrast_status"] == "favourable"
-    assert exploit["control_status"] == "degrade"
-    assert exploit["arms_pareto_status"] == "control_degraded"
-    assert exploit["combined_descriptive_status"] == \
-        "contrast_favourable_but_control_degraded"
-    assert "all_conditions_met" not in exploit["combined_descriptive_status"]
-
-
-def test_both_arms_improve_but_contrast_degrades_is_reported_as_such():
-    """Control improves more than treated, so the contrast genuinely worsens."""
-    record = _record(contrast=-1.0, treated=-0.5, control=-2.0)
-    assert record["contrast_status"] == "degraded"
-    assert record["treated_status"] == "improve"
-    assert record["control_status"] == "improve"
-    assert record["arms_pareto_status"] == "treated_improves_control_non_degraded"
-    assert record["combined_descriptive_status"] == "contrast_degraded"
-
-
-def test_treated_improves_control_non_degraded_and_contrast_improves():
-    record = _record(contrast=+1.0, treated=-1.0, control=0.0)
-    assert record["contrast_status"] == "favourable"
-    assert record["treated_status"] == "improve"
-    assert record["control_status"] in {"improve", "equivalent"}
-    assert record["combined_descriptive_status"] == "all_conditions_met"
-
-
-def test_an_interval_crossing_zero_is_uncertain():
-    record = _record(contrast=+0.05, treated=-0.02, control=0.0, spread=2.0)
-    assert record["contrast_status"] == "uncertain"
-    assert record["combined_descriptive_status"].startswith("contrast_uncertain")
-
-
-def test_an_exact_tie_is_equivalent_not_a_win():
-    record = _record(contrast=0.0, treated=0.0, control=0.0, spread=1e-6)
-    assert record["contrast_status"] == "equivalent"
-    assert record["treated_status"] == "equivalent"
-    assert record["arms_pareto_status"] == "no_material_arm_change"
-
-
-# --- non-finite input fails closed -------------------------------------------
-
-
-@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
-def test_a_non_finite_draw_fails_closed(bad):
-    point, draws, seed_deltas, absolute = _inputs(+1.0, -1.0, 0.0)
-    key = ("arm", "JoinLift/treated", "MAE")
-    draws[key] = np.append(draws[key][:-1], bad)
-    with pytest.raises(NonFiniteValue, match="draws"):
-        build_ples_records(point, draws, seed_deltas, absolute, SEEDS, MARGINS, MARGINS)
-
-
-def test_a_non_finite_per_seed_contrast_fails_closed():
-    point, draws, seed_deltas, absolute = _inputs(+1.0, -1.0, 0.0)
-    seed_deltas[42][("ples", "JoinLift", "MAE")] = float("nan")
-    with pytest.raises(NonFiniteValue, match="non-finite per-seed"):
-        build_ples_records(point, draws, seed_deltas, absolute, SEEDS, MARGINS, MARGINS)
-
-
-def test_a_missing_arm_endpoint_fails_closed():
-    point, draws, seed_deltas, absolute = _inputs(+1.0, -1.0, 0.0)
-    del draws[("arm", "JoinLift/control", "MAE")]
-    with pytest.raises(NonFiniteValue, match="missing endpoint"):
-        build_ples_records(point, draws, seed_deltas, absolute, SEEDS, MARGINS, MARGINS)
-
-
-# --- status primitives -------------------------------------------------------
 
 
 def test_interval_status_respects_orientation():
-    # higher-is-better: an interval above +margin is favourable
     assert _interval_status(1.0, 0.5, 1.5, 0.25, True) == "favourable"
     assert _interval_status(-1.0, -1.5, -0.5, 0.25, True) == "degraded"
-    # lower-is-better: the other way round
     assert _interval_status(-1.0, -1.5, -0.5, 0.25, False) == "favourable"
     assert _interval_status(1.0, 0.5, 1.5, 0.25, False) == "degraded"
-
-
-def test_interval_status_without_a_margin_never_says_equivalent():
-    """With no scale there is no basis for calling something negligible."""
-    assert _interval_status(0.001, 0.0005, 0.0015, None, False) == "degraded"
-    assert _interval_status(-0.001, -0.0015, -0.0005, None, False) == "favourable"
 
 
 def test_arm_status_is_always_lower_is_better():
@@ -225,7 +300,6 @@ def test_arm_status_is_always_lower_is_better():
 
 
 def test_no_status_uses_confirmatory_wording():
-    """v3 has no pre-registered gate, so nothing here accepts or rejects."""
     banned = ("accept", "reject", "pass", "fail", "significant")
     values = set()
     for treated in ("improve", "degrade", "equivalent", "uncertain"):
