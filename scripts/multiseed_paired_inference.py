@@ -268,6 +268,63 @@ def _row_design_hash(rows):
     return digest.hexdigest()
 
 
+PLES_EFFECTS = ("JoinLift", "FaultPenalty", "OutageFaultPenalty")
+ARM_METRICS = ("MAPE", "MAE")
+
+# Effect definitions and directions, stated rather than inferred from a name.
+#   JoinLift          = control(Unseen)  - treated(Join)     larger is better
+#   FaultPenalty      = treated(Fault)   - control(Steady)   smaller is better
+#   OutageFaultPenalty= the same, read at tau = input_len - 1
+# The arms are absolute errors, so on an arm smaller is always better.
+EFFECT_DEFINITION = {
+    "JoinLift": {"track": "join", "orientation": "higher_is_better",
+                 "formula": "control(Unseen) - treated(Join)"},
+    "FaultPenalty": {"track": "fault", "orientation": "lower_is_better",
+                     "formula": "treated(Fault) - control(Steady)"},
+    "OutageFaultPenalty": {"track": "fault", "orientation": "lower_is_better",
+                           "formula": "treated - control at tau = input_len - 1"},
+}
+
+
+def compute_arms(tensor, weights):
+    """Treated and control absolute error behind each PLES endpoint.
+
+    Mirrors the endpoint selection in ``compute_statistics`` exactly and takes
+    the *same* weight vector, so within one bootstrap replicate the contrast and
+    its two arms are computed from one draw. Recomputing the arms from a second
+    draw would let them describe a different resample than the contrast they are
+    supposed to explain.
+    """
+    post_slots = [slot for value, slot in tensor.tau_slot.items() if value >= 0]
+    outage_slot = tensor.tau_slot.get(tensor.input_len - 1)
+    output = {}
+    for metric in ARM_METRICS:
+        treated = tensor.calendar_balanced("treated", metric, weights)
+        control = tensor.calendar_balanced("control", metric, weights)
+        for effect in PLES_EFFECTS:
+            track = tensor.track_slot[EFFECT_DEFINITION[effect]["track"]]
+            if effect == "OutageFaultPenalty":
+                if outage_slot not in post_slots:
+                    raise NonFiniteValue(
+                        f"missing the settled outage cell tau={tensor.input_len - 1}")
+                index = post_slots.index(outage_slot)
+                arms = {"treated": float(treated[track, post_slots][index]),
+                        "control": float(control[track, post_slots][index])}
+            else:
+                arms = {"treated": float(np.mean(treated[track, post_slots])),
+                        "control": float(np.mean(control[track, post_slots]))}
+            for arm, value in arms.items():
+                output[("arm", f"{effect}/{arm}", metric)] = value
+    return output
+
+
+def statistics_and_arms(tensor, weights):
+    """One call so a caller cannot accidentally use two different draws."""
+    merged = dict(compute_statistics(tensor, weights))
+    merged.update(compute_arms(tensor, weights))
+    return merged
+
+
 def _cohort_multiplicity(tensor, rng):
     multiplicity = np.zeros(int(max(tensor.cohort_ids)) + 1, dtype=np.float64)
     for cohort_id in rng.choice(tensor.cohort_ids, size=len(tensor.cohort_ids), replace=True):
@@ -295,15 +352,17 @@ def _weights(tensor, rng, cohort_multiplicity):
 
 
 def per_seed_deltas(tensors, seeds):
-    """Observed ALFNet - MoGERNN at each seed, on the full (unresampled) rows."""
-    out = {}
+    """Observed ALFNet - MoGERNN at each seed, plus each model's own arm values."""
+    out, absolute = {}, {}
     for seed in seeds:
         ones_a = np.ones(tensors[seed][MODEL_A].n_rows, dtype=np.float64)
         ones_b = np.ones(tensors[seed][MODEL_B].n_rows, dtype=np.float64)
-        stats_a = compute_statistics(tensors[seed][MODEL_A], ones_a)
-        stats_b = compute_statistics(tensors[seed][MODEL_B], ones_b)
+        stats_a = statistics_and_arms(tensors[seed][MODEL_A], ones_a)
+        stats_b = statistics_and_arms(tensors[seed][MODEL_B], ones_b)
         out[seed] = {key: stats_a[key] - stats_b[key] for key in stats_a}
-    return out
+        absolute[seed] = {MODEL_A: {k: v for k, v in stats_a.items() if k[0] == "arm"},
+                          MODEL_B: {k: v for k, v in stats_b.items() if k[0] == "arm"}}
+    return out, absolute
 
 
 def crossed_bootstrap(tensors, seeds, samples, seed):
@@ -337,8 +396,8 @@ def crossed_bootstrap(tensors, seeds, samples, seed):
         accumulated = defaultdict(float)
         total = sum(seed_multiplicity.values())
         for drawn, repeats in seed_multiplicity.items():
-            stats_a = compute_statistics(tensors[drawn][MODEL_A], weights)
-            stats_b = compute_statistics(tensors[drawn][MODEL_B], weights)
+            stats_a = statistics_and_arms(tensors[drawn][MODEL_A], weights)
+            stats_b = statistics_and_arms(tensors[drawn][MODEL_B], weights)
             for key in stats_a:
                 accumulated[key] += repeats * (stats_a[key] - stats_b[key]) / total
         if draws is None:
@@ -453,7 +512,9 @@ def build_records(point, draws, seed_deltas, seeds, margins):
     _assert_key_sets_agree(point, draws, seed_deltas, seeds)
     family_of = {key: name for name, keys in FAMILIES.items() for key in keys}
     records = []
-    for key in sorted(draws):
+    # Arm keys are reported by build_ples_records beside their contrast; emitting
+    # them here as well would double-count them as standalone endpoints.
+    for key in sorted(k for k in draws if k[0] != "arm"):
         table, row, metric = key
         delta_draws = np.asarray(draws[key], dtype=np.float64)
         # Order matters and used to be wrong: the percentile was taken over
@@ -505,6 +566,143 @@ def build_records(point, draws, seed_deltas, seeds, margins):
     return records
 
 
+def _interval_status(delta, low, high, margin, higher_is_better):
+    """favourable / degraded / equivalent / uncertain, from the interval.
+
+    ``margin`` may be None, in which case only the sign of the interval is used
+    and nothing is ever called equivalent -- there is no scale to call it on.
+    """
+    if not all(np.isfinite(v) for v in (delta, low, high)):
+        return "uncertain"
+    better_low, better_high = (low, high) if higher_is_better else (-high, -low)
+    threshold = 0.0 if margin is None else margin
+    if better_low > threshold:
+        return "favourable"
+    if better_high < -threshold:
+        return "degraded"
+    if margin is not None and -margin <= low and high <= margin:
+        return "equivalent"
+    return "uncertain"
+
+
+def _arm_status(delta, low, high, margin):
+    """Arms are absolute errors: lower is better, always."""
+    status = _interval_status(delta, low, high, margin, higher_is_better=False)
+    return {"favourable": "improve", "degraded": "degrade"}.get(status, status)
+
+
+NON_DEGRADED_ARMS = {"improve", "equivalent"}
+
+
+def arms_pareto_status(treated, control):
+    if treated == "improve" and control in NON_DEGRADED_ARMS:
+        return "treated_improves_control_non_degraded"
+    if control == "degrade":
+        return "control_degraded"
+    if treated == "degrade":
+        return "treated_degraded"
+    if treated in NON_DEGRADED_ARMS and control in NON_DEGRADED_ARMS:
+        return "no_material_arm_change"
+    return "uncertain"
+
+
+def combined_status(contrast, treated, control):
+    """All three conditions, or a statement of which one failed.
+
+    Deliberately not ``accepted``/``rejected``: v3 has no pre-registered gate,
+    so this describes which conditions held, it does not adjudicate anything.
+    Nor is it a joint 95% statement -- three marginal intervals do not have
+    joint coverage, and a v4 joint rule belongs in a pre-registered plan.
+    """
+    if contrast == "favourable" and treated == "improve" and control in NON_DEGRADED_ARMS:
+        return "all_conditions_met"
+    if contrast != "favourable":
+        return f"contrast_{contrast}"
+    if control == "degrade":
+        return "contrast_favourable_but_control_degraded"
+    if treated != "improve":
+        return f"contrast_favourable_but_treated_{treated}"
+    return "uncertain"
+
+
+def build_ples_records(point, draws, seed_deltas, seed_absolute, seeds,
+                       contrast_margins, arm_margins):
+    """One record per PLES endpoint carrying the contrast and both arms.
+
+    Contrast and arms come from the same draws by construction: they were
+    computed together in ``statistics_and_arms`` from one weight vector.
+    """
+    def _interval(key):
+        values = np.asarray(draws[key], dtype=np.float64)
+        if values.size == 0:
+            raise NonFiniteValue(f"{key}: no bootstrap draws")
+        _require_finite(values, f"draws {key}")
+        return float(np.percentile(values, 2.5)), float(np.percentile(values, 97.5))
+
+    records = []
+    for effect in PLES_EFFECTS:
+        for metric in ARM_METRICS:
+            contrast_key = ("ples", effect, metric)
+            treated_key = ("arm", f"{effect}/treated", metric)
+            control_key = ("arm", f"{effect}/control", metric)
+            for key in (contrast_key, treated_key, control_key):
+                if key not in draws or key not in point:
+                    raise NonFiniteValue(f"missing endpoint {key}")
+
+            higher_is_better = EFFECT_DEFINITION[effect]["orientation"] == "higher_is_better"
+            contrast_margin = margin_for(metric, contrast_margins)
+            arm_margin = margin_for(metric, arm_margins)
+
+            contrast_low, contrast_high = _interval(contrast_key)
+            treated_low, treated_high = _interval(treated_key)
+            control_low, control_high = _interval(control_key)
+
+            contrast = _interval_status(point[contrast_key], contrast_low, contrast_high,
+                                        contrast_margin, higher_is_better)
+            treated = _arm_status(point[treated_key], treated_low, treated_high, arm_margin)
+            control = _arm_status(point[control_key], control_low, control_high, arm_margin)
+
+            # oriented so positive always favours ALFNet, whatever the endpoint
+            oriented = point[contrast_key] if higher_is_better else -point[contrast_key]
+            tally = seed_tally([seed_deltas[s][contrast_key] for s in seeds], higher_is_better)
+            if tally["n_nonfinite"]:
+                raise NonFiniteValue(f"{contrast_key}: non-finite per-seed contrast")
+
+            records.append({
+                "effect": effect, "metric": metric,
+                "definition": EFFECT_DEFINITION[effect]["formula"],
+                "orientation": EFFECT_DEFINITION[effect]["orientation"],
+                "contrast_delta": float(point[contrast_key]),
+                "contrast_oriented_advantage": float(oriented),
+                "contrast_ci": {"low": contrast_low, "high": contrast_high},
+                "contrast_margin": contrast_margin,
+                "arm_margin": arm_margin,
+                "treated_delta": float(point[treated_key]),
+                "treated_ci": {"low": treated_low, "high": treated_high},
+                "control_delta": float(point[control_key]),
+                "control_ci": {"low": control_low, "high": control_high},
+                "absolute": {
+                    model: {
+                        arm: {str(s): float(seed_absolute[s][model][("arm", f"{effect}/{arm}", metric)])
+                              for s in seeds}
+                        for arm in ("treated", "control")
+                    }
+                    for model in (MODEL_A, MODEL_B)
+                },
+                "per_seed_contrast": {str(s): float(seed_deltas[s][contrast_key]) for s in seeds},
+                "per_seed_treated_delta": {str(s): float(seed_deltas[s][treated_key]) for s in seeds},
+                "per_seed_control_delta": {str(s): float(seed_deltas[s][control_key]) for s in seeds},
+                **tally,
+                "seed_unanimous": _unanimous(tally, len(seeds)),
+                "contrast_status": contrast,
+                "arms_pareto_status": arms_pareto_status(treated, control),
+                "treated_status": treated,
+                "control_status": control,
+                "combined_descriptive_status": combined_status(contrast, treated, control),
+            })
+    return records
+
+
 def margin_for(metric, margins):
     """Margin for a metric, or None when no basis for one exists.
 
@@ -529,7 +727,7 @@ def main():
     seeds, bundles = load_seed_bundles(args.dataset, args.output_root)
     tensors, provenance = build_tensors(seeds, bundles)
 
-    seed_deltas = per_seed_deltas(tensors, seeds)
+    seed_deltas, seed_absolute = per_seed_deltas(tensors, seeds)
     point = {
         key: float(np.mean([seed_deltas[s][key] for s in seeds]))
         for key in seed_deltas[seeds[0]]
@@ -541,6 +739,11 @@ def main():
                # no independent basis for an RMSE threshold; describe direction only
                "RMSE": None}
     records = build_records(point, draws, seed_deltas, seeds, margins)
+    # Contrast margins and arm margins are separate configuration on purpose:
+    # sharing a number because the units match is how one silently becomes the
+    # other. Both are post-hoc for v3.
+    ples_records = build_ples_records(point, draws, seed_deltas, seed_absolute,
+                                      seeds, margins, margins)
 
     print(f"MultiSeedPairedInference: {MODEL_A} vs {MODEL_B} | {args.dataset}")
     print(f"  seeds={seeds} | samples={args.bootstrap_samples} | "
@@ -557,6 +760,14 @@ def main():
               f"/{record['n_tie']}/{record['n_evaluable']}"
               f"{'  U' if record['seed_unanimous'] else '   '}"
               f"  {record['verdict']}")
+
+    print()
+    print(f"  {'PLES endpoint':<28}{'contrast':>10}{'treatedD':>10}{'controlD':>10}"
+          f"   combined")
+    for record in ples_records:
+        print(f"  {record['effect'] + '/' + record['metric']:<28}"
+              f"{record['contrast_delta']:>+10.4f}{record['treated_delta']:>+10.4f}"
+              f"{record['control_delta']:>+10.4f}   {record['combined_descriptive_status']}")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -600,6 +811,18 @@ def main():
                                   "would be read as one.",
         "provenance": provenance,
         "records": records,
+        "ples_arm_records": ples_records,
+        "ples_status_definitions": {
+            "contrast_status": "favourable | degraded | equivalent | uncertain, "
+                               "from the contrast interval against contrast_margin",
+            "arms_pareto_status": "how the two absolute-error arms moved",
+            "combined_descriptive_status": "all_conditions_met requires contrast "
+                                           "favourable AND treated improve AND control "
+                                           "non-degraded; it describes which conditions "
+                                           "held and adjudicates nothing",
+            "joint_coverage": "none. Three marginal intervals do not have joint 95% "
+                              "coverage; a joint rule belongs in a pre-registered v4 plan.",
+        },
     }, indent=2, allow_nan=False), encoding="utf-8")
     print(f"\n-> {destination}")
 

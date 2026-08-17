@@ -264,7 +264,7 @@ def test_one_block_and_cohort_draw_is_shared_by_every_seed_and_both_models(monke
         seen.append((tensor.offset, tuple(np.asarray(weights).tolist())))
         return {("main", "Unseen", "MAE"): float(tensor.offset)}
 
-    monkeypatch.setattr(module, "compute_statistics", _spy)
+    monkeypatch.setattr(module, "statistics_and_arms", _spy)
     tensors = {s: {MODEL_A: _FakeTensor(s), MODEL_B: _FakeTensor(s + 1000)}
                for s in SEEDS}
 
@@ -289,7 +289,7 @@ def test_a_repeated_seed_is_reweighted_not_resampled(monkeypatch):
         calls.append(tensor.offset)
         return {("main", "Unseen", "MAE"): float(tensor.offset)}
 
-    monkeypatch.setattr(module, "compute_statistics", _spy)
+    monkeypatch.setattr(module, "statistics_and_arms", _spy)
     tensors = {s: {MODEL_A: _FakeTensor(s), MODEL_B: _FakeTensor(s + 1000)}
                for s in SEEDS}
 
@@ -422,7 +422,7 @@ def test_seed_multiplicity_actually_reaches_the_number(monkeypatch):
     def _stats(tensor, weights):
         return {KEY: tensor.value}
 
-    monkeypatch.setattr(module, "compute_statistics", _stats)
+    monkeypatch.setattr(module, "statistics_and_arms", _stats)
     monkeypatch.setattr(module.np.random, "default_rng", module.np.random.default_rng)
 
     class _RNG:
