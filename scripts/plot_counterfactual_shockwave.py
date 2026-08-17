@@ -572,6 +572,40 @@ COUNT_SEMANTICS = (
 )
 
 
+def bootstrap_block_structure(rows, trajectory_span):
+    """The resampling units exactly as the bootstrap builds them.
+
+    One helper for both the sampler and the reported counts. They had drifted:
+    the sampler gives each overlap block **one** stratum, taken from the lowest
+    origin id among its members, while the count function added a block to every
+    day type any of its rows mentioned. A block spanning midnight therefore
+    appeared under two day types and ``sum(blocks_per_day_type)`` exceeded
+    ``overlap_block_count`` -- reported counts that did not describe the units
+    actually resampled.
+
+    The rule reproduced here is the sampler's, verbatim: ``min(members)`` is the
+    smallest origin *id*, not the earliest event time.
+    """
+    origin_times, origin_stratum = {}, {}
+    for row in rows:
+        origin = int(row["origin_id"])
+        origin_times[origin] = int(row.get("event_time_index", origin))
+        origin_stratum[origin] = str(row.get("regime", "all")).split("/")[0]
+
+    assignment = overlap_blocks(origin_times, trajectory_span)
+    members = defaultdict(list)
+    for origin, block in assignment.items():
+        members[block].append(origin)
+    block_stratum = {block: origin_stratum[min(group)]
+                     for block, group in members.items()}
+    return {
+        "origin_to_block": assignment,
+        "block_to_origins": {block: sorted(group) for block, group in members.items()},
+        "block_to_stratum": block_stratum,
+        "origin_stratum": origin_stratum,
+    }
+
+
 def _endpoint_row_selector(effect, input_len):
     """The rows one endpoint is computed over -- the same selection as its cells."""
     if effect == "JoinLift":
@@ -635,12 +669,13 @@ def endpoint_sample_counts(main_rows, curves, input_len):
 
 def top_level_sample_counts(raw_rows, main_rows, trajectory_span):
     """Shared design counts, after main-cohort filtering and before resampling."""
-    origin_times = {row["origin_id"]: int(row["event_time_index"]) for row in main_rows}
-    blocks = overlap_blocks(origin_times, trajectory_span)
+    structure = bootstrap_block_structure(main_rows, trajectory_span)
+    # Each block belongs to exactly one bootstrap stratum, so these counts
+    # partition the blocks rather than double-counting a block that spans
+    # midnight or two day types.
     per_day_type = defaultdict(set)
-    for row in main_rows:
-        day_type = str(row["regime"]).split("/")[0]
-        per_day_type[day_type].add(blocks[row["origin_id"]])
+    for block, stratum in structure["block_to_stratum"].items():
+        per_day_type[stratum].add(block)
 
     design = _design_counts(main_rows)
     counts = {
@@ -662,7 +697,12 @@ def top_level_sample_counts(raw_rows, main_rows, trajectory_span):
         },
         "bootstrap_units": {
             "unique_origin_count": design["unique_origin_count"],
-            "overlap_block_count": len(set(blocks.values())),
+            "overlap_block_count": len(structure["block_to_stratum"]),
+            "block_stratum_rule": (
+                "one bootstrap stratum per overlap block, taken from the day type "
+                "of the lowest origin id in the block; NOT the union of the "
+                "calendar labels its rows carry"
+            ),
             "cohort_count": design["unique_cohort_count"],
             "day_type_strata": sorted(per_day_type),
             "blocks_per_day_type": {k: len(v) for k, v in sorted(per_day_type.items())},
@@ -874,13 +914,12 @@ def bootstrap_advantages_v2(ours_rows, baseline_rows, input_len, samples=2000, s
             "each origin would be resampled independently even though adjacent "
             "origins share data, and the interval would come out too narrow"
         )
-    assignment = overlap_blocks(origin_times, trajectory_span)
-    blocks = defaultdict(list)
-    for origin, block in assignment.items():
-        blocks[block].append(origin)
-    block_stratum = {block: origin_stratum[min(members)] for block, members in blocks.items()}
+    # Same helper the reported counts use, so the two cannot describe different
+    # resampling units again.
+    structure = bootstrap_block_structure(ours_rows, trajectory_span)
+    blocks = structure["block_to_origins"]
     blocks_by_stratum = defaultdict(list)
-    for block, stratum in sorted(block_stratum.items()):
+    for block, stratum in sorted(structure["block_to_stratum"].items()):
         blocks_by_stratum[stratum].append(block)
 
     rng = np.random.default_rng(seed)

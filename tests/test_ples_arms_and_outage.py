@@ -1231,3 +1231,78 @@ def test_main_writes_counts_and_semantics(tmp_path, monkeypatch):
     _all_ints(payload["sample_counts"])
     for record in payload["ples_records"]:
         _all_ints(record["sample_counts"])
+
+
+# --- H3: reported strata must be the bootstrap's strata ----------------------
+
+
+def _cross_midnight_rows():
+    """Two origins inside one overlap block, on different day types.
+
+    Origin 1 is Weekday, origin 2 is Weekend, and their event times are close
+    enough that ``overlap_blocks`` chains them into a single block. The block
+    therefore has one bootstrap stratum but two calendar labels among its rows.
+    """
+    rows = []
+    for origin, regime in ((1, "Weekday/Evening"), (2, "Weekend/EarlyAM")):
+        for track in ("join", "fault"):
+            for tau in range(INPUT_LEN):
+                row = _row(track, tau, 1, 2.0, 1.0, regime=regime, origin=origin)
+                row["event_time_index"] = origin * 2   # adjacent -> one block
+                rows.append(row)
+    return rows
+
+
+def test_a_block_spanning_two_day_types_is_counted_once():
+    """The old count added the block under both day types."""
+    rows = _cross_midnight_rows()
+    structure = plot.bootstrap_block_structure(rows, trajectory_span=8)
+
+    assert len(structure["block_to_stratum"]) == 1, "fixture must give one block"
+    block = next(iter(structure["block_to_stratum"]))
+    assert sorted(structure["block_to_origins"][block]) == [1, 2]
+    # one stratum, from the lowest origin id (origin 1 -> Weekday)
+    assert structure["block_to_stratum"][block] == "Weekday"
+
+    counts = plot.top_level_sample_counts(rows, rows, trajectory_span=8)
+    units = counts["bootstrap_units"]
+    assert units["overlap_block_count"] == 1
+    assert units["blocks_per_day_type"] == {"Weekday": 1}
+    assert "Weekend" not in units["blocks_per_day_type"], (
+        "a block must not appear under every calendar label its rows carry")
+
+
+def test_stratum_block_counts_partition_the_blocks():
+    """The invariant the old counting violated."""
+    for rows in (_cross_midnight_rows(), _counts_fixture()):
+        counts = plot.top_level_sample_counts(rows, rows, trajectory_span=8)
+        units = counts["bootstrap_units"]
+        assert sum(units["blocks_per_day_type"].values()) == units["overlap_block_count"]
+
+
+def test_the_sampler_and_the_report_share_one_block_stratum_mapping(monkeypatch):
+    """Both must call the same helper, not two similar implementations."""
+    rows = _cross_midnight_rows()
+    seen = []
+    real = plot.bootstrap_block_structure
+
+    def _spy(rows_arg, span):
+        result = real(rows_arg, span)
+        seen.append(dict(result["block_to_stratum"]))
+        return result
+
+    monkeypatch.setattr(plot, "bootstrap_block_structure", _spy)
+    plot.top_level_sample_counts(rows, rows, trajectory_span=8)
+    plot.bootstrap_advantages_v2(rows, [dict(r, model="MoGERNN") for r in rows],
+                                 INPUT_LEN, samples=1000, seed=3, trajectory_span=8)
+    assert len(seen) >= 2
+    assert all(mapping == seen[0] for mapping in seen), (
+        "the report and the sampler disagreed on the block-stratum mapping")
+
+
+def test_the_block_stratum_rule_is_stated_in_the_output():
+    rows = _counts_fixture()
+    counts = plot.top_level_sample_counts(rows, rows, trajectory_span=8)
+    rule = counts["bootstrap_units"]["block_stratum_rule"]
+    assert "one bootstrap stratum per overlap block" in rule
+    assert "NOT the union" in rule
