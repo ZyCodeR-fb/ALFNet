@@ -132,8 +132,9 @@ def test_the_registry_start_time_is_accepted(dataset, tmp_path):
 
 
 def test_a_dataset_without_a_candidate_build_is_refused(tmp_path):
+    """PEMS-BAY keeps its canonical payload; it is not rebuilt."""
     with pytest.raises(ConversionRefused, match="no candidate build"):
-        build("PEMS08", output_dir=tmp_path)
+        build("PEMSBAY", output_dir=tmp_path)
 
 
 # --- PEMS03 has one channel --------------------------------------------------

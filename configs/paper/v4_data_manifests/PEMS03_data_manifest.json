@@ -1,0 +1,68 @@
+{
+  "adjacency": {
+    "kernelised": false,
+    "rule": "source-native directed binary from the edge list",
+    "shape": [
+      358,
+      358
+    ],
+    "symmetrised": false
+  },
+  "conversion": {
+    "code_commit": "b4a5d5c0b0320ee630f5281f2575875ab6ffc3cb",
+    "command": "python scripts/v4_build_candidate_payload.py --dataset PEMS03",
+    "converter": "scripts/v4_build_candidate_payload.py",
+    "converter_sha256": "b12c4ae713dae9e2fb49e748e05e4b375cdad331154fe7196e17ec6be143d3ab"
+  },
+  "dataset": "PEMS03",
+  "output": {
+    "path": "data/PEMS03/v4_candidate/raw_data_v4_candidate.pkl.npy",
+    "sha256": "30926d180a48d0b6baa7c8ddc6a20ffd273843875e7205358c901861caf81e22"
+  },
+  "payload_version": "v4_candidate",
+  "positions_note": "No positions are written. Zeros or node indices would masquerade as a solution; absence is the honest state.",
+  "positions_status": "unresolved",
+  "schema": 1,
+  "signal": {
+    "cast_from": "float64",
+    "cast_is_lossless_for_float32_range": true,
+    "channel_order": [
+      "flow"
+    ],
+    "dtype": "float32",
+    "shape": [
+      26208,
+      358,
+      1
+    ]
+  },
+  "source_provenance_caveat": "These files match the widely circulated benchmark format and their shapes and node counts agree with the published descriptions. This repository cannot by itself establish that the bytes are the authoritative Caltrans distribution. They are recorded as benchmark-format sources with local hashes, not as verified upstream originals.",
+  "sources": {
+    "edges": {
+      "bytes": 7523,
+      "edge_count": 547,
+      "path": "data/PEMS03/original/PEMS03.csv",
+      "sha256": "d8b1119783efa2b0ff78798e22affcd3d388d45e2c99da7457d96bb926a59749"
+    },
+    "signal": {
+      "array_key": "data",
+      "bytes": 15800415,
+      "path": "data/PEMS03/original/PEMS03.npz",
+      "sha256": "34859517425eded66a0014db63de54b95d0428c38890741a1710ed4d3b043de8"
+    }
+  },
+  "target": {
+    "channel": 0,
+    "name": "q"
+  },
+  "time": {
+    "authority": "configs/paper/v4_dataset_registry.json; the source NPZ carries no timestamps",
+    "end": "2018-11-30T23:55:00.000000000",
+    "freq_minutes": 5,
+    "semantics": "nominal local 5-minute grid; the source carries no timestamps or timezone",
+    "start": "2018-09-01T00:00:00.000000000",
+    "steps": 26208
+  },
+  "training_ready": false,
+  "training_ready_blocked_by": "positions/layout unresolved: the previous spectral pos_stamp is degenerate on disconnected graphs and not basis-stable. A deterministic graph-native layout lands in Stage 2-A2."
+}

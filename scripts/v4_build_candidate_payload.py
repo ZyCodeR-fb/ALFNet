@@ -36,7 +36,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 REGISTRY_PATH = ROOT / "configs/paper/v4_dataset_registry.json"
-BUILDABLE = ("PEMS03", "PEMS04")
+TRACKED_MANIFESTS = ROOT / "configs/paper/v4_data_manifests"
+# PEMS08 is here despite already having correct dates: v4 changes its target
+# from speed to flow and replaces the converter-symmetrised RBF graph with the
+# source-native directed one, so it needs its own candidate rather than reusing
+# the v3 payload.
+BUILDABLE = ("PEMS03", "PEMS04", "PEMS08")
 
 
 class ConversionRefused(SystemExit):
@@ -129,8 +134,7 @@ def code_commit():
 def build(dataset, output_dir=None, start_time=None):
     if dataset not in BUILDABLE:
         raise ConversionRefused(
-            f"{dataset} has no candidate build in this round; only {BUILDABLE} "
-            "carry the wrong-timestamp defect")
+            f"{dataset} has no candidate build; only {BUILDABLE} are rebuilt for v4")
     entry, registry = load_registry(dataset)
 
     if start_time is not None and start_time != entry["start_time"]:
@@ -217,9 +221,18 @@ def build(dataset, output_dir=None, start_time=None):
         "output": {"path": _repo_relative(actual_path),
                    "sha256": file_sha256(actual_path)},
     }
+    body = json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False)
     manifest_path = destination / "v4_candidate_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2, allow_nan=False),
-                             encoding="utf-8")
+    manifest_path.write_text(body, encoding="utf-8")
+
+    # The canonical copy is version-controlled. The runtime copy lives beside the
+    # payload under data/, which .gitignore excludes -- so on its own it could not
+    # tell another machine what should have been produced. The two are written
+    # byte-for-byte identical and a test asserts it.
+    if output_dir is None:
+        TRACKED_MANIFESTS.mkdir(parents=True, exist_ok=True)
+        (TRACKED_MANIFESTS / f"{dataset}_data_manifest.json").write_text(
+            body, encoding="utf-8")
     return manifest, actual_path, manifest_path
 
 
