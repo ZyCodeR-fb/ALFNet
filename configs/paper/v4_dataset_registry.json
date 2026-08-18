@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "purpose": "Authoritative per-dataset facts for v4 conversion and preflight. The converter reads dates from here rather than accepting an arbitrary --start_time, because the original NPZ files carry no timestamps and a wrong start silently corrupts day-of-week, which LCBT calendar stratification and LCE's 5/7-2/7 weighting both key on.",
+  "provenance_caveat": "These files match the widely circulated benchmark format and their shapes and node counts agree with the published descriptions. This repository cannot by itself establish that the bytes are the authoritative Caltrans distribution. They are recorded as benchmark-format sources with local hashes, not as verified upstream originals.",
+  "datasets": {
+    "PEMS03": {
+      "target": "q",
+      "target_channel": 0,
+      "channel_order": ["flow"],
+      "expected_shape": [26208, 358, 1],
+      "num_nodes": 358,
+      "start_time": "2018-09-01 00:00:00",
+      "end_time": "2018-11-30 23:55:00",
+      "freq_minutes": 5,
+      "time_semantics": "nominal local 5-minute grid; the source carries no timestamps or timezone",
+      "signal_source": "original/PEMS03.npz",
+      "edge_source": "original/PEMS03.csv",
+      "notes": "Single channel: any configuration requesting v (channel 2) is out of range and must fail closed."
+    },
+    "PEMS04": {
+      "target": "q",
+      "target_channel": 0,
+      "channel_order": ["flow", "occupancy", "speed"],
+      "expected_shape": [16992, 307, 3],
+      "num_nodes": 307,
+      "start_time": "2018-01-01 00:00:00",
+      "end_time": "2018-02-28 23:55:00",
+      "freq_minutes": 5,
+      "time_semantics": "nominal local 5-minute grid; the source carries no timestamps or timezone",
+      "signal_source": "original/PEMS04.npz",
+      "edge_source": "original/PEMS04.csv"
+    },
+    "PEMS08": {
+      "target": "q",
+      "target_channel": 0,
+      "channel_order": ["flow", "occupancy", "speed"],
+      "expected_shape": [17856, 170, 3],
+      "num_nodes": 170,
+      "start_time": "2016-07-01 00:00:00",
+      "end_time": "2016-08-31 23:55:00",
+      "freq_minutes": 5,
+      "time_semantics": "nominal local 5-minute grid",
+      "signal_source": "original/PEMS08.npz",
+      "edge_source": "original/PEMS08.csv",
+      "notes": "Dates in the active v3 payload are already correct. v4 changes the target from speed to flow, so PEMS08 must be retrained."
+    },
+    "PEMSBAY": {
+      "target": "v",
+      "target_channel": 0,
+      "channel_order": ["speed", "unused", "unused"],
+      "expected_shape": [52116, 325, 3],
+      "num_nodes": 325,
+      "start_time": "2017-01-01 00:00:00",
+      "end_time": "2017-06-30 23:55:00",
+      "freq_minutes": 5,
+      "time_semantics": "America/Los_Angeles local wall clock. 2017-03-12 01:55 -> 03:00 is the spring-forward DST transition and is continuous in UTC. Do NOT insert 12 NaN rows and do NOT delete the window; cadence checks must be timezone-aware or done in UTC.",
+      "signal_source": "raw_data.pkl",
+      "edge_source": "canonical DCRNN directed Gaussian road-distance graph",
+      "notes": "Real WGS84 coordinates and a directed adjacency. Must not be symmetrised."
+    }
+  }
+}

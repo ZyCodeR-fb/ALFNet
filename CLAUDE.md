@@ -4,6 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ---
 
+## ACTIVE ROADMAP — minimal-change v4
+
+Work has moved to a **minimal-change v4** scope, frozen in
+`docs/v4_minimal_change_freeze.md`: four datasets (PEMS03, PEMS04, PEMS08,
+PEMS-BAY), dataset-native targets (flow for the three PeMS sets, speed for
+PEMS-BAY), and no architecture rewrite. METR-LA stays as a retrospective record.
+
+Paused because they change no metric: D2-B content-addressed publication, the
+independent collector oracle, and regenerating v3 diagnostics. Existing Stage 1
+code stays; it is not extended further.
+
+---
+
 ## ACTIVE STATUS — read this before trusting anything below
 
 Much of this file documents **v3**, which is now a *historical, topology-known, post-hoc retrospective*.
