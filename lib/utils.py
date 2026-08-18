@@ -23,8 +23,18 @@ def load_project_adjacency(cfg):
 
 
 def load_project_positions(cfg):
+    """Coordinates, or None when the payload ships none.
+
+    A v4 payload without coordinates omits `pos_stamp` entirely rather than
+    writing zeros or node indices, which would look like an answer. Callers must
+    handle None; ALFTemporal falls back to a graph-native layout and
+    StructuralNodeEncoder already has a topology-only path.
+    """
     raw = _load_raw_payload(cfg["data_path"])
-    return np.asarray(raw["pos_stamp"], dtype=np.float32)
+    positions = raw.get("pos_stamp") if hasattr(raw, "get") else None
+    if positions is None:
+        return None
+    return np.asarray(positions, dtype=np.float32)
 
 
 def infer_project_num_nodes(cfg):

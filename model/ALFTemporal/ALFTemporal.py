@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from lib.graph_native_layout import layout_parts
 from lib.utils import load_project_adjacency, load_project_positions
 from model.comparison_model.family_utils import build_patchstg_cfg
 from .patchstg import PatchSTG as PatchSTGBackbone
@@ -69,7 +70,19 @@ def _build_spatial_layout(
     recur_times,
     spa_patchsize,
 ):
-    parts_idx = _kd_tree(positions.T, int(recur_times), 0)
+    """Partition nodes into patches, from coordinates when they exist.
+
+    ``positions`` may be None. PEMS03, PEMS04 and PEMS08 ship no coordinates,
+    and the spectral vectors the old converter substituted are degenerate on
+    disconnected graphs and not basis-stable, so a KD-tree over them partitions
+    by an arbitrary basis. In that case the partition comes from the graph
+    itself. The output contract is unchanged -- a list of parts, padded but
+    never split by `_reorder_data` -- so nothing downstream moves.
+    """
+    if positions is None:
+        parts_idx = layout_parts(adj, int(recur_times))
+    else:
+        parts_idx = _kd_tree(positions.T, int(recur_times), 0)
     ori_parts_idx, reo_parts_idx, reo_all_idx = _reorder_data(
         parts_idx,
         adj,
@@ -107,6 +120,8 @@ class Model(nn.Module):
         full_adj = load_project_adjacency(
             {"data_path": configs.data_path}
         ).cpu().numpy()
+        # None when the dataset ships no trustworthy coordinates; the layout
+        # then comes from the graph rather than from invented positions.
         positions = load_project_positions({"data_path": configs.data_path})
         ori_parts_idx, reo_parts_idx, reo_all_idx, spa_patchnum = (
             _build_spatial_layout(
@@ -128,9 +143,10 @@ class Model(nn.Module):
         # the message can name the value to put in the YAML.
         expected_tokens = int(spa_patchnum) * int(model_cfg["spa_patchsize"])
         if len(reo_all_idx) != expected_tokens:
-            largest = max(
-                len(part) for part in _kd_tree(positions.T, int(model_cfg["recur_times"]), 0)
-            )
+            parts = (layout_parts(full_adj, int(model_cfg["recur_times"]))
+                     if positions is None
+                     else _kd_tree(positions.T, int(model_cfg["recur_times"]), 0))
+            largest = max(len(part) for part in parts)
             raise ValueError(
                 f"spa_patchsize={model_cfg['spa_patchsize']} cannot hold this "
                 f"dataset's KD-tree partition: {self.full_num_nodes} nodes split "
