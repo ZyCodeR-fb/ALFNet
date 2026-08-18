@@ -304,16 +304,59 @@ def test_paired_bootstrap_reads_the_span_from_the_manifest(tmp_path):
     assert _trajectory_span(directory, 12) == 72
 
 
-def test_plot_script_crossmodel_bootstrap_uses_overlap_blocks():
+def test_plot_script_crossmodel_bootstrap_uses_overlap_blocks(monkeypatch):
+    """Behavioural, not a source grep.
+
+    This asserted that the literal "overlap_blocks" appeared in
+    bootstrap_advantages_v2's body. That is the failure mode this repo already
+    learned once -- the same assertion passed while the feature was inert -- and
+    it broke again the moment the call moved into the shared
+    bootstrap_block_structure helper, without anything behavioural changing.
+
+    So: observe that the sampler actually builds its strata from that helper,
+    and that it still requires the trajectory span.
+    """
     import inspect
 
     from scripts import plot_counterfactual_shockwave as plot
 
-    source = inspect.getsource(plot.bootstrap_advantages_v2)
-    assert "overlap_blocks" in source
-    # cohorts are crossed with origins, so they get one global draw per sample
-    assert "cohort_repeats" in source
+    calls = []
+    real = plot.bootstrap_block_structure
+    monkeypatch.setattr(
+        plot, "bootstrap_block_structure",
+        lambda rows, span: calls.append(span) or real(rows, span))
+
+    rows = _paired_rows_for_blocking()
+    plot.bootstrap_advantages_v2(
+        rows, [dict(row, model="MoGERNN") for row in rows], 4,
+        samples=1000, seed=5, trajectory_span=72)
+    assert calls == [72], "the sampler did not build its blocks from the shared helper"
     assert "trajectory_span" in inspect.signature(plot.bootstrap_advantages_v2).parameters
+
+
+def _paired_rows_for_blocking():
+    sums = ("treated_ape_sum", "control_ape_sum", "treated_ae_sum",
+            "control_ae_sum", "treated_se_sum", "control_se_sum")
+    rows = []
+    for origin in (1, 2):
+        for track in ("join", "fault"):
+            for tau in range(4):
+                phase = ({0: "Cold", 3: "Ready"}.get(tau, "Warm") if track == "join"
+                         else {0: "Onset", 3: "Outage"}.get(tau, "Decay"))
+                row = {
+                    "dataset": "METRLA", "model": "ALFNet", "origin_id": origin,
+                    "calendar_day": "2026-01-01", "regime": "Weekday/Midday",
+                    "event_time_index": origin * 10,
+                    "event_timestamp": "2026-01-01 10:00:00",
+                    "cohort_id": 1, "cohort_fraction": 0.05,
+                    "cohort_style": "clustered", "track": track, "tau": tau,
+                    "phase": phase, "node_count": 4, "count": 10,
+                    "graph_weight": None, "patch_residual_weight": None,
+                }
+                for field in sums:
+                    row[field] = 10.0 if field.startswith("treated") else 5.0
+                rows.append(row)
+    return rows
 
 
 # --- issue 5: objective knobs must reach the experiment signature ------------

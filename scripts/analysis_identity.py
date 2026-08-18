@@ -173,3 +173,166 @@ def prepare_output_dir(report_root, digest):
 def mark_complete(destination, payload):
     (Path(destination) / "COMPLETE").write_text(
         json.dumps(payload, indent=2, sort_keys=True, allow_nan=False), encoding="utf-8")
+
+
+# --- authoritative run resolution and input provenance (D2-A) ----------------
+#
+# Anchored to configs/paper/final_runs.json, which is the same authority the
+# training, audit, evaluation and aggregation already share. Comparing the two
+# bundles to each other was never identity: it accepted swapped roles, an
+# arbitrary model string and an ablation standing in for the mainline.
+#
+# What each field's evidence actually is matters, and is recorded rather than
+# implied. Some fields appear in both the bundle and the authority and are
+# cross-checked; some appear only in one and are merely recorded. Calling the
+# second kind "verified" would be false.
+
+ANALYSIS_IDENTITY_SCHEMA = 1
+
+# Cross-checked: present in the frozen bundle *and* in final_runs.json.
+CROSS_CHECKED_FIELDS = ("dataset", "model", "model_variant", "seed")
+# Recorded from the bundle only; no second source exists to check them against.
+BUNDLE_ONLY_FIELDS = ("exp_id", "protocol_hash", "training_protocol_hash",
+                      "lce_protocol_hash", "ples_protocol_hash")
+# Declared by the authority only; the result bundle does not carry them, so they
+# are reported as declared and never as verified.
+AUTHORITY_ONLY_FIELDS = ("run_id", "canonical_config_hash",
+                         "legacy_canonical_config_hash", "config")
+
+
+def resolve_run(summary, role, bundle_dir, manifest, output_root="./outputs"):
+    """Resolve one bundle to its unique final-run entry, or refuse.
+
+    ``role`` is the slot the bundle was passed in as, so a MoGERNN bundle handed
+    to ``--ours`` is refused here rather than reported under the ALFNet label.
+    Display labels never decide a statistical role.
+    """
+    entry = verify_role(summary, role, manifest)
+
+    seed = int(_require(summary.get("seed"), "seed", f"role={role}"))
+    dataset = _require((summary.get("dataset") or {}).get("name"), "dataset.name",
+                       f"role={role}")
+    matches = [r for r in manifest["runs"]
+               if r["dataset"] == dataset and r["model"] == summary["model"]
+               and int(r["seed"]) == seed]
+    if len(matches) != 1:
+        raise IdentityRefused(
+            f"role={role}: {len(matches)} final-run entries for "
+            f"{summary['model']}/{dataset}/seed {seed}; identity is not unique")
+    if matches[0]["run_id"] != entry["run_id"]:
+        raise IdentityRefused(f"role={role}: run entry disagreement")
+
+    for field in CROSS_CHECKED_FIELDS:
+        found = summary.get(field) if field != "dataset" else dataset
+        expected = entry[field] if field != "dataset" else entry["dataset"]
+        if field == "seed":
+            found, expected = seed, int(entry["seed"])
+        if found != expected:
+            raise IdentityRefused(
+                f"role={role}: {field} is {found!r} in the bundle but {expected!r} "
+                "in the frozen run list")
+
+    # The bundle must live where this final run writes, which is what ties an
+    # on-disk directory to a run_id -- the summary itself carries no run_id.
+    expected_root = (Path(output_root).resolve() / entry["output_subdir"]
+                     / entry["run_id"] / "predictions")
+    actual = Path(bundle_dir).resolve()
+    if actual.parent != expected_root:
+        raise IdentityRefused(
+            f"role={role}: bundle at {actual} is not under the directory this "
+            f"final run writes ({expected_root}); it may belong to another run")
+
+    declared = summary.get("required_training_protocol_hash")
+    if declared and declared != summary.get("training_protocol_hash"):
+        raise IdentityRefused(
+            f"role={role}: training_protocol_hash {summary.get('training_protocol_hash')!r} "
+            f"!= required {declared!r}")
+    for field in BUNDLE_ONLY_FIELDS:
+        _require(summary.get(field), field, f"role={role}")
+    return entry
+
+
+def _repo_relative(path):
+    path = Path(path).resolve()
+    try:
+        return path.relative_to(ROOT).as_posix()
+    except ValueError:
+        # Outside the repo: record the name only. Absolute machine paths must
+        # never enter a hash, or the same inputs hash differently per machine.
+        return f"<external>/{path.name}"
+
+
+def input_provenance(files):
+    """``{logical role: {path, sha256}}`` for every real input file."""
+    out = {}
+    for role, path in sorted(files.items()):
+        resolved = Path(path)
+        if not resolved.exists():
+            raise IdentityRefused(f"provenance input missing: {role} -> {path}")
+        out[role] = {"repo_relative_path": _repo_relative(resolved),
+                     "sha256": file_sha256(resolved)}
+    return out
+
+
+def code_commit():
+    import subprocess
+    try:
+        result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+                                capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
+def build_analysis_identity(*, analysis_type, dataset, roles, seeds, entries,
+                            summaries, endpoint_inventory, resampling,
+                            bootstrap_samples, bootstrap_seed, margins,
+                            inputs, display_labels=None):
+    """Canonical, deterministic identity + provenance payload.
+
+    ``display_labels`` is carried outside the hashed statistical configuration on
+    purpose: renaming a plot legend must not change the identity of the numbers.
+    """
+    statistical = {
+        "analysis_identity_schema": ANALYSIS_IDENTITY_SCHEMA,
+        "analysis_type": analysis_type,
+        "dataset": dataset,
+        "canonical_model_roles": dict(roles),
+        "seeds": sorted(int(s) for s in seeds),
+        "resolved_runs": {
+            role: {
+                **{field: entry[field] for field in AUTHORITY_ONLY_FIELDS
+                   if field in entry},
+                **{field: entry[field] for field in CROSS_CHECKED_FIELDS},
+            }
+            for role, entry in sorted(entries.items())
+        },
+        "bundle_declared": {
+            role: {field: summary.get(field) for field in BUNDLE_ONLY_FIELDS}
+            for role, summary in sorted(summaries.items())
+        },
+        "endpoint_inventory": endpoint_inventory,
+        "resampling_design": resampling,
+        "bootstrap": {"samples": int(bootstrap_samples), "rng_seed": int(bootstrap_seed)},
+        "margins": margins,
+        "inferential_status": "descriptive_not_formal",
+        "post_hoc_diagnostic_only": True,
+        "input_provenance": input_provenance(inputs),
+        "evidence_notes": {
+            "cross_checked": list(CROSS_CHECKED_FIELDS),
+            "bundle_declared_only": list(BUNDLE_ONLY_FIELDS),
+            "authority_declared_only": list(AUTHORITY_ONLY_FIELDS),
+            "canonical_config_hash": (
+                "declared by configs/paper/final_runs.json only. The frozen "
+                "result bundles do not carry it, so it is reported as declared "
+                "and is NOT independently verified here."
+            ),
+        },
+    }
+    payload = dict(statistical)
+    payload["analysis_hash"] = analysis_hash(statistical)
+    payload["code_commit"] = code_commit()
+    if display_labels:
+        # Outside the hash: presentation, not statistics.
+        payload["display_labels"] = dict(display_labels)
+    return payload
