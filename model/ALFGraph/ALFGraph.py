@@ -116,8 +116,34 @@ class ResidualDeltaDecoder(nn.Module):
 
 class Model(nn.Module):
 
+    @classmethod
+    def from_runtime_context(cls, configs, runtime_context):
+        """The v4 entry point.
+
+        ALFGraph reads no graph from disk and must not start: its adjacency
+        arrives per forward call. So this binds only what it can be held to --
+        the static asset hash, the node count and the node order -- and verifies
+        the config does not contradict them.
+        """
+        if runtime_context is None:
+            raise ValueError(
+                "ALFGraph.from_runtime_context requires a RuntimeDataContext; "
+                "v4 fails closed rather than falling back to data_path")
+        from lib.context_binding import assert_config_agrees_with_context
+
+        assert_config_agrees_with_context(configs, runtime_context, "ALFGraph")
+        model = cls(configs)
+        identity = runtime_context.static_asset_identity()
+        model.runtime_context = runtime_context
+        model.static_asset_hash = runtime_context.static_asset_hash()
+        model.context_full_num_nodes = identity["full_num_nodes"]
+        model.context_node_ids_sha256 = identity["node_ids_sha256"]
+        return model
+
     def __init__(self, configs):
         super().__init__()
+        self.runtime_context = None
+        self.static_asset_hash = None
         if not configs.lifecycle_observation_mask_feature:
             raise ValueError("ALFGraph requires the explicit observation-mask channel")
         recipe = (getattr(configs, "model_family_cfg", {}) or {}).get("recipe", {})
