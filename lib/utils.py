@@ -6,15 +6,7 @@ import numpy as np
 import torch
 
 
-def _load_raw_payload(data_path):
-    raw = np.load(data_path, allow_pickle=True)
-    if isinstance(raw, np.ndarray) and raw.shape == ():
-        raw = raw.item()
-    if isinstance(raw, dict):
-        return raw
-    if hasattr(raw, "files"):
-        return {key: raw[key] for key in raw.files}
-    raise ValueError(f"Unsupported raw data payload type: {type(raw)}")
+from lib.v4_payload import load_raw_payload as _load_raw_payload
 
 
 def load_project_adjacency(cfg):

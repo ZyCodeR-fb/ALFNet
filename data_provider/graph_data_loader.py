@@ -30,6 +30,7 @@ from data_provider.lcbt_protocol import (
     stable_hash,
 )
 from data_provider.ples_protocol import build_protocol_manifest, main_table_cohort_plan
+from lib.v4_payload import load_raw_payload
 from utils.timefeatures import time_features
 
 warnings.filterwarnings('ignore')
@@ -54,6 +55,7 @@ def _write_json_atomic(path, payload):
             temporary.unlink()
 
 def _unwrap_raw_data(raw_data):
+    """Kept for callers holding an already-loaded blob; new reads use lib.v4_payload."""
     if isinstance(raw_data, np.ndarray) and raw_data.shape == ():
         return raw_data.item()
     return raw_data
@@ -296,7 +298,7 @@ class LifecycleCoveragePEMS(Dataset):
         }
         self.in_feas = feature_map[input_features]
         self.tar_feas = feature_map[target_features]
-        payload = _unwrap_raw_data(np.load(self.data_path, allow_pickle=True))
+        payload = load_raw_payload(self.data_path)
         raw_source = np.asarray(payload["data"])
         self.raw_data_shape = [int(value) for value in raw_source.shape]
         self.raw_data_hash = array_hash(raw_source)
@@ -1006,7 +1008,7 @@ class AsyncLifecyclePEMS(Dataset):
         self.__read_data__()
 
     def __read_data__(self):
-        raw_data = _unwrap_raw_data(np.load(self.data_path, allow_pickle=True))
+        raw_data = load_raw_payload(self.data_path)
         self.time_stamp_raw = raw_data.get("time_stamp")
         full_time_mark = (
             time_features(self.time_stamp_raw, freq=self.freq)

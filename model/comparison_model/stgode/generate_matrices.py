@@ -4,6 +4,8 @@ import pickle
 from pathlib import Path
 
 import numpy as np
+
+from lib.v4_payload import load_raw_payload
 import torch
 from fastdtw import fastdtw
 from tqdm import tqdm
@@ -20,7 +22,7 @@ def get_normalized_adj(A):
 
 
 def _load_raw_payload(data_path):
-    raw = np.load(data_path, allow_pickle=True)
+    raw = load_raw_payload(data_path)
     if isinstance(raw, dict):
         return raw
     if hasattr(raw, "files"):
