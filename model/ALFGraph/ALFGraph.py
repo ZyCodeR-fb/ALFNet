@@ -109,7 +109,16 @@ class ResidualDeltaDecoder(nn.Module):
             hidden = torch.stack(next_states, dim=0)
             output = anchor[..., :self.output_size] + self.scale * self.projection(current)
             outputs.append(output)
-            use_teacher = self.training and torch.rand(1).item() < teacher_forcing_ratio
+            # `teacher_input is not None` short-circuits before the draw, so a
+            # call that supplies one consumes exactly the RNG it always did.
+            # Without the guard a decoder-input-free training call indexes None:
+            # v4 withholds the future entirely this stage, and a masked decoder
+            # input is the next stage's job, not a crash here.
+            use_teacher = (
+                self.training
+                and teacher_input is not None
+                and torch.rand(1).item() < teacher_forcing_ratio
+            )
             current = teacher_input[:, step] if use_teacher else output
         return torch.stack(outputs, dim=1)
 

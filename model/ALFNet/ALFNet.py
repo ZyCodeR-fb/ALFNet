@@ -490,6 +490,7 @@ class Model(nn.Module):
             # to learn the same two numbers.
             self.runtime_context = runtime_context
             self.static_asset_hash = runtime_context.static_asset_hash()
+            self._v4_adjacency_cache = {}
             self.full_num_nodes = runtime_context.num_nodes
             self.known_nodes = [int(node) for node in runtime_context.known_nodes]
             for name, expert in (("graph", self.graph_expert),
@@ -509,6 +510,7 @@ class Model(nn.Module):
             return
         self.runtime_context = None
         self.static_asset_hash = None
+        self._v4_adjacency_cache = {}
         full_adj = load_project_adjacency({"data_path": configs.data_path})
         self.full_num_nodes = int(full_adj.shape[0])
         self.known_nodes, _ = resolve_known_unknown_nodes(
@@ -701,6 +703,154 @@ class Model(nn.Module):
             }
         return prediction, beta
 
+    # --- the v4 entry point ---------------------------------------------------
+    #
+    # One adapter, and it is the only way a v4 batch reaches this model. It
+    # refuses rather than repairs: a wrong node axis, a batch built under a
+    # different exposure, or a missing field all raise, and none of them fall
+    # back to the v3 ten-tuple. A fallback would be indistinguishable from
+    # success at every call site while quietly reinstating the K-node path.
+
+    V4_REQUIRED_FIELDS = ("base_visible_input", "lifecycle_context",
+                          "encoder_time_marks", "decoder_time_marks",
+                          "context_identity")
+
+    @staticmethod
+    def _collapse_batch_identity(identity):
+        """One identity per batch, or an error. Never a majority vote.
+
+        The default collate turns each string field into a list of B copies and
+        each bool into a (B,) tensor. Samples drawn from two different contexts
+        would arrive here as a list with two distinct values, which is a mixed
+        batch and not something to average over.
+        """
+        if not isinstance(identity, dict):
+            raise ValueError(
+                "the v4 batch carries no context_identity mapping; ALFNet does "
+                "not infer the protocol from tensor shapes")
+        collapsed = {}
+        for key, value in identity.items():
+            if torch.is_tensor(value):
+                values = [element.item() for element in value.reshape(-1)]
+            elif isinstance(value, (list, tuple)):
+                values = list(value)
+            else:
+                collapsed[key] = value
+                continue
+            distinct = sorted(set(values))
+            if len(distinct) != 1:
+                raise ValueError(
+                    f"the v4 batch mixes {key}: {distinct}; samples from two "
+                    "exposures may not share a batch")
+            collapsed[key] = distinct[0]
+        return collapsed
+
+    def _v4_adjacency(self, runtime_context, device, dtype):
+        """The context's adjacency, converted once and then reused.
+
+        Cached per (device, dtype) so the per-batch check is a shape comparison
+        and an already-verified static hash, not a file read or a re-hash. The
+        expensive verification happened when the context was built.
+        """
+        key = (str(device), str(dtype))
+        cache = self._v4_adjacency_cache
+        if key not in cache:
+            adjacency = runtime_context.adjacency.to(device=device, dtype=dtype)
+            nodes = runtime_context.num_nodes
+            if tuple(adjacency.shape) != (nodes, nodes):
+                raise ValueError(
+                    f"context adjacency is {tuple(adjacency.shape)}, expected "
+                    f"({nodes}, {nodes})")
+            cache[key] = adjacency
+        return cache[key]
+
+    def _v4_inputs(self, batch, runtime_context):
+        """Map one named v4 batch onto this model's tensors."""
+        if runtime_context is None:
+            raise ValueError(
+                "ALFNet.forward_v4 requires a RuntimeDataContext; v4 fails "
+                "closed rather than falling back to data_path")
+        if self.runtime_context is None or self.static_asset_hash is None:
+            raise ValueError(
+                "ALFNet.forward_v4 requires a model built through "
+                "from_runtime_context; the archive path is not a v4 model")
+        if self.static_asset_hash != runtime_context.static_asset_hash():
+            raise ValueError(
+                "ALFNet was built on different static graph assets than the "
+                "context this batch came from")
+        if not isinstance(batch, dict):
+            raise ValueError(
+                "ALFNet.forward_v4 takes the v4 named batch; the v3 ten-tuple "
+                "is not accepted and shapes are never sniffed to tell them apart")
+        missing = [field for field in self.V4_REQUIRED_FIELDS if field not in batch]
+        if missing:
+            raise ValueError(f"the v4 batch is missing {missing}")
+
+        # Exposure is per batch, not per constructor: one static model runs all
+        # three phases, and the phase the batch was drawn under has to match the
+        # context the caller is claiming.
+        runtime_context.assert_exposure_matches(
+            self._collapse_batch_identity(batch["context_identity"]), "the v4 batch")
+
+        nodes = runtime_context.num_nodes
+        base = batch["base_visible_input"]
+        lifecycle = batch["lifecycle_context"]
+        for name, tensor in (("base_visible_input", base),
+                             ("lifecycle_context", lifecycle)):
+            if tensor.dim() != 4:
+                raise ValueError(
+                    f"{name} must be [batch, time, node, channel], got "
+                    f"{tuple(tensor.shape)}")
+            if tensor.shape[2] != nodes:
+                raise ValueError(
+                    f"{name} has {tensor.shape[2]} nodes, the context has {nodes}; "
+                    "v4 runs on the full static node axis and a short axis is "
+                    "never padded")
+        if base.shape[-1] != self.raw_enc_in:
+            raise ValueError(
+                f"base_visible_input has {base.shape[-1]} channels, the model "
+                f"reads {self.raw_enc_in}")
+        if lifecycle.shape[-1] != AVAILABILITY_COUNT + 2:
+            raise ValueError(
+                f"lifecycle_context has {lifecycle.shape[-1]} channels, expected "
+                f"{AVAILABILITY_COUNT + 2} (roles, state age, observation mask)")
+
+        # The common dynamic signal first, ALFNet's method features after it, in
+        # the channel order the imputer and both experts already index. Every
+        # model gets the identical base_visible_input; only ALFNet appends this.
+        x_enc = torch.cat([base, lifecycle.to(base.dtype)], dim=-1)
+        if x_enc.shape[-1] != self.mask_index + 1:
+            raise ValueError(
+                f"assembled input has {x_enc.shape[-1]} channels, the lifecycle "
+                f"layout ends at {self.mask_index}")
+
+        marks = batch["encoder_time_marks"].to(base.dtype)
+        horizon = batch["decoder_time_marks"].to(base.dtype)
+        for name, tensor, steps in (("encoder_time_marks", marks, x_enc.shape[1]),
+                                    ("decoder_time_marks", horizon, None)):
+            if tensor.dim() != 3 or tensor.shape[-1] < 3:
+                raise ValueError(
+                    f"{name} must be [batch, step, >=3] with minute/hour/"
+                    f"day-of-week, got {tuple(tensor.shape)}")
+            if steps is not None and tensor.shape[1] != steps:
+                raise ValueError(
+                    f"{name} covers {tensor.shape[1]} steps, the input window is "
+                    f"{steps}")
+        adjacency = self._v4_adjacency(runtime_context, base.device, base.dtype)
+        return adjacency, x_enc, marks, horizon
+
+    def forward_v4(self, batch, runtime_context, epoch=0):
+        """Run one v4 named batch. Full N everywhere, and no future target.
+
+        `x_dec` is deliberately None: teacher forcing needs the decoder-available
+        mask to keep a held-out node's future out of the decoder, and wiring that
+        is the next stage. Passing the target now would be future leakage, and
+        passing it masked would be the next stage's design decided here.
+        """
+        adjacency, x_enc, marks, horizon = self._v4_inputs(batch, runtime_context)
+        return self(adjacency, x_enc, marks, None, None, horizon, epoch,
+                    full_node_axis=True)
+
     def _current_node_ids(self, node_count):
         if node_count == len(self.known_nodes):
             return self.known_nodes
@@ -717,15 +867,25 @@ class Model(nn.Module):
         x_dec,
         dec_t_mark,
         epoch,
+        full_node_axis=False,
     ):
+        # One imputer, one call, on the full node axis in v4. Both branches then
+        # slice their declared channel prefix off this single tensor, so the
+        # common raw/imputed channels they receive are the same numbers by
+        # construction rather than by two paths agreeing.
         filled = self.shared_input_imputer(adjacency, x_enc, x_t_mark, pos_mark)
+        if full_node_axis and filled.size(2) != self.full_num_nodes:
+            raise ValueError(
+                f"the shared imputer returned {filled.size(2)} nodes, the context "
+                f"has {self.full_num_nodes}")
         # filled is [imputed_raw, availability(4), state_age, observation_mask];
         # each expert takes the prefix it declares.
         graph_input = filled[..., :self.graph_input_dim]
         # The shared GRIN is in the graph parameter group. Letting the temporal
         # branch push gradients back into it is the mechanism that cost fg1 its
         # Unseen accuracy relative to the two-expert model; detaching keeps the
-        # imputer optimised for the path that depends on it.
+        # imputer optimised for the path that depends on it. Detaching changes
+        # which gradients flow, never a single value that arrives.
         patch_source = filled.detach() if (
             self.evidence_router_enabled and self.detach_imputer_for_temporal
         ) else filled
@@ -733,8 +893,10 @@ class Model(nn.Module):
         if hasattr(self.graph_expert, "set_current_node_ids"):
             self.graph_expert.set_current_node_ids(self._current_node_ids(filled.size(2)))
         decoder = None if x_dec is None else x_dec[..., :self.output_dim]
-        patch_output = self.patch_expert(
-            adjacency, patch_input, x_t_mark, pos_mark, decoder, dec_t_mark, epoch
+        patch_output = (
+            self.patch_expert.forward_v4(patch_input, x_t_mark) if full_node_axis
+            else self.patch_expert(
+                adjacency, patch_input, x_t_mark, pos_mark, decoder, dec_t_mark, epoch)
         )
         if self.film_fusion:
             # One forecast, one decoder. The patch branch only conditions it.
@@ -764,6 +926,7 @@ class Model(nn.Module):
         x_dec=None,
         dec_t_mark=None,
         epoch=0,
+        full_node_axis=False,
     ):
         y_graph, y_patch, expert_aux_losses = self._run_experts(
             adjacency,
@@ -773,6 +936,7 @@ class Model(nn.Module):
             x_dec,
             dec_t_mark,
             epoch,
+            full_node_axis,
         )
         state, last_availability = self._state(x_enc)
         y_graph = self.graph_refiner(y_graph, adjacency, last_availability)

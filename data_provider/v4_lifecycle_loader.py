@@ -28,13 +28,15 @@ from data_provider.lifecycle_roles import (
     ROLE_AAS, ROLE_CHANNEL_COUNT, ROLE_FS, ROLE_NAS, ROLE_VS,
 )
 from lib.v4_payload import load_v4_payload
+from utils.timefeatures import time_features
 
 
 class V4LifecycleDataset(Dataset):
     """Full-N windows with sample-level exposure masks."""
 
     def __init__(self, context, payload_path, input_len=12, pred_len=12,
-                 seed=32, epoch=0, split_fractions=(0.6, 0.2, 0.2), scaler=None):
+                 seed=32, epoch=0, split_fractions=(0.6, 0.2, 0.2), scaler=None,
+                 freq="min"):
         if context is None:
             raise ContextRefused(
                 "v4 requires a RuntimeDataContext; it is not inferred from the "
@@ -71,6 +73,19 @@ class V4LifecycleDataset(Dataset):
 
         stamps = np.asarray(payload["time_stamp"])
         self.stamps = stamps
+        # Calendar features, from the payload's own timestamps and through the
+        # same `time_features` the v3 loader used, at the same `freq`. At
+        # freq="min" that is exactly [minute-of-hour, hour-of-day, day-of-week]
+        # -- the three columns ALFTemporal indexes positionally. Deriving them
+        # here rather than in a model keeps one definition for both models and
+        # all three phases, and adds no feature the v3 semantics did not have.
+        self.freq = str(freq)
+        self.time_marks = np.ascontiguousarray(
+            time_features(stamps, freq=self.freq).astype(np.float32))
+        if self.time_marks.shape[0] != steps:
+            raise ContextRefused(
+                f"time marks cover {self.time_marks.shape[0]} steps, the signal "
+                f"has {steps}")
         self._build_origins()
         self._build_schedule(seed, epoch, stamps)
 
@@ -204,6 +219,12 @@ class V4LifecycleDataset(Dataset):
             "target": target,
             "lifecycle_role_ids": torch.from_numpy(roles),
             "lifecycle_state_age": torch.from_numpy(ages),
+            # Calendar only. No node id, no holiday flag, and identical for
+            # every node, so nothing here can carry a forbidden measurement.
+            "encoder_time_marks": torch.from_numpy(
+                self.time_marks[origin:end].copy()),
+            "decoder_time_marks": torch.from_numpy(
+                self.time_marks[end:stop].copy()),
             # ALFNet's method inputs, kept out of base_visible_input so every
             # baseline receives the identical common tensor. The next stage's
             # adapter concatenates these for ALFNet only.

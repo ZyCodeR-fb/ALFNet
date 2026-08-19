@@ -278,6 +278,42 @@ class Model(nn.Module):
             -1, -1, self.full_num_nodes, -1
         )
 
+    def forward_v4(self, x_enc, x_t_mark):
+        """The v4 path: full N in, full N out, and no scatter anywhere.
+
+        Deliberately a second entry point rather than a branch inside `forward`.
+        The scatter is what made this expert's Unseen nodes a column of zeros
+        while the graph expert saw a shared imputed representation, so v4 must
+        be unable to reach it -- a test monkeypatches `_scatter_to_full_nodes`
+        to raise and requires this to keep working. `forward` and the scatter
+        stay for the v3 archive and are not extended.
+
+        A node axis that is not the context's N is refused rather than padded.
+        Zero-padding a short axis is exactly the defect being removed, and it
+        would be invisible: the shapes downstream would all be right.
+        """
+        if self.runtime_context is None:
+            raise ValueError(
+                "ALFTemporal.forward_v4 requires a model built through "
+                "from_runtime_context; the archive path has no context to check")
+        if x_enc.dim() != 4:
+            raise ValueError(
+                f"ALFTemporal v4 expects [batch, time, node, channel], got "
+                f"{tuple(x_enc.shape)}")
+        if x_enc.shape[2] != self.full_num_nodes:
+            raise ValueError(
+                f"ALFTemporal v4 received {x_enc.shape[2]} nodes but the context "
+                f"has {self.full_num_nodes}; the full static node axis is the "
+                "only accepted input and a short axis is never padded")
+        if x_enc.shape[-1] < self.expert_input_dim:
+            raise ValueError(
+                f"ALFTemporal expects at least {self.expert_input_dim} input "
+                f"channels (raw + lifecycle context), got {x_enc.shape[-1]}")
+        full_x = x_enc[..., :self.expert_input_dim]
+        full_te = self._build_temporal_features(full_x, x_t_mark)
+        out = self.backbone(full_x, full_te).contiguous()
+        return {"features": out} if self.emit == "features" else {"pred": out}
+
     def _scatter_to_full_nodes(self, x_enc, current_node_ids):
         if x_enc.shape[-1] < self.expert_input_dim:
             raise ValueError(
