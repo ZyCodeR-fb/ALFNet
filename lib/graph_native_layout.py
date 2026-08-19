@@ -32,6 +32,7 @@ to relabelling nodes arbitrarily -- only to relabelling that carries the ids
 along with the nodes.
 """
 
+import hashlib
 from collections import deque
 
 import numpy as np
@@ -135,3 +136,38 @@ def layout_signature(adjacency, recur_times):
     for index, part in enumerate(parts):
         lines.append(f"part{index}:" + ",".join(str(int(n)) for n in part))
     return "\n".join(lines)
+
+
+# --- the one layout authority --------------------------------------------------
+
+KDTREE_ALGORITHM = "kdtree_on_verified_wgs84"
+
+
+def resolve_layout(adjacency, positions, recur_times):
+    """The single answer to "how is this dataset partitioned into patches?".
+
+    Three places need it -- the manifest builder, the RuntimeDataContext and
+    ALFTemporal -- and they must not each decide for themselves. They did: the
+    manifest recorded `graph_native_component_bfs` for every dataset while
+    ALFTemporal used a KD-tree whenever coordinates existed, so PEMS-BAY's
+    manifest described a layout the model never built.
+
+    The hash is over the resolved *membership* -- the ordered parts actually
+    produced -- not over the adjacency or the algorithm name. Hashing the input
+    cannot detect a builder that ignores it, which is exactly the failure here.
+    """
+    if positions is None:
+        parts = layout_parts(adjacency, int(recur_times))
+        algorithm = LAYOUT_ALGORITHM
+    else:
+        from model.ALFTemporal.ALFTemporal import _kd_tree
+
+        parts = _kd_tree(np.asarray(positions).T, int(recur_times), 0)
+        algorithm = KDTREE_ALGORITHM
+    ordered = [[int(node) for node in part] for part in parts]
+    lines = [f"{algorithm}/v{LAYOUT_VERSION}", f"recur_times={int(recur_times)}"]
+    for index, part in enumerate(ordered):
+        lines.append(f"part{index}:" + ",".join(str(node) for node in part))
+    membership = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+    return {"parts": ordered, "algorithm": algorithm,
+            "version": LAYOUT_VERSION, "membership_sha256": membership}

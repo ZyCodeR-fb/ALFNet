@@ -188,3 +188,73 @@ def test_the_context_is_not_training_ready(contexts):
         assert context.readiness["training_ready"] is False
         assert context.provisional_split is True, (
             "the V/T partition is provisional until Stage 2-B freezes it")
+
+
+# --- one layout authority ------------------------------------------------------
+
+
+def test_pemsbay_uses_the_kdtree_and_the_others_do_not():
+    """The manifest recorded graph_native for every dataset while ALFTemporal
+    built a KD-tree whenever coordinates existed, so PEMS-BAY's manifest
+    described a layout the model never built and hashed one it never used."""
+    import json
+    from pathlib import Path
+
+    expected = {"PEMS03": "graph_native_component_bfs",
+                "PEMS04": "graph_native_component_bfs",
+                "PEMS08": "graph_native_component_bfs",
+                "PEMSBAY": "kdtree_on_verified_wgs84"}
+    for dataset, algorithm in expected.items():
+        manifest = json.loads(
+            (Path("configs/paper/v4_data_manifests") / f"{dataset}_run_manifest.json")
+            .read_text("utf-8"))
+        assert manifest["layout"]["algorithm"] == algorithm, dataset
+        context = build_runtime_context(dataset, "train")
+        assert context.layout_algorithm == algorithm
+        assert context.layout_sha256 == manifest["layout"]["membership_sha256"]
+        assert (context.positions is None) == (algorithm.startswith("graph_native"))
+
+
+def test_the_membership_hash_follows_the_coordinates_not_the_adjacency():
+    """Hashing the input cannot detect a builder that ignores it -- which is
+    precisely how the old PEMS-BAY hash passed while describing nothing."""
+    from lib.graph_native_layout import resolve_layout
+
+    context = build_runtime_context("PEMSBAY", "train")
+    adjacency = context.adjacency.numpy()
+    positions = context.positions.numpy()
+    base = resolve_layout(adjacency, positions, 5)
+    # A uniform translation must NOT move the partition -- a KD-tree splits on
+    # relative order, so translation invariance is correct behaviour.
+    translated = positions.copy()
+    translated[:, 0] += 10.0
+    assert resolve_layout(adjacency, translated, 5)["membership_sha256"] == \
+        base["membership_sha256"]
+    # Changing the relative geometry must move it.
+    moved = positions.copy()
+    moved[:, 0] = moved[::-1, 0]
+    shifted = resolve_layout(adjacency, moved, 5)
+    assert shifted["membership_sha256"] != base["membership_sha256"]
+    # and the KD-tree answer must not be reachable by the graph-native path
+    native = resolve_layout(adjacency, None, 5)
+    assert native["algorithm"] == "graph_native_component_bfs"
+    assert native["membership_sha256"] != base["membership_sha256"]
+
+
+def test_layout_parts_cover_every_node_exactly_once():
+    for dataset in DATASETS:
+        context = build_runtime_context(dataset, "train")
+        seen = [node for part in context.layout_parts for node in part]
+        assert sorted(seen) == list(range(context.num_nodes)), dataset
+
+
+def test_a_manifest_declaring_the_wrong_algorithm_is_refused(tmp_path):
+    import json
+    from lib import runtime_context as module
+
+    manifest = json.loads(
+        (module.MANIFEST_DIR / "PEMSBAY_run_manifest.json").read_text("utf-8"))
+    manifest["layout"]["algorithm"] = "graph_native_component_bfs"
+    (tmp_path / "PEMSBAY_run_manifest.json").write_text(json.dumps(manifest), "utf-8")
+    with pytest.raises(ContextRefused, match="layout"):
+        build_runtime_context("PEMSBAY", "train", manifest_dir=tmp_path)

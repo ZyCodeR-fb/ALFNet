@@ -21,8 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lib.graph_native_layout import (  # noqa: E402
-    LAYOUT_ALGORITHM, LAYOUT_VERSION, connected_components, layout_signature,
-    structural_view,
+    connected_components, resolve_layout, structural_view,
 )
 from lib.v4_payload import load_legacy_payload, load_v4_payload, save_v4_payload  # noqa: E402
 from scripts import v4_build_candidate_payload as candidate_builder  # noqa: E402
@@ -53,7 +52,7 @@ def array_sha256(array):
     return digest.hexdigest()
 
 
-def graph_fields(dataset, adjacency):
+def graph_fields(dataset, adjacency, positions):
     """The propagation graph, the structural projection and the layout.
 
     Merged into the run manifest rather than kept in a second file: a dataset
@@ -62,8 +61,10 @@ def graph_fields(dataset, adjacency):
     """
     settings = LAYOUT_SETTINGS[dataset]
     view = structural_view(adjacency)
-    signature = layout_signature(adjacency, settings["recur_times"])
-    membership = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+    # Resolved, not assumed: PEMS-BAY has coordinates and therefore a KD-tree
+    # layout. Recording graph-native here while ALFTemporal built a KD-tree gave
+    # the dataset two layouts and one hash that described neither.
+    layout = resolve_layout(adjacency, positions, settings["recur_times"])
     return {
         "propagation_graph": {
             "role": "what the models diffuse over",
@@ -84,12 +85,12 @@ def graph_fields(dataset, adjacency):
             "never_substituted_into_propagation": True,
         },
         "layout": {
-            "algorithm": LAYOUT_ALGORITHM,
-            "version": LAYOUT_VERSION,
+            "algorithm": layout["algorithm"],
+            "version": layout["version"],
             "recur_times": settings["recur_times"],
             "spa_patchsize": settings["spa_patchsize"],
             "padding_rule": "parts are padded up to spa_patchsize and never split",
-            "membership_sha256": membership,
+            "membership_sha256": layout["membership_sha256"],
         },
     }
 
@@ -175,7 +176,7 @@ def build(dataset):
         },
         "run_directory": destination.relative_to(ROOT).as_posix(),
         "files": files,
-        **graph_fields(dataset, verified["adj"]),
+        **graph_fields(dataset, verified["adj"], verified["pos_stamp"]),
         # Where the runtime scopes live. They are built in memory by the
         # RuntimeDataContext and deliberately not written here: a node mask on
         # disk beside the payload is a third model input waiting to be read.

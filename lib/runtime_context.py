@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from lib.graph_native_layout import layout_parts, layout_signature
+from lib.graph_native_layout import resolve_layout
 from lib.v4_payload import load_v4_payload
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -93,6 +93,7 @@ class RuntimeDataContext:
     positions: torch.Tensor | None
     layout_parts: tuple
     layout_sha256: str
+    layout_algorithm: str
     known_nodes: np.ndarray
     validation_unseen: np.ndarray
     test_unseen: np.ndarray
@@ -225,12 +226,16 @@ def build_runtime_context(dataset, phase, seed=32, manifest_dir=None):
     num_nodes = int(adjacency.shape[0])
     node_ids = np.arange(num_nodes, dtype=np.int64)
     settings = manifest["layout"]
-    parts = layout_parts(payload["adj"], int(settings["recur_times"]))
-    layout_sha = hashlib.sha256(
-        layout_signature(payload["adj"], int(settings["recur_times"])).encode("utf-8")
-    ).hexdigest()
+    positions_array = payload["pos_stamp"]
+    layout = resolve_layout(payload["adj"], positions_array, int(settings["recur_times"]))
+    layout_sha = layout["membership_sha256"]
     if layout_sha != settings["membership_sha256"]:
         raise ContextRefused(f"{dataset} layout does not match the manifest")
+    if layout["algorithm"] != settings["algorithm"]:
+        raise ContextRefused(
+            f"{dataset} layout algorithm {layout['algorithm']} does not match the "
+            f"manifest {settings['algorithm']}")
+    parts = layout["parts"]
 
     unseen = np.load(ROOT / manifest["unseen"]["path"])
     validation_unseen, test_unseen = split_unseen_pool(unseen, seed=seed)
@@ -250,6 +255,7 @@ def build_runtime_context(dataset, phase, seed=32, manifest_dir=None):
         adjacency=adjacency, adjacency_sha256=adjacency_sha,
         positions=positions,
         layout_parts=tuple(tuple(int(n) for n in part) for part in parts),
+        layout_algorithm=layout["algorithm"],
         layout_sha256=layout_sha,
         known_nodes=known, validation_unseen=validation_unseen,
         test_unseen=test_unseen, signal_scope=np.asarray(scope, dtype=np.int64),
