@@ -8,6 +8,9 @@ The counterfactual is on the raw payload, not on an intermediate: the question
 is whether measurements the phase forbids can reach anything at all.
 """
 
+import hashlib
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -433,3 +436,57 @@ def test_other_datasets_have_the_temporal_axis_and_frozen_roles(dataset):
     nodes = np.asarray(entry["changed_nodes"], dtype=np.int64)
     assert set(nodes.tolist()) <= set(context.known_nodes.tolist())
     assert int(loader[index]["target_cohort_mask"].sum()) == nodes.size
+
+
+# --- PEMS-BAY target channel regression ---------------------------------------
+
+
+def test_pemsbay_target_is_speed_on_channel_two():
+    """The registry declared channel 0 with channel_order ["speed","unused",
+    "unused"]. Speed is channel 2; channels 0 and 1 are entirely NaN in both the
+    v3 and the v4 payload, so the scaler could not be fitted at all -- and a
+    looser missing-value rule would have fitted one on NaN and trained on it.
+    """
+    import json
+
+    registry = json.loads(
+        Path("configs/paper/v4_dataset_registry.json").read_text("utf-8"))
+    entry = registry["datasets"]["PEMSBAY"]
+    assert entry["target"] == "v"
+    assert entry["target_channel"] == 2, "PEMS-BAY speed is channel 2, not channel 0"
+    assert entry["channel_order"][2] == "speed"
+
+    manifest = json.loads(
+        Path("configs/paper/v4_data_manifests/PEMSBAY_run_manifest.json")
+        .read_text("utf-8"))
+    assert manifest["target"] == {"name": "v", "channel": 2}
+
+    context = build_runtime_context("PEMSBAY", "train")
+    assert (context.target, context.target_channel) == ("v", 2)
+
+    payload = load_v4_payload("data_v4/PEMS-BAY/raw_data.pkl")
+    data = np.asarray(payload["data"])
+    # The empty channels must stay recognisably empty, so a future edit that
+    # points the target back at one of them fails here rather than silently.
+    for channel in (0, 1):
+        assert not np.isfinite(data[:, :, channel]).any(), (
+            f"channel {channel} gained values; the channel_order claim is stale")
+    assert np.isfinite(data[:, :, 2]).all()
+
+    dataset = V4LifecycleDataset(context, "data_v4/PEMS-BAY/raw_data.pkl")
+    assert np.isfinite(dataset.scaler["mean"]) and dataset.scaler["std"] > 0
+    assert dataset.scaler["n_values"] > 0
+
+
+def test_the_registry_edit_did_not_rewrite_the_pemsbay_payload():
+    """Correcting a declared fact must not touch the bytes it describes."""
+    import json
+
+    manifest = json.loads(
+        Path("configs/paper/v4_data_manifests/PEMSBAY_run_manifest.json")
+        .read_text("utf-8"))
+    digest = hashlib.sha256()
+    with Path("data_v4/PEMS-BAY/raw_data.pkl").open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    assert digest.hexdigest() == manifest["payload"]["sha256"]

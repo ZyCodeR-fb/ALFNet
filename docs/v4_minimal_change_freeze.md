@@ -71,3 +71,23 @@ Consequences, stated so they are not violated by habit:
 
 Existing Stage 1 code stays as it is and is not extended further. None of the
 paused items gate v4 data or model work.
+
+
+## Version policy: v3 is a read-only archive
+
+From Stage 2-A3.2 onward, **v4 is the only active development protocol**. New
+work is not required to run under v3, and no new code path is added for the sake
+of keeping two entry points alive. The v3 loader, configs, data and results are
+kept exactly as they are and are not deleted -- they remain a traceable record
+of what was measured -- but no active v4 entry point may call them.
+
+Rollback anchors, both verified:
+
+| anchor | value |
+|---|---|
+| v3 archive code commit | `8f4faed` (Stage 1R-D2-A: authoritative run resolution and input provenance) |
+| frozen final table | `outputs/reports/final/final_18_tables.json` |
+| frozen table SHA256 | `ea4ec222ceb21b7e6b8f5809000c86a02311ebb236cb1927501415db8a3ce99a` |
+
+This is a policy note, not a migration. Nothing in the historical documents is
+rewritten, and no tag is created.
