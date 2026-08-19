@@ -98,9 +98,30 @@ def _build_spatial_layout(
 
 class Model(nn.Module):
 
-    def __init__(self, configs):
+    @classmethod
+    def from_runtime_context(cls, configs, runtime_context):
+        """The v4 entry point. Explicit, and it resolves nothing from a path.
+
+        `Model(configs)` stays as the v3 archive path and is not extended. This
+        one takes every graph fact from the context: node count and order, the
+        adjacency, coordinates or their absence, and the already-resolved layout
+        membership. In particular it does not decide for itself whether to build
+        a KD-tree or a graph-native layout -- that decision lives in
+        `resolve_layout` and is recorded in the manifest, and a second builder
+        here is how the two silently disagreed before.
+        """
+        if runtime_context is None:
+            raise ValueError(
+                "ALFTemporal.from_runtime_context requires a RuntimeDataContext; "
+                "v4 fails closed rather than falling back to data_path")
+        return cls(configs, runtime_context=runtime_context)
+
+    def __init__(self, configs, runtime_context=None):
         super().__init__()
-        self.cfg = build_patchstg_cfg(configs)
+        self.runtime_context = runtime_context
+        self.static_asset_hash = (None if runtime_context is None
+                                  else runtime_context.static_asset_hash())
+        self.cfg = build_patchstg_cfg(configs, runtime_context=runtime_context)
         model_cfg = self.cfg["model"]
         self.full_num_nodes = int(self.cfg["node_num"])
         self.known_nodes = list(self.cfg["known_nodes"])
@@ -117,20 +138,36 @@ class Model(nn.Module):
             LIFECYCLE_CHANNELS if self.lifecycle_input else 0
         )
 
-        full_adj = load_project_adjacency(
-            {"data_path": configs.data_path}
-        ).cpu().numpy()
-        # None when the dataset ships no trustworthy coordinates; the layout
-        # then comes from the graph rather than from invented positions.
-        positions = load_project_positions({"data_path": configs.data_path})
-        ori_parts_idx, reo_parts_idx, reo_all_idx, spa_patchnum = (
-            _build_spatial_layout(
-                positions,
-                full_adj,
-                int(model_cfg["recur_times"]),
-                int(model_cfg["spa_patchsize"]),
+        if runtime_context is None:
+            # v3 archive path, unchanged and not extended.
+            full_adj = load_project_adjacency(
+                {"data_path": configs.data_path}
+            ).cpu().numpy()
+            # None when the dataset ships no trustworthy coordinates; the layout
+            # then comes from the graph rather than from invented positions.
+            positions = load_project_positions({"data_path": configs.data_path})
+            ori_parts_idx, reo_parts_idx, reo_all_idx, spa_patchnum = (
+                _build_spatial_layout(
+                    positions,
+                    full_adj,
+                    int(model_cfg["recur_times"]),
+                    int(model_cfg["spa_patchsize"]),
+                )
             )
-        )
+        else:
+            full_adj = runtime_context.adjacency.cpu().numpy()
+            positions = runtime_context.positions
+            self._assert_context_assets(runtime_context, full_adj, model_cfg)
+            # The membership is consumed, never recomputed. Recomputing it here
+            # is what let the manifest and the model disagree about PEMS-BAY.
+            parts_idx = [np.asarray(part, dtype=np.int64)
+                         for part in runtime_context.layout_parts]
+            ori_parts_idx, reo_parts_idx, reo_all_idx = _reorder_data(
+                parts_idx, full_adj, int(model_cfg["spa_patchsize"]))
+            ori_parts_idx = ori_parts_idx.tolist()
+            reo_parts_idx = reo_parts_idx.tolist()
+            reo_all_idx = reo_all_idx.tolist()
+            spa_patchnum = len(parts_idx)
         self.ori_parts_idx = ori_parts_idx
         self.reo_parts_idx = reo_parts_idx
         self.reo_all_idx = reo_all_idx
@@ -203,6 +240,23 @@ class Model(nn.Module):
             token_bottleneck=int(model_cfg.get("token_bottleneck", 64)),
         )
         self.feature_dim = self.backbone.feature_dim
+
+    @staticmethod
+    def _assert_context_assets(runtime_context, adjacency, model_cfg):
+        """Fail closed on a context whose assets are not the declared ones."""
+        identity = runtime_context.static_asset_identity()
+        nodes = identity["full_num_nodes"]
+        if adjacency.shape != (nodes, nodes):
+            raise ValueError(
+                f"context adjacency is {adjacency.shape}, expected ({nodes}, {nodes})")
+        flat = [int(node) for part in runtime_context.layout_parts for node in part]
+        if sorted(flat) != list(range(nodes)):
+            raise ValueError(
+                "context layout does not cover every node exactly once; "
+                "node order or membership has been tampered with")
+        if identity["layout_algorithm"] not in (
+                "graph_native_component_bfs", "kdtree_on_verified_wgs84"):
+            raise ValueError(f"unknown layout algorithm {identity['layout_algorithm']}")
 
     def _resolve_current_node_ids(self, current_num_nodes):
         if current_num_nodes == len(self.known_nodes):

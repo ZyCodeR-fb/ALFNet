@@ -52,6 +52,41 @@ def source_native_dim(args):
     return int(getattr(args, "raw_enc_in", args.enc_in))
 
 
+def build_family_context_from_runtime(args, runtime_context):
+    """The v4 path: every graph fact comes from the context, none from a path.
+
+    Deleting ALFTemporal's explicit `load_project_adjacency` call is not enough
+    -- `build_project_family_context` reaches `data_path` through
+    `infer_project_num_nodes` and `resolve_known_unknown_nodes`, so the private
+    resolution survives the obvious fix and stays invisible.
+    """
+    identity = runtime_context.static_asset_identity()
+    declared = getattr(args, "num_nodes", None) or getattr(args, "node_num", None)
+    if declared is not None and int(declared) != identity["full_num_nodes"]:
+        raise ValueError(
+            f"config declares node_num={declared} but the runtime context has "
+            f"{identity['full_num_nodes']}; refusing rather than silently winning")
+    known_nodes = [int(node) for node in runtime_context.known_nodes]
+    num_nodes = identity["full_num_nodes"]
+    return {
+        "dataset_name": runtime_context.dataset,
+        "data_path": None,          # v4 resolves nothing from a path
+        "unknown_nodes_path": None,
+        "num_nodes": num_nodes,
+        "known_nodes": known_nodes,
+        "unknown_nodes": [int(n) for n in np.setdiff1d(
+            runtime_context.node_ids, runtime_context.known_nodes)],
+        "unknown_nodes_list": [int(n) for n in np.setdiff1d(
+            runtime_context.node_ids, runtime_context.known_nodes)],
+        "unknown_nodes_num": int(num_nodes - len(known_nodes)),
+        "seed": getattr(args, "seed", 0),
+        "device": getattr(args, "device", "cpu"),
+        "train_node_ratio": len(known_nodes) / float(num_nodes),
+        "val_node_ratio": 0.0,
+        "static_asset_hash": runtime_context.static_asset_hash(),
+    }
+
+
 def build_project_family_context(args):
     num_nodes = infer_project_num_nodes({"data_path": args.data_path})
     known_nodes, unknown_nodes = resolve_known_unknown_nodes(
@@ -353,8 +388,9 @@ def build_stid_cfg(args):
     return cfg
 
 
-def build_patchstg_cfg(args):
-    project_ctx = build_project_family_context(args)
+def build_patchstg_cfg(args, runtime_context=None):
+    project_ctx = (build_project_family_context(args) if runtime_context is None
+                   else build_family_context_from_runtime(args, runtime_context))
     cfg = _build_family_cfg(args)
     model_cfg = cfg.get("model", {})
     model_cfg.setdefault("layers", 5)

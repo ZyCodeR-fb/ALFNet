@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from lib.graph_native_layout import resolve_layout
+from lib.graph_native_layout import LAYOUT_VERSION, resolve_layout
 from lib.v4_payload import load_v4_payload
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -106,26 +106,101 @@ class RuntimeDataContext:
     def num_nodes(self):
         return int(self.node_ids.size)
 
-    def identity(self):
-        """What a nested module compares against. Content, never a path."""
-        return {
-            "dataset": self.dataset, "phase": self.phase, "target": self.target,
+    # --- identity -------------------------------------------------------------
+    #
+    # Two identities, deliberately separate. A model's static graph assets do not
+    # change between train, validation and test, so binding a model to an
+    # identity that carries `phase` would make one architecture look like three
+    # different models -- and the only ways out are to reuse a model whose
+    # identity check no longer means anything, or to loosen the check until it
+    # stops catching a swapped graph. Exposure is what varies by phase, and it is
+    # checked per batch, not per constructor.
+
+    STATIC_FIELDS = ("dataset", "target", "target_channel", "payload_sha256",
+                     "node_ids_sha256", "adjacency_sha256", "positions_policy",
+                     "positions_sha256", "layout_algorithm", "layout_version",
+                     "layout_sha256", "full_num_nodes")
+
+    def static_asset_identity(self):
+        """Everything a constructor may bind to. No phase, no split, no scope."""
+        identity = {
+            "dataset": self.dataset,
+            "target": self.target,
+            "target_channel": int(self.target_channel),
             "payload_sha256": self.payload_sha256,
             "node_ids_sha256": self.node_ids_sha256,
             "adjacency_sha256": self.adjacency_sha256,
+            "positions_policy": ("verified_wgs84" if self.positions is not None
+                                 else "graph_native_no_coordinates"),
+            "positions_sha256": (None if self.positions is None
+                                 else _sha256_array(self.positions.numpy())),
+            "layout_algorithm": self.layout_algorithm,
+            "layout_version": int(LAYOUT_VERSION),
             "layout_sha256": self.layout_sha256,
+            "full_num_nodes": self.num_nodes,
+        }
+        missing = [f for f in self.STATIC_FIELDS if f not in identity]
+        if missing:
+            raise ContextRefused(f"static identity is missing {missing}")
+        for field in self.STATIC_FIELDS:
+            if identity[field] is None and field != "positions_sha256":
+                raise ContextRefused(f"static identity field {field} is None")
+        return identity
+
+    def static_asset_hash(self):
+        return hashlib.sha256(
+            json.dumps(self.static_asset_identity(), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+    def exposure_identity(self):
+        """What varies by phase. Checked per batch, never bound to a constructor."""
+        return {
+            "static_asset_hash": self.static_asset_hash(),
+            "phase": self.phase,
+            "known_nodes_sha256": _sha256_array(self.known_nodes),
+            "validation_unseen_sha256": _sha256_array(self.validation_unseen),
+            "test_unseen_sha256": _sha256_array(self.test_unseen),
+            "signal_scope_sha256": _sha256_array(self.signal_scope),
+            "provisional_split": bool(self.provisional_split),
         }
 
-    def assert_matches(self, other, who):
-        """Refuse a module that resolved a different dataset, order or graph."""
-        mine, theirs = self.identity(), dict(other)
-        differing = {key: (value, theirs.get(key)) for key, value in mine.items()
-                     if theirs.get(key) != value}
+    def exposure_hash(self):
+        return hashlib.sha256(
+            json.dumps(self.exposure_identity(), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+    def identity(self):
+        """Deprecated alias for the exposure identity.
+
+        Kept so existing callers keep working. Model construction must use
+        `static_asset_identity`; binding a constructor to this would pin the
+        model to one phase.
+        """
+        return self.exposure_identity()
+
+    @staticmethod
+    def _refuse_differences(mine, theirs, who, what):
+        differing = {key: (value, dict(theirs).get(key))
+                     for key, value in mine.items()
+                     if dict(theirs).get(key) != value}
         if differing:
             raise ContextRefused(
-                f"{who} does not share this run's data context: " + ", ".join(
+                f"{who} does not share this run's {what}: " + ", ".join(
                     f"{key} expected {expected!r} got {found!r}"
                     for key, (expected, found) in sorted(differing.items())))
+
+    def assert_static_asset_matches(self, other, who):
+        """Refuse a module that resolved a different graph, order or layout."""
+        self._refuse_differences(self.static_asset_identity(), other, who,
+                                 "static graph assets")
+
+    def assert_exposure_matches(self, other, who):
+        self._refuse_differences(self.exposure_identity(), other, who,
+                                 "exposure permissions")
+
+    def assert_matches(self, other, who):
+        """Deprecated alias; compares exposure."""
+        self.assert_exposure_matches(other, who)
 
     # --- node scopes ----------------------------------------------------------
 

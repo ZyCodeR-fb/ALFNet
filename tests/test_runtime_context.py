@@ -159,11 +159,18 @@ def test_target_availability_is_not_the_loss_mask(contexts):
 
 
 def test_a_module_that_resolved_a_different_graph_is_refused(contexts):
+    """The graph now lives in the static identity, not the exposure one: a
+    constructor must bind to assets that do not change with the phase."""
     context = contexts["train"]
-    context.assert_matches(context.identity(), "self")
-    wrong = dict(context.identity(), adjacency_sha256="0" * 64)
+    context.assert_static_asset_matches(context.static_asset_identity(), "self")
+    context.assert_exposure_matches(context.exposure_identity(), "self")
+    wrong = dict(context.static_asset_identity(), adjacency_sha256="0" * 64)
     with pytest.raises(ContextRefused, match="adjacency_sha256"):
-        context.assert_matches(wrong, "ALFTemporal")
+        context.assert_static_asset_matches(wrong, "ALFTemporal")
+    # and a wrong phase is an exposure failure, not a static one
+    other = dict(context.exposure_identity(), phase="test")
+    with pytest.raises(ContextRefused, match="phase"):
+        context.assert_exposure_matches(other, "loader")
 
 
 def test_a_tampered_payload_is_refused(tmp_path, monkeypatch):
