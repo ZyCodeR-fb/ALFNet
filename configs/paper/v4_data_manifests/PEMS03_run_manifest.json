@@ -1,10 +1,23 @@
 {
+  "canonical_sensor_ids": {
+    "count": 358,
+    "order": "payload node index order, 0-based",
+    "sha256": "a1b8d3e80d15b9865dd15cefdd00a10fb6ecf6d07c97492028cc089132d46a55"
+  },
   "dataset": "PEMS03",
   "files": [
     "raw_data.pkl",
     "unknown_nodes.npy"
   ],
   "kind": "v4_run_manifest",
+  "layout": {
+    "algorithm": "graph_native_component_bfs",
+    "membership_sha256": "2b6a91bd49a4725658458071d762513ddcdeec0d5b081c507773afbf6d8a0f2b",
+    "padding_rule": "parts are padded up to spa_patchsize and never split",
+    "recur_times": 5,
+    "spa_patchsize": 12,
+    "version": 1
+  },
   "payload": {
     "adj_directed": true,
     "path": "data_v4/PEMS03/raw_data.pkl",
@@ -16,14 +29,54 @@
       1
     ]
   },
+  "positions": {
+    "note": "no coordinates exist for this dataset; the layout is derived from the graph. Zeros or node indices would look like an answer.",
+    "policy": "graph_native_no_coordinates",
+    "sha256": null
+  },
+  "propagation_graph": {
+    "directed": true,
+    "dtype": "float32",
+    "must_not_be_symmetrised": true,
+    "role": "what the models diffuse over",
+    "self_loops": 1,
+    "sha256": "fd78b057ab67c4282a9361b58ab47ec243d36ad1b8fa0659ac76c240f513e93e",
+    "shape": [
+      358,
+      358
+    ],
+    "weighted": false
+  },
   "readiness": {
     "data_ready": true,
     "exposure_ready": false,
     "graph_ready": true,
     "training_ready": false
   },
+  "reserved_scopes": {
+    "available_signal_node_mask": "RuntimeDataContext.input_available_mask",
+    "loss_target_node_mask": "RuntimeDataContext.loss_mask",
+    "propagation_graph_scope": "full N, all splits"
+  },
   "run_directory": "data_v4/PEMS03",
   "schema_version": 1,
+  "structural_view": {
+    "component_count": 8,
+    "component_sizes": [
+      110,
+      81,
+      61,
+      59,
+      28,
+      14,
+      3,
+      2
+    ],
+    "derivation": "S = 1[(A + A.T) > 0] with the diagonal cleared",
+    "never_substituted_into_propagation": true,
+    "role": "layout only; never diffused over",
+    "sha256": "37f438e94e0877e4ac35b76fed4159757154f55e040969a5531d6e3f756c390d"
+  },
   "target": {
     "channel": 0,
     "name": "q"

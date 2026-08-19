@@ -20,15 +20,78 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from lib.graph_native_layout import (  # noqa: E402
+    LAYOUT_ALGORITHM, LAYOUT_VERSION, connected_components, layout_signature,
+    structural_view,
+)
 from lib.v4_payload import load_legacy_payload, load_v4_payload, save_v4_payload  # noqa: E402
 from scripts import v4_build_candidate_payload as candidate_builder  # noqa: E402
 
 REGISTRY = ROOT / "configs/paper/v4_dataset_registry.json"
+# recur_times / spa_patchsize come from the model configs; recorded here so the
+# layout a manifest describes is the layout the models will actually build.
+LAYOUT_SETTINGS = {
+    "PEMS03": {"recur_times": 5, "spa_patchsize": 12},
+    "PEMS04": {"recur_times": 5, "spa_patchsize": 11},
+    "PEMS08": {"recur_times": 5, "spa_patchsize": 7},
+    "PEMSBAY": {"recur_times": 5, "spa_patchsize": 12},
+}
 DEST_ROOT = ROOT / "data_v4"
 # Directory name under data/ differs from the registry key for PEMS-BAY.
 SOURCE_DIR = {"PEMS03": "PEMS03", "PEMS04": "PEMS04", "PEMS08": "PEMS08",
               "PEMSBAY": "PEMS-BAY"}
 DEST_DIR = dict(SOURCE_DIR)
+
+
+def array_sha256(array):
+    """Digest of exact bytes plus shape and dtype, so a reshape cannot collide."""
+    contiguous = np.ascontiguousarray(array)
+    digest = hashlib.sha256()
+    digest.update(str(contiguous.shape).encode("utf-8"))
+    digest.update(str(contiguous.dtype).encode("utf-8"))
+    digest.update(contiguous.tobytes())
+    return digest.hexdigest()
+
+
+def graph_fields(dataset, adjacency):
+    """The propagation graph, the structural projection and the layout.
+
+    Merged into the run manifest rather than kept in a second file: a dataset
+    with two manifests has two authorities, and the one that gets read is
+    whichever the caller happened to open.
+    """
+    settings = LAYOUT_SETTINGS[dataset]
+    view = structural_view(adjacency)
+    signature = layout_signature(adjacency, settings["recur_times"])
+    membership = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+    return {
+        "propagation_graph": {
+            "role": "what the models diffuse over",
+            "sha256": array_sha256(adjacency),
+            "shape": list(adjacency.shape),
+            "dtype": str(adjacency.dtype),
+            "directed": not bool(np.allclose(adjacency, adjacency.T)),
+            "weighted": bool(np.any((adjacency != 0) & (adjacency != 1))),
+            "self_loops": int(np.count_nonzero(np.diag(adjacency))),
+            "must_not_be_symmetrised": True,
+        },
+        "structural_view": {
+            "role": "layout only; never diffused over",
+            "derivation": "S = 1[(A + A.T) > 0] with the diagonal cleared",
+            "sha256": array_sha256(view),
+            "component_count": len(connected_components(view)),
+            "component_sizes": [len(component) for component in connected_components(view)],
+            "never_substituted_into_propagation": True,
+        },
+        "layout": {
+            "algorithm": LAYOUT_ALGORITHM,
+            "version": LAYOUT_VERSION,
+            "recur_times": settings["recur_times"],
+            "spa_patchsize": settings["spa_patchsize"],
+            "padding_rule": "parts are padded up to spa_patchsize and never split",
+            "membership_sha256": membership,
+        },
+    }
 
 
 def sha256(path):
@@ -95,8 +158,32 @@ def build(dataset):
         "target": {"name": entry["target"], "channel": entry["target_channel"]},
         "time": {"start": str(verified["time_stamp"][0]),
                  "end": str(verified["time_stamp"][-1])},
+        "canonical_sensor_ids": {
+            "count": num_nodes,
+            "order": "payload node index order, 0-based",
+            "sha256": array_sha256(np.arange(num_nodes, dtype=np.int64)),
+        },
+        "positions": {
+            "policy": ("verified_wgs84" if verified["pos_stamp"] is not None
+                       else "graph_native_no_coordinates"),
+            "sha256": (None if verified["pos_stamp"] is None
+                       else array_sha256(verified["pos_stamp"])),
+            "note": ("real coordinates ship with this dataset"
+                     if verified["pos_stamp"] is not None else
+                     "no coordinates exist for this dataset; the layout is derived "
+                     "from the graph. Zeros or node indices would look like an answer."),
+        },
         "run_directory": destination.relative_to(ROOT).as_posix(),
         "files": files,
+        **graph_fields(dataset, verified["adj"]),
+        # Where the runtime scopes live. They are built in memory by the
+        # RuntimeDataContext and deliberately not written here: a node mask on
+        # disk beside the payload is a third model input waiting to be read.
+        "reserved_scopes": {
+            "propagation_graph_scope": "full N, all splits",
+            "available_signal_node_mask": "RuntimeDataContext.input_available_mask",
+            "loss_target_node_mask": "RuntimeDataContext.loss_mask",
+        },
         "readiness": {
             # data_ready/graph_ready are asserted below from the payload itself.
             # training_ready stays false until Part B's exposure wiring lands and

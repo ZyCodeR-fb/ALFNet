@@ -163,7 +163,14 @@ def build(dataset, output_dir=None, start_time=None):
     stamps = build_timestamps(entry, periods=data.shape[0])
     adjacency, edge_count = build_adjacency(edge_path, entry["num_nodes"])
 
-    destination = Path(output_dir) if output_dir else (source_dir / "v4_candidate")
+    if output_dir is None:
+        raise ConversionRefused(
+            "an explicit output directory is required. This builder produces an "
+            "intermediate, not a dataset: writing it beside data/<name>/ recreates "
+            "a second, durable payload that disagrees with data_v4/. "
+            "scripts/v4_build_final_dataset.py calls it into a TemporaryDirectory, "
+            "which is the supported path.")
+    destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
     payload_path = destination / "raw_data_v4_candidate.pkl"
     np.save(payload_path, {
@@ -225,21 +232,18 @@ def build(dataset, output_dir=None, start_time=None):
     manifest_path = destination / "v4_candidate_manifest.json"
     manifest_path.write_text(body, encoding="utf-8")
 
-    # The canonical copy is version-controlled. The runtime copy lives beside the
-    # payload under data/, which .gitignore excludes -- so on its own it could not
-    # tell another machine what should have been produced. The two are written
-    # byte-for-byte identical and a test asserts it.
-    if output_dir is None:
-        TRACKED_MANIFESTS.mkdir(parents=True, exist_ok=True)
-        (TRACKED_MANIFESTS / f"{dataset}_data_manifest.json").write_text(
-            body, encoding="utf-8")
+    # No tracked copy is written: the canonical authority is the run manifest
+    # produced by v4_build_final_dataset.py. Two tracked manifests per dataset is
+    # exactly the conflict Stage 2 Part 0 removed.
     return manifest, actual_path, manifest_path
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, choices=BUILDABLE)
-    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--output-dir", required=True,
+                        help="scratch directory for the intermediate; this builder "
+                             "must not write a durable second payload under data/")
     parser.add_argument("--start-time", default=None,
                         help="optional; must equal the registry value or the "
                              "build is refused")

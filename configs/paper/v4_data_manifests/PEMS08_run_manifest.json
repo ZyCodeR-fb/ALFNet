@@ -1,10 +1,23 @@
 {
+  "canonical_sensor_ids": {
+    "count": 170,
+    "order": "payload node index order, 0-based",
+    "sha256": "449887a31de8a495ac10d1fee47e628175e0774758488eca3e07bcff5692aa47"
+  },
   "dataset": "PEMS08",
   "files": [
     "raw_data.pkl",
     "unknown_nodes.npy"
   ],
   "kind": "v4_run_manifest",
+  "layout": {
+    "algorithm": "graph_native_component_bfs",
+    "membership_sha256": "f0a71ea80544bc2b825199750ae3a039962c859a054232d71906c177ca38b48e",
+    "padding_rule": "parts are padded up to spa_patchsize and never split",
+    "recur_times": 5,
+    "spa_patchsize": 7,
+    "version": 1
+  },
   "payload": {
     "adj_directed": true,
     "path": "data_v4/PEMS08/raw_data.pkl",
@@ -16,14 +29,47 @@
       3
     ]
   },
+  "positions": {
+    "note": "no coordinates exist for this dataset; the layout is derived from the graph. Zeros or node indices would look like an answer.",
+    "policy": "graph_native_no_coordinates",
+    "sha256": null
+  },
+  "propagation_graph": {
+    "directed": true,
+    "dtype": "float32",
+    "must_not_be_symmetrised": true,
+    "role": "what the models diffuse over",
+    "self_loops": 0,
+    "sha256": "6439a4c2b737be634cc5f61607c95367976b3d373d9508e59eabf12d816edbc6",
+    "shape": [
+      170,
+      170
+    ],
+    "weighted": false
+  },
   "readiness": {
     "data_ready": true,
     "exposure_ready": false,
     "graph_ready": true,
     "training_ready": false
   },
+  "reserved_scopes": {
+    "available_signal_node_mask": "RuntimeDataContext.input_available_mask",
+    "loss_target_node_mask": "RuntimeDataContext.loss_mask",
+    "propagation_graph_scope": "full N, all splits"
+  },
   "run_directory": "data_v4/PEMS08",
   "schema_version": 1,
+  "structural_view": {
+    "component_count": 1,
+    "component_sizes": [
+      170
+    ],
+    "derivation": "S = 1[(A + A.T) > 0] with the diagonal cleared",
+    "never_substituted_into_propagation": true,
+    "role": "layout only; never diffused over",
+    "sha256": "4c8fb1104be7815adf3946106fe3fc57f1e90ede3a2a2d1888e104a1bf30601e"
+  },
   "target": {
     "channel": 0,
     "name": "q"

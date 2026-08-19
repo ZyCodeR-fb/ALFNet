@@ -43,9 +43,13 @@ NO_COORDINATES = ("PEMS03", "PEMS04", "PEMS08")
 
 
 def _contract(dataset):
-    path = CONTRACTS / f"{dataset}_graph_contract.json"
+    # One authority per dataset. The separate *_graph_contract.json and
+    # *_data_manifest.json were retired in Stage 2 Part 0: they pointed at
+    # candidate payloads that no longer exist, so a dataset had two manifests
+    # disagreeing about where its data was.
+    path = CONTRACTS / f"{dataset}_run_manifest.json"
     if not path.exists():
-        pytest.skip(f"{dataset} contract not built in this checkout")
+        pytest.skip(f"{dataset} run manifest not built in this checkout")
     return json.loads(path.read_text("utf-8"))
 
 
@@ -302,10 +306,10 @@ def test_the_layout_never_reads_the_signal():
 
 @pytest.mark.parametrize("dataset", DATASETS)
 def test_the_contract_reports_training_as_not_ready(dataset):
-    contract = _contract(dataset)
-    assert contract["status"]["data_ready"] is True
-    assert contract["status"]["graph_ready"] is True
-    assert contract["status"]["training_ready"] is False
+    readiness = _contract(dataset)["readiness"]
+    assert readiness["data_ready"] is True
+    assert readiness["graph_ready"] is True
+    assert readiness["training_ready"] is False
 
 
 @pytest.mark.parametrize("dataset", DATASETS)
@@ -339,15 +343,31 @@ def test_v3_payloads_remain_byte_identical(path, digest):
 # --- tracked and runtime manifests agree ---------------------------------------
 
 
-@pytest.mark.parametrize("dataset", NO_COORDINATES)
-def test_the_tracked_manifest_matches_the_runtime_copy(dataset):
-    tracked = CONTRACTS / f"{dataset}_data_manifest.json"
-    runtime = ROOT / "data" / dataset / "v4_candidate" / "v4_candidate_manifest.json"
-    if not (tracked.exists() and runtime.exists()):
-        pytest.skip("manifests not built in this checkout")
-    assert tracked.read_bytes() == runtime.read_bytes(), (
-        "the version-controlled manifest must be byte-identical to the runtime "
-        "copy, or another machine cannot tell what should have been produced")
+def test_exactly_one_active_manifest_per_dataset():
+    """A retired authority that is still readable is still an authority."""
+    for dataset in DATASETS:
+        active = sorted(path.name for path in CONTRACTS.glob(f"{dataset}_*.json"))
+        assert active == [f"{dataset}_run_manifest.json"], (
+            f"{dataset} has more than one manifest: {active}")
+
+
+def test_no_active_file_points_at_a_deleted_candidate_payload():
+    """The candidate builder may name its own intermediate; it writes into a
+    caller-supplied scratch directory. What must not survive anywhere is a
+    durable path under data/, because that is a second dataset with its own
+    hashes disagreeing with data_v4/."""
+    deleted = [f"data/{dataset}/v4_candidate" for dataset in DATASETS]
+    searched = list((ROOT / "scripts").glob("*.py")) + list((ROOT / "tests").glob("*.py"))
+    searched += list(CONTRACTS.glob("*.json"))
+    offenders = {}
+    for path in searched:
+        if path.name == Path(__file__).name:
+            continue
+        text = path.read_text("utf-8")
+        hits = [pattern for pattern in deleted if pattern in text]
+        if hits:
+            offenders[path.relative_to(ROOT).as_posix()] = hits
+    assert offenders == {}, f"active files still point at removed candidates: {offenders}"
 
 
 # --- 7/8. positions=None reaches the models -----------------------------------

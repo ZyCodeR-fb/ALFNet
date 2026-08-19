@@ -29,7 +29,6 @@ from scripts.v4_build_candidate_payload import (  # noqa: E402
     build,
     load_registry,
 )
-from scripts.v4_dataset_preflight import PreflightRefused, preflight  # noqa: E402
 
 CANDIDATES = ("PEMS03", "PEMS04")
 EXPECTED = {
@@ -171,53 +170,14 @@ def test_the_candidate_adjacency_is_not_symmetrised(dataset, tmp_path):
         "a symmetric graph collapses forward and backward diffusion")
 
 
-# --- preflight -----------------------------------------------------------------
-
-
-@needs_sources
-@pytest.mark.parametrize("dataset", CANDIDATES)
-def test_preflight_refuses_a_payload_that_is_not_training_ready(dataset, tmp_path):
-    manifest, _, manifest_path = build(dataset, output_dir=tmp_path / dataset)
-    assert manifest["training_ready"] is False
-    with pytest.raises(PreflightRefused, match="training_ready is false"):
-        preflight(manifest_path)
-
-
-@needs_sources
-def test_preflight_refuses_unresolved_positions(tmp_path):
-    _, _, manifest_path = build("PEMS03", output_dir=tmp_path / "PEMS03")
-    with pytest.raises(PreflightRefused, match="positions are 'unresolved'"):
-        preflight(manifest_path, require_training_ready=False)
-
-
-@needs_sources
-def test_preflight_refuses_a_changed_payload_byte(tmp_path):
-    _, payload_path, manifest_path = build("PEMS03", output_dir=tmp_path / "PEMS03")
-    blob = bytearray(Path(payload_path).read_bytes())
-    blob[-1] ^= 0x01
-    Path(payload_path).write_bytes(bytes(blob))
-    with pytest.raises(PreflightRefused, match="payload sha256"):
-        preflight(manifest_path, require_training_ready=False)
-
-
-@needs_sources
-def test_preflight_refuses_a_tampered_manifest_hash(tmp_path):
-    _, _, manifest_path = build("PEMS03", output_dir=tmp_path / "PEMS03")
-    manifest = json.loads(Path(manifest_path).read_text())
-    manifest["sources"]["signal"]["sha256"] = "0" * 64
-    Path(manifest_path).write_text(json.dumps(manifest))
-    with pytest.raises(PreflightRefused, match="source bytes changed"):
-        preflight(manifest_path, require_training_ready=False)
-
-
-@needs_sources
-def test_preflight_refuses_a_target_that_contradicts_the_freeze(tmp_path):
-    _, _, manifest_path = build("PEMS03", output_dir=tmp_path / "PEMS03")
-    manifest = json.loads(Path(manifest_path).read_text())
-    manifest["target"]["name"] = "v"
-    Path(manifest_path).write_text(json.dumps(manifest))
-    with pytest.raises(PreflightRefused, match="target"):
-        preflight(manifest_path, require_training_ready=False)
+# --- preflight ------------------------------------------------------------------
+#
+# The candidate-manifest preflight was retired in Stage 2 Part 0. Candidates are
+# now intermediates built into a TemporaryDirectory, so there is no candidate
+# manifest to preflight. The equivalent guarantees -- recomputed payload and
+# unseen hashes, registry agreement, run-directory contents and the readiness
+# ordering -- are asserted against the canonical run manifest in
+# tests/test_v4_run_format.py.
 
 
 # --- v3 is untouched -----------------------------------------------------------

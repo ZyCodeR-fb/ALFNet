@@ -1,10 +1,23 @@
 {
+  "canonical_sensor_ids": {
+    "count": 325,
+    "order": "payload node index order, 0-based",
+    "sha256": "07a7831cf9019b6965621718debdcd5d5cd68aa2735e77d429f54ada66d0d9b6"
+  },
   "dataset": "PEMSBAY",
   "files": [
     "raw_data.pkl",
     "unknown_nodes.npy"
   ],
   "kind": "v4_run_manifest",
+  "layout": {
+    "algorithm": "graph_native_component_bfs",
+    "membership_sha256": "6e5ea0ade44ec6c6ee54ad96955fb5550441cfdad842969afeceb58b9463737c",
+    "padding_rule": "parts are padded up to spa_patchsize and never split",
+    "recur_times": 5,
+    "spa_patchsize": 12,
+    "version": 1
+  },
   "payload": {
     "adj_directed": true,
     "path": "data_v4/PEMS-BAY/raw_data.pkl",
@@ -16,14 +29,53 @@
       3
     ]
   },
+  "positions": {
+    "note": "real coordinates ship with this dataset",
+    "policy": "verified_wgs84",
+    "sha256": "0012a8e61934b1854b67036970b4a56307c63ca940d3e460e4640ada93d0d591"
+  },
+  "propagation_graph": {
+    "directed": true,
+    "dtype": "float32",
+    "must_not_be_symmetrised": true,
+    "role": "what the models diffuse over",
+    "self_loops": 325,
+    "sha256": "09a489e68b8bc92d4acc8203d0703a90237046d551004a4029b78cca17b2a483",
+    "shape": [
+      325,
+      325
+    ],
+    "weighted": true
+  },
   "readiness": {
     "data_ready": true,
     "exposure_ready": false,
     "graph_ready": true,
     "training_ready": false
   },
+  "reserved_scopes": {
+    "available_signal_node_mask": "RuntimeDataContext.input_available_mask",
+    "loss_target_node_mask": "RuntimeDataContext.loss_mask",
+    "propagation_graph_scope": "full N, all splits"
+  },
   "run_directory": "data_v4/PEMS-BAY",
   "schema_version": 1,
+  "structural_view": {
+    "component_count": 7,
+    "component_sizes": [
+      319,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "derivation": "S = 1[(A + A.T) > 0] with the diagonal cleared",
+    "never_substituted_into_propagation": true,
+    "role": "layout only; never diffused over",
+    "sha256": "2ad2c526488cfe8168377f60a838151e6139d1676c982630fb0809666c5b47c3"
+  },
   "target": {
     "channel": 0,
     "name": "v"
