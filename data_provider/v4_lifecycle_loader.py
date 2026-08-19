@@ -24,9 +24,10 @@ from torch.utils.data import Dataset
 from data_provider.calendar_strata import calendar_stratum
 from data_provider.lcbt_protocol import build_lcbt_schedule
 from lib.runtime_context import ContextRefused
+from data_provider.lifecycle_roles import (
+    ROLE_AAS, ROLE_CHANNEL_COUNT, ROLE_FS, ROLE_NAS, ROLE_VS,
+)
 from lib.v4_payload import load_v4_payload
-
-ROLE_UNSEEN, ROLE_STEADY, ROLE_JOIN, ROLE_FAULT = 0, 1, 2, 3
 
 
 class V4LifecycleDataset(Dataset):
@@ -105,16 +106,29 @@ class V4LifecycleDataset(Dataset):
         regimes = [calendar_stratum(stamps[origin + self.input_len - 1])
                    for origin in self.origins]
         adjacency = self.context.adjacency.numpy()
-        known = self.context.known_nodes
-        # Simulated lifecycle cohorts are drawn from K in every phase: a held-out
-        # node is already unseen and cannot also be a training join event.
         self.schedule = build_lcbt_schedule(
             num_samples=len(self.origins), input_len=self.input_len,
             adjacency=adjacency, calendar_regimes=regimes, seed=seed, epoch=epoch,
-            scenario_node_pools={scenario: known for scenario in
-                                 ("zero_history", "steady", "join", "fault")},
+            scenario_node_pools=self._scenario_pools(),
             topology_adjacency=adjacency, node_ids=np.arange(self.num_nodes),
             cohort_size_base=self.num_nodes)
+
+    def _scenario_pools(self):
+        """Which nodes each scenario may draw, per phase.
+
+        Training simulates its no-history and join tracks on K, because K is all
+        it may read. Validation and test run those two tracks on their *own*
+        held-out set -- that is the measurement the experiment exists to make,
+        and drawing them from K instead would quietly turn Unseen and Join into
+        another Steady row. Steady and Fault stay on K in every phase: they need
+        history, and a held-out node has none.
+        """
+        known = self.context.known_nodes
+        held_out = {"train": known,
+                    "validation": self.context.validation_unseen,
+                    "test": self.context.test_unseen}[self.context.phase]
+        return {"zero_history": held_out, "join": held_out,
+                "steady": known, "fault": known}
 
     def __len__(self):
         return int(self.origins.size)
@@ -122,35 +136,16 @@ class V4LifecycleDataset(Dataset):
     # --- the five masks -------------------------------------------------------
 
     def _availability(self, entry, natural_input):
-        """(T, N) input availability, and the (N,) per-node scope it came from.
+        """(L, N) input availability, plus the scope and trajectory behind it.
 
-        Three independent reasons a measurement may be absent, combined and
-        never conflated: the sensor recorded nothing, the phase may not read
-        that node, or the lifecycle episode hides it for this sample.
+        Three independent reasons a measurement may be absent, combined here and
+        never conflated anywhere else: the sensor recorded nothing, the phase may
+        not read that node, or the episode hides it for this sample.
         """
         scope = np.zeros(self.num_nodes, dtype=bool)
         scope[self.context.signal_scope] = True
-
-        lifecycle = np.ones((self.input_len, self.num_nodes), dtype=bool)
-        hidden = np.asarray(entry["hidden_nodes"], dtype=np.int64)
-        changed = np.asarray(entry["changed_nodes"], dtype=np.int64)
-        evidence = int(entry["evidence_steps"])
-        if hidden.size:
-            lifecycle[:, hidden] = False
-        if changed.size:
-            if entry["scenario"] == "join":
-                # A joining node has no history and then the last k steps of it.
-                lifecycle[:, changed] = False
-                if evidence > 0:
-                    lifecycle[-evidence:, changed] = True
-            elif entry["scenario"] == "fault":
-                # A failing node is observed until the last k steps go dark.
-                lifecycle[:, changed] = True
-                if evidence > 0:
-                    lifecycle[-evidence:, changed] = False
-
-        available = natural_input & scope[None, :] & lifecycle
-        return available, scope, lifecycle
+        roles, lifecycle, age = self._lifecycle_state(entry, scope)
+        return natural_input & scope[None, :] & lifecycle, scope, roles, age
 
     def __getitem__(self, index):
         origin = int(self.origins[index])
@@ -160,7 +155,7 @@ class V4LifecycleDataset(Dataset):
 
         natural_input = self.natural[origin:end]
         natural_target = self.natural[end:stop]
-        available, scope, lifecycle = self._availability(entry, natural_input)
+        available, scope, roles, ages = self._availability(entry, natural_input)
 
         # 6. Select in normalised space. `value * mask` would turn a NaN into a
         #    NaN, not into a zero.
@@ -170,12 +165,19 @@ class V4LifecycleDataset(Dataset):
         if not torch.isfinite(base_visible).all():
             raise ContextRefused("base_visible_input is not finite after masking")
 
-        target = torch.from_numpy(
-            np.nan_to_num(self.normalised[end:stop], nan=0.0).copy()).unsqueeze(-1)
         # Scoped, not raw natural availability. An unscoped version leaked: a
         # forbidden node's *missingness* is itself a measurement, and poisoning
         # V/T raw values moved this mask while every other field held.
         target_available = torch.from_numpy(natural_target & scope[None, :])
+        # The exposed target is masked, not merely accompanied by a mask that
+        # says "do not use". Leaving the real future value in the batch means any
+        # consumer with a wrong mask reads the answer, and no counterfactual on
+        # the masks alone would catch it.
+        target = torch.where(
+            target_available.unsqueeze(-1),
+            torch.from_numpy(np.nan_to_num(self.normalised[end:stop], nan=0.0).copy())
+                 .unsqueeze(-1),
+            torch.zeros((), dtype=torch.float32))
 
         # Sample-level, not phase-level: a node the episode still hides at the
         # last observed step has no present state to carry into the horizon, so
@@ -184,16 +186,14 @@ class V4LifecycleDataset(Dataset):
         decoder_available = (last_observed[None, :].expand(self.pred_len, -1)
                              & target_available)
 
+        # Exactly the entry's changed_nodes, in every scenario. Widening steady
+        # to the whole scope, or zero_history to the whole hidden pool, makes the
+        # row a different measurement from the one the schedule declared.
         cohort = torch.zeros(self.num_nodes, dtype=torch.float32)
         cohort[np.asarray(entry["changed_nodes"], dtype=np.int64)] = 1.0
-        if entry["scenario"] in ("zero_history", "steady"):
-            cohort[np.asarray(entry["hidden_nodes"], dtype=np.int64)] = 1.0
-            if entry["scenario"] == "steady":
-                cohort = torch.from_numpy(scope.astype(np.float32))
         loss_scope = self.context.loss_scope_mask()
         loss_mask = target_available & (cohort > 0.5)[None, :] & loss_scope[None, :]
 
-        roles, ages = self._lifecycle_state(entry, available, scope)
         return {
             "base_visible_input": base_visible.unsqueeze(-1),
             "input_available_mask": torch.from_numpy(available),
@@ -202,15 +202,16 @@ class V4LifecycleDataset(Dataset):
             "target_cohort_mask": cohort,
             "loss_mask": loss_mask,
             "target": target,
-            "lifecycle_role_ids": roles,
-            "lifecycle_state_age": ages,
+            "lifecycle_role_ids": torch.from_numpy(roles),
+            "lifecycle_state_age": torch.from_numpy(ages),
             # ALFNet's method inputs, kept out of base_visible_input so every
             # baseline receives the identical common tensor. The next stage's
             # adapter concatenates these for ALFNet only.
             "lifecycle_context": torch.cat([
-                torch.nn.functional.one_hot(roles, 4).float(),
-                ages.unsqueeze(-1),
-                torch.from_numpy(available[-1].astype(np.float32)).unsqueeze(-1),
+                torch.nn.functional.one_hot(
+                    torch.from_numpy(roles), ROLE_CHANNEL_COUNT).float(),
+                torch.from_numpy(ages).unsqueeze(-1),
+                torch.from_numpy(available.astype(np.float32)).unsqueeze(-1),
             ], dim=-1),
             "origin": origin,
             "phase_id": entry["phase_id"],
@@ -220,15 +221,59 @@ class V4LifecycleDataset(Dataset):
             "context_identity": self.context.identity(),
         }
 
-    def _lifecycle_state(self, entry, available, scope):
-        """Roles and age, from present and past availability only."""
-        roles = np.full(self.num_nodes, ROLE_STEADY, dtype=np.int64)
-        roles[~scope] = ROLE_UNSEEN
-        never = ~available.any(axis=0)
-        roles[never & scope] = ROLE_UNSEEN
+    def _lifecycle_state(self, entry, scope):
+        """(L, N) roles, lifecycle mask and age -- the frozen v3 trajectory.
+
+        Join and Fault are trajectories, not end states: collapsing them to the
+        last step throws away the whole thing the two tracks measure. Roles are
+        decided by the phase scope and the episode only. Natural missingness is
+        expressed by the observation mask and must never move a role, or a
+        sensor that dropped one reading would be reported as newly attached.
+        """
+        length = self.input_len
+        roles = np.full((length, self.num_nodes), ROLE_AAS, dtype=np.int64)
+        lifecycle = np.ones((length, self.num_nodes), dtype=bool)
+        age = np.ones((length, self.num_nodes), dtype=np.float32)
+
+        def to_virtual(nodes):
+            if len(nodes):
+                roles[:, nodes] = ROLE_VS
+                lifecycle[:, nodes] = False
+                age[:, nodes] = 0.0
+
+        # Nodes this phase may not read carry no history at all.
+        to_virtual(np.nonzero(~scope)[0])
+        to_virtual(np.asarray(entry["hidden_nodes"], dtype=np.int64))
+
         changed = np.asarray(entry["changed_nodes"], dtype=np.int64)
-        if changed.size:
-            roles[changed] = ROLE_JOIN if entry["scenario"] == "join" else (
-                ROLE_FAULT if entry["scenario"] == "fault" else ROLE_UNSEEN)
-        age = available.sum(axis=0).astype(np.float32) / float(self.input_len)
-        return torch.from_numpy(roles), torch.from_numpy(age)
+        scenario = str(entry["scenario"])
+        evidence = int(entry.get("evidence_steps", 0))
+        cutoff = length - evidence
+        ramp = (np.arange(1, evidence + 1, dtype=np.float32)[:, None]
+                / float(length)) if evidence else None
+
+        if scenario == "zero_history":
+            to_virtual(changed)
+        elif scenario == "steady":
+            if changed.size:
+                roles[:, changed] = ROLE_AAS
+                lifecycle[:, changed] = True
+                age[:, changed] = 1.0
+        elif scenario == "join":
+            to_virtual(changed)
+            if changed.size and evidence:
+                roles[cutoff:, changed] = ROLE_NAS
+                lifecycle[cutoff:, changed] = True
+                age[cutoff:, changed] = ramp
+        elif scenario == "fault":
+            if changed.size:
+                roles[:, changed] = ROLE_AAS
+                lifecycle[:, changed] = True
+                age[:, changed] = 1.0
+                if evidence:
+                    roles[cutoff:, changed] = ROLE_FS
+                    lifecycle[cutoff:, changed] = False
+                    age[cutoff:, changed] = ramp
+        else:
+            raise ContextRefused(f"unsupported scenario: {scenario}")
+        return roles, lifecycle, age

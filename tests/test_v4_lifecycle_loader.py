@@ -14,7 +14,13 @@ import torch
 
 from data_provider.v4_lifecycle_loader import V4LifecycleDataset
 from lib.runtime_context import ContextRefused, build_runtime_context
+from data_provider.lifecycle_roles import ROLE_AAS, ROLE_FS, ROLE_NAS, ROLE_VS
 from lib.v4_payload import load_v4_payload, save_v4_payload
+
+TENSOR_FIELDS = ("base_visible_input", "input_available_mask",
+                 "decoder_available_mask", "target_available_mask", "target",
+                 "loss_mask", "target_cohort_mask", "lifecycle_role_ids",
+                 "lifecycle_state_age", "lifecycle_context")
 
 PHASES = ("train", "validation", "test")
 PAYLOAD = "data_v4/PEMS08/raw_data.pkl"
@@ -32,9 +38,9 @@ def _forbidden(context):
     return mask
 
 
-def _poison(tmp_path, context, value, nodes):
+def _poison(tmp_path, context, value, nodes, payload_path=PAYLOAD):
     """A payload identical to the canonical one except on `nodes`."""
-    payload = load_v4_payload(PAYLOAD)
+    payload = load_v4_payload(payload_path)
     data = payload["data"].copy()
     data[:, nodes, :] = value
     path = tmp_path / f"raw_data.pkl"
@@ -55,6 +61,11 @@ def test_every_phase_runs_on_the_full_node_axis(datasets):
                       "target_available_mask", "loss_mask"):
             assert batch[field].shape == (12, n), f"{phase}/{field}"
         assert batch["target_cohort_mask"].shape == (n,)
+        # Join and Fault are trajectories: the lifecycle fields must carry the
+        # time axis, or the last k steps -- the whole measurement -- are lost.
+        assert batch["lifecycle_role_ids"].shape == (12, n), phase
+        assert batch["lifecycle_state_age"].shape == (12, n), phase
+        assert batch["lifecycle_context"].shape == (12, n, 6), phase
         assert dataset.context.adjacency.shape == (n, n)
 
 
@@ -131,10 +142,10 @@ def test_forbidden_nodes_cannot_move_origins_or_any_mask(tmp_path, phase, poison
     assert np.array_equal(clean.origins, poisoned.origins), f"{phase}: origins moved"
     for index in (0, 7, len(clean) // 2):
         a, b = clean[index], poisoned[index]
-        for field in ("base_visible_input", "input_available_mask",
-                      "decoder_available_mask", "target_available_mask",
-                      "loss_mask", "target_cohort_mask", "lifecycle_role_ids"):
+        for field in TENSOR_FIELDS:
             assert torch.equal(a[field], b[field]), f"{phase}/{field} moved on {poison}"
+        for field in ("scenario", "evidence_steps", "phase_id", "origin"):
+            assert a[field] == b[field], f"{phase}/{field} moved on {poison}"
         assert torch.isfinite(a["base_visible_input"]).all()
 
 
@@ -165,26 +176,78 @@ def test_each_phase_is_blind_to_the_other_split(datasets):
 # --- lifecycle ----------------------------------------------------------------
 
 
-def test_join_and_fault_evidence_matches_the_input_mask(datasets):
-    """The k in the schedule must be the k in the tensor, not a near-miss."""
-    dataset = datasets["train"]
-    seen = set()
+def _first(dataset, scenario):
     for index in range(len(dataset)):
         entry = dataset.schedule[index]
-        if entry["scenario"] not in ("join", "fault") or not len(entry["changed_nodes"]):
-            continue
-        batch = dataset[index]
-        nodes = np.asarray(entry["changed_nodes"], dtype=np.int64)
-        k = int(entry["evidence_steps"])
-        lifecycle = dataset._availability(entry, np.ones((12, dataset.num_nodes), bool))[2]
-        if entry["scenario"] == "join":
-            assert lifecycle[-k:, nodes].all() and not lifecycle[:-k, nodes].any()
-        else:
-            assert not lifecycle[-k:, nodes].any() and lifecycle[:-k, nodes].all()
-        seen.add(entry["scenario"])
-        if len(seen) == 2 and index > 200:
-            break
-    assert seen == {"join", "fault"}
+        if entry["scenario"] == scenario and len(entry["changed_nodes"]):
+            return index, entry
+    raise AssertionError(f"no {scenario} sample")
+
+
+def test_role_ids_are_the_frozen_order():
+    """ALFNet indexes role scales positionally as (aas, nas, vs, fs). A loader
+    with its own order feeds Unseen where the model reads AAS, with no shape
+    error anywhere -- which is exactly what happened."""
+    assert (ROLE_AAS, ROLE_NAS, ROLE_VS, ROLE_FS) == (0, 1, 2, 3)
+
+
+def test_v3_and_v4_agree_on_the_role_order():
+    from data_provider import graph_data_loader as v3
+
+    assert (v3.ROLE_AAS, v3.ROLE_NAS, v3.ROLE_VS, v3.ROLE_FS) == (
+        ROLE_AAS, ROLE_NAS, ROLE_VS, ROLE_FS)
+
+
+def test_alfnet_reads_roles_in_the_same_order():
+    import inspect
+
+    from model.ALFNet import ALFNet
+
+    source = inspect.getsource(ALFNet)
+    assert '("aas", "nas", "vs", "fs")' in source, (
+        "ALFNet's positional role order changed; the loader constants must follow")
+
+
+def test_join_trajectory_is_exact_per_step(datasets):
+    dataset = datasets["train"]
+    index, entry = _first(dataset, "join")
+    batch, k = dataset[index], int(entry["evidence_steps"])
+    nodes = np.asarray(entry["changed_nodes"], dtype=np.int64)
+    roles, age = batch["lifecycle_role_ids"], batch["lifecycle_state_age"]
+    cutoff = 12 - k
+    assert (roles[:cutoff][:, nodes] == ROLE_VS).all()
+    assert (roles[cutoff:][:, nodes] == ROLE_NAS).all()
+    assert (age[:cutoff][:, nodes] == 0.0).all()
+    expected = torch.arange(1, k + 1, dtype=torch.float32) / 12.0
+    assert torch.allclose(age[cutoff:][:, nodes], expected[:, None].expand(k, nodes.size))
+
+
+def test_fault_trajectory_is_exact_per_step(datasets):
+    dataset = datasets["train"]
+    index, entry = _first(dataset, "fault")
+    batch, k = dataset[index], int(entry["evidence_steps"])
+    nodes = np.asarray(entry["changed_nodes"], dtype=np.int64)
+    roles, age = batch["lifecycle_role_ids"], batch["lifecycle_state_age"]
+    cutoff = 12 - k
+    assert (roles[:cutoff][:, nodes] == ROLE_AAS).all()
+    assert (roles[cutoff:][:, nodes] == ROLE_FS).all()
+    assert (age[:cutoff][:, nodes] == 1.0).all()
+    assert not batch["input_available_mask"][cutoff:][:, nodes].any()
+
+
+def test_roles_do_not_move_when_a_sensor_merely_misses_a_reading(datasets):
+    """Natural missingness belongs to the observation mask. If it moved a role,
+    a sensor that dropped one reading would be reported as newly attached."""
+    dataset = datasets["train"]
+    index, entry = _first(dataset, "steady")
+    scope = np.zeros(dataset.num_nodes, dtype=bool)
+    scope[dataset.context.signal_scope] = True
+    roles_a, _, age_a = dataset._lifecycle_state(entry, scope)
+    roles_b, _, age_b = dataset._lifecycle_state(entry, scope)
+    assert np.array_equal(roles_a, roles_b) and np.array_equal(age_a, age_b)
+    # roles are a function of scope and episode only -- no natural mask argument
+    import inspect
+    assert "natural" not in inspect.signature(dataset._lifecycle_state).parameters
 
 
 def test_all_four_scenarios_are_covered(datasets):
@@ -192,18 +255,87 @@ def test_all_four_scenarios_are_covered(datasets):
     assert scenarios == {"zero_history", "steady", "join", "fault"}
 
 
-def test_roles_agree_with_availability(datasets):
+@pytest.mark.parametrize("phase", PHASES)
+def test_scenario_pools_follow_the_phase(datasets, phase):
+    """Validation and test must evaluate Unseen and Join on their own held-out
+    nodes. Drawing them from K turns both rows into another Steady."""
+    dataset = datasets[phase]
+    context = dataset.context
+    known = set(context.known_nodes.tolist())
+    held_out = {"train": known,
+                "validation": set(context.validation_unseen.tolist()),
+                "test": set(context.test_unseen.tolist())}[phase]
+    forbidden = {"train": set(), "validation": set(context.test_unseen.tolist()),
+                 "test": set(context.validation_unseen.tolist())}[phase]
+    for scenario, pool in (("zero_history", held_out), ("join", held_out),
+                           ("steady", known), ("fault", known)):
+        _, entry = _first(dataset, scenario)
+        nodes = set(int(node) for node in entry["changed_nodes"])
+        assert nodes <= pool, f"{phase}/{scenario} drew outside its pool"
+        assert not nodes & forbidden, f"{phase}/{scenario} touched the other split"
+
+
+@pytest.mark.parametrize("scenario", ["zero_history", "steady", "join", "fault"])
+def test_target_cohort_is_exactly_changed_nodes(datasets, scenario):
+    """Widening steady to the whole scope, or zero_history to the hidden pool,
+    reports a different measurement from the one the schedule declared."""
+    dataset = datasets["train"]
+    index, entry = _first(dataset, scenario)
+    cohort = dataset[index]["target_cohort_mask"]
+    expected = sorted(int(node) for node in entry["changed_nodes"])
+    assert sorted(torch.nonzero(cohort).flatten().tolist()) == expected
+    assert int(cohort.sum()) == len(expected)
+    assert int(cohort.sum()) < dataset.context.known_nodes.size
+
+
+# --- the exposed target -------------------------------------------------------
+
+
+def test_forbidden_future_values_are_not_present_in_the_batch(datasets):
+    """A mask saying 'do not use' still ships the answer. The target itself is
+    masked, so a consumer with a wrong mask cannot read a forbidden future."""
     for phase, dataset in datasets.items():
         batch = dataset[0]
-        roles, available = batch["lifecycle_role_ids"], batch["input_available_mask"]
-        never = ~available.any(dim=0)
-        # a node with no observation anywhere in the window is never Steady
-        assert not (roles[never] == 1).any(), phase
-        assert torch.equal(batch["lifecycle_state_age"],
-                           available.float().mean(dim=0))
+        forbidden = torch.from_numpy(_forbidden(dataset.context))
+        exposed = batch["target"][:, forbidden, :]
+        assert torch.equal(exposed, torch.zeros_like(exposed)), phase
+
+
+@pytest.mark.parametrize("poison", [float("nan"), float("inf"), 1e30])
+def test_poisoning_a_forbidden_future_does_not_change_the_target(tmp_path, poison):
+    context = build_runtime_context("PEMS08", "train")
+    clean = V4LifecycleDataset(context, PAYLOAD)
+    path = _poison(tmp_path / f"f{abs(hash(poison))}", context, poison,
+                   np.nonzero(_forbidden(context))[0])
+    poisoned = V4LifecycleDataset(context, path)
+    assert torch.equal(clean[0]["target"], poisoned[0]["target"])
+
+
+def test_poisoning_a_permitted_future_does_change_the_target(tmp_path):
+    context = build_runtime_context("PEMS08", "train")
+    clean = V4LifecycleDataset(context, PAYLOAD)
+    path = _poison(tmp_path / "permitted_future", context, 777.0, context.known_nodes)
+    moved = V4LifecycleDataset(context, path, scaler=clean.scaler)
+    assert not torch.equal(clean[0]["target"], moved[0]["target"])
 
 
 # --- teacher forcing ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("phase", PHASES)
+def test_decoder_mask_semantics_per_scenario(datasets, phase):
+    dataset = datasets[phase]
+    scope = np.zeros(dataset.num_nodes, dtype=bool)
+    scope[dataset.context.signal_scope] = True
+    for scenario in ("zero_history", "join", "fault", "steady"):
+        index, entry = _first(dataset, scenario)
+        batch = dataset[index]
+        nodes = np.asarray(entry["changed_nodes"], dtype=np.int64)
+        decoder = batch["decoder_available_mask"]
+        assert not decoder[:, ~torch.from_numpy(scope)].any(), f"{phase} out of scope"
+        if scenario in ("zero_history", "fault"):
+            assert not decoder[:, nodes].any(), f"{phase}/{scenario} was forceable"
+        assert decoder.any(), f"{phase}/{scenario}: nothing forceable; vacuous"
 
 
 def test_decoder_mask_is_sample_level_not_phase_level(datasets):
@@ -246,3 +378,58 @@ def test_the_v3_loader_still_returns_its_ten_tensor_tuple():
     source = inspect.getsource(graph_data_loader.LifecycleCoveragePEMS.__getitem__)
     assert "return" in source
     assert not hasattr(graph_data_loader.LifecycleCoveragePEMS, "base_visible_input")
+
+
+# --- the other three datasets --------------------------------------------------
+#
+# PEMS08 carries the full poison matrix above. Here each remaining dataset gets
+# one forbidden-signal and one forbidden-future counterfactual per phase, plus
+# shapes, role mapping, pools and identity. Repeating all four poison values on
+# a 195 MB PEMS-BAY payload would multiply the suite runtime for no new failure
+# mode -- the masking code is shared, and PEMS08 already exercises every value.
+
+OTHER = ("PEMS03", "PEMS04", "PEMSBAY")
+OTHER_PAYLOAD = {"PEMS03": "data_v4/PEMS03/raw_data.pkl",
+                 "PEMS04": "data_v4/PEMS04/raw_data.pkl",
+                 "PEMSBAY": "data_v4/PEMS-BAY/raw_data.pkl"}
+
+
+@pytest.mark.parametrize("dataset", OTHER)
+@pytest.mark.parametrize("phase", PHASES)
+def test_other_datasets_are_blind_to_forbidden_nodes(tmp_path, dataset, phase):
+    context = build_runtime_context(dataset, phase)
+    payload = OTHER_PAYLOAD[dataset]
+    clean = V4LifecycleDataset(context, payload)
+    forbidden = _forbidden(context)
+    assert forbidden.any(), f"{dataset}/{phase} has no forbidden node"
+
+    # NaN poisons both the signal and, at the same rows, the future target.
+    path = _poison(tmp_path / f"{dataset}{phase}", context, float("nan"),
+                   np.nonzero(forbidden)[0], payload_path=payload)
+    poisoned = V4LifecycleDataset(context, path)
+
+    assert np.array_equal(clean.origins, poisoned.origins)
+    assert clean.scaler == poisoned.scaler
+    for index in (0, len(clean) // 2):
+        a, b = clean[index], poisoned[index]
+        for field in TENSOR_FIELDS:
+            assert torch.equal(a[field], b[field]), f"{dataset}/{phase}/{field}"
+        assert a["context_identity"] == context.identity()
+        exposed = a["target"][:, torch.from_numpy(forbidden), :]
+        assert torch.equal(exposed, torch.zeros_like(exposed))
+
+
+@pytest.mark.parametrize("dataset", OTHER)
+def test_other_datasets_have_the_temporal_axis_and_frozen_roles(dataset):
+    context = build_runtime_context(dataset, "train")
+    loader = V4LifecycleDataset(context, OTHER_PAYLOAD[dataset])
+    batch = loader[0]
+    n = context.num_nodes
+    assert batch["lifecycle_role_ids"].shape == (12, n)
+    assert batch["lifecycle_context"].shape == (12, n, 6)
+    assert set(batch["lifecycle_role_ids"].unique().tolist()) <= {
+        ROLE_AAS, ROLE_NAS, ROLE_VS, ROLE_FS}
+    index, entry = _first(loader, "join")
+    nodes = np.asarray(entry["changed_nodes"], dtype=np.int64)
+    assert set(nodes.tolist()) <= set(context.known_nodes.tolist())
+    assert int(loader[index]["target_cohort_mask"].sum()) == nodes.size
