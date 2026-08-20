@@ -114,6 +114,11 @@ class Model(nn.Module):
             raise ValueError(
                 "ALFTemporal.from_runtime_context requires a RuntimeDataContext; "
                 "v4 fails closed rather than falling back to data_path")
+        from lib.context_binding import assert_config_agrees_with_context
+
+        # The nested expert's own `input_features` sizes `expert_input_dim`, so
+        # a nested YAML naming the wrong quantity is not merely documentation.
+        assert_config_agrees_with_context(configs, runtime_context, "ALFTemporal")
         return cls(configs, runtime_context=runtime_context)
 
     def __init__(self, configs, runtime_context=None):

@@ -20,7 +20,9 @@ The confirmation splits are spent once; nothing in a training runner has any
 business opening one.
 """
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
@@ -36,6 +38,10 @@ from lib.lcbt_v4 import (
 )
 from lib.runtime_context import build_runtime_context
 from utils.model_output import sum_aux_losses, unpack_model_output
+
+ROOT = Path(__file__).resolve().parents[1]
+MANIFEST_DIR = ROOT / "configs/paper/v4_data_manifests"
+CONFIG_DIR = ROOT / "configs/paper/v4"
 
 SCENARIOS = ("zero_history", "steady", "join", "fault")
 MODEL_ENTRY_POINTS = {
@@ -86,14 +92,48 @@ class V4Session:
         return self
 
 
-def build_v4_session(dataset, model_name, config_path, payload_path,
-                     batch_size=4, run_seed=32, validation_seed=12026,
-                     device="cpu", num_workers=0, init_seed=1234):
-    """Build one v4 session. Data first, model second."""
+def resolve_payload_path(dataset, args):
+    """The payload the manifest declares, cross-checked against the config."""
+    manifest = json.loads(
+        (MANIFEST_DIR / f"{dataset}_run_manifest.json").read_text("utf-8"))
+    declared = ROOT / manifest["payload"]["path"]
+    configured = getattr(args, "data_path", None)
+    if configured and Path(configured).resolve() != declared.resolve():
+        raise RunnerRefused(
+            f"the config reads {configured}, the {dataset} manifest declares "
+            f"{manifest['payload']['path']}; one of them is wrong and it is not "
+            "for this runner to pick")
+    return declared
+
+
+def build_v4_session(config_path, device="cpu", run_seed=None, batch_size=None,
+                     num_workers=None, payload_path=None, init_seed=1234):
+    """Build one v4 session from a v4 config. Data first, model second.
+
+    Everything but the four run-level knobs comes from the config. The strategy
+    is *checked*, never rewritten: the previous form loaded a v3 YAML and set
+    `lifecycle_training_strategy` to v4 in code, which meant the file on disk and
+    the run it produced disagreed, and only the code knew.
+    """
+    args = load_args_from_config(str(config_path), [])
+    if args.lifecycle_training_strategy != STRATEGY:
+        raise RunnerRefused(
+            f"{config_path} declares lifecycle_training_strategy="
+            f"{args.lifecycle_training_strategy!r}; the v4 runner takes "
+            f"{STRATEGY!r} configs only and does not rewrite one")
+    model_name = str(args.model)
     if model_name not in MODEL_ENTRY_POINTS:
         raise RunnerRefused(
             f"{model_name} has no v4 entry point; this runner takes "
             f"{sorted(MODEL_ENTRY_POINTS)}")
+    dataset = str(args.dloader_name)
+    args.device = device
+    run_seed = int(args.seed if run_seed is None else run_seed)
+    args.seed = run_seed
+    validation_seed = int(args.lcbt_validation_seed)
+    batch_size = int(args.batch_size if batch_size is None else batch_size)
+    num_workers = int(args.num_workers if num_workers is None else num_workers)
+    payload_path = payload_path or resolve_payload_path(dataset, args)
 
     # 1-3. Both phases, and they must agree on the graph and differ on exposure.
     train_context = resolve_context(dataset, "train", run_seed)
@@ -130,9 +170,6 @@ def build_v4_session(dataset, model_name, config_path, payload_path,
 
     # 7-8. One static model, built on the train context's assets, which the
     #      validation context shares. It then accepts either per batch.
-    args = load_args_from_config(config_path, [])
-    args.device = device
-    args.lifecycle_training_strategy = STRATEGY
     module = __import__(MODEL_ENTRY_POINTS[model_name], fromlist=["Model"])
     torch.manual_seed(init_seed)
     model = module.Model.from_runtime_context(args, train_context).to(device)

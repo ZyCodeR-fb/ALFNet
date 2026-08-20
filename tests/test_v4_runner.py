@@ -38,8 +38,8 @@ from lib.lcbt_v4 import (
 from lib.runtime_context import build_runtime_context
 
 PAYLOAD = "data_v4/PEMS08/raw_data.pkl"
-CONFIGS = {"ALFNet": "configs/ALFNet/gs_p8.yaml",
-           "MoGERNN": "configs/MoGERNN/PEMS08_lcbt_v3.yaml"}
+CONFIGS = {"ALFNet": "configs/paper/v4/PEMS08_ALFNet.yaml",
+           "MoGERNN": "configs/paper/v4/PEMS08_MoGERNN.yaml"}
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -54,8 +54,7 @@ def train_dataset(train_context):
 
 
 def _session(model_name, batch_size=2, **kwargs):
-    return build_v4_session("PEMS08", model_name, CONFIGS[model_name], PAYLOAD,
-                            batch_size=batch_size, **kwargs)
+    return build_v4_session(CONFIGS[model_name], batch_size=batch_size, **kwargs)
 
 
 def _design(batch):
@@ -252,6 +251,7 @@ def test_the_runner_refuses_to_touch_a_test_split(monkeypatch):
 
 def test_the_session_is_built_data_first():
     session = _session("ALFNet")
+    assert session.dataset == "PEMS08" and session.model_name == "ALFNet"
     assert session.train_context.static_asset_hash() == \
            session.validation_context.static_asset_hash()
     assert session.train_context.exposure_hash() != \
@@ -370,9 +370,18 @@ def test_an_epoch_with_no_valid_position_is_an_error_not_a_zero(monkeypatch):
         validate(session, 0, max_batches=2)
 
 
-def test_an_unknown_model_is_refused():
+def test_an_unknown_model_is_refused(monkeypatch):
+    monkeypatch.setitem(v4_runner.MODEL_ENTRY_POINTS, "ALFNet", None)
+    monkeypatch.delitem(v4_runner.MODEL_ENTRY_POINTS, "ALFNet")
     with pytest.raises(RunnerRefused, match="no v4 entry point"):
-        build_v4_session("PEMS08", "STID", CONFIGS["ALFNet"], PAYLOAD)
+        build_v4_session(CONFIGS["ALFNet"])
+
+
+def test_the_runner_does_not_rewrite_the_strategy():
+    """A v3 config is refused, not silently relabelled as v4."""
+    with pytest.raises(RunnerRefused, match="does not rewrite one"):
+        build_v4_session("configs/ALFNet/gs_p8.yaml")
+    assert _session("ALFNet").args.lifecycle_training_strategy == "lcbt_v4"
 
 
 # --- the smoke, as a test ------------------------------------------------------

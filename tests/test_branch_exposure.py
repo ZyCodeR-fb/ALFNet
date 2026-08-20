@@ -28,8 +28,8 @@ from data_provider.v4_lifecycle_loader import V4LifecycleDataset
 from lib.runtime_context import ContextRefused, build_runtime_context
 from lib.v4_payload import load_v4_payload, save_v4_payload
 
-CONFIGS = {"PEMS08": "configs/ALFNet/gs_p8.yaml",
-           "PEMSBAY": "configs/ALFNet/gs_bay.yaml"}
+CONFIGS = {"PEMS08": "configs/paper/v4/PEMS08_ALFNet.yaml",
+           "PEMSBAY": "configs/paper/v4/PEMSBAY_ALFNet.yaml"}
 PAYLOADS = {"PEMS08": "data_v4/PEMS08/raw_data.pkl",
             "PEMSBAY": "data_v4/PEMS-BAY/raw_data.pkl"}
 
@@ -42,9 +42,6 @@ def _build_model(dataset, context, seed=1234):
 
     args = load_args_from_config(CONFIGS[dataset], [])
     args.device = "cpu"
-    # The formal v4 YAMLs are Stage 2-B1; until then a v3 config stands in and
-    # declares the protocol it is actually being run under.
-    args.lifecycle_training_strategy = "lcbt_v4"
     torch.manual_seed(seed)
     return alfnet.Model.from_runtime_context(args, context)
 

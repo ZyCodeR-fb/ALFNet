@@ -15,8 +15,8 @@ import torch
 from args import load_args_from_config
 from lib.runtime_context import build_runtime_context
 
-CONFIGS = {"PEMS08": "configs/ALFNet/gs_p8.yaml",
-           "PEMSBAY": "configs/ALFNet/gs_bay.yaml"}
+CONFIGS = {"PEMS08": "configs/paper/v4/PEMS08_ALFNet.yaml",
+           "PEMSBAY": "configs/paper/v4/PEMSBAY_ALFNet.yaml"}
 PHASES = ("train", "validation", "test")
 
 
@@ -57,9 +57,6 @@ def _build(dataset, phase="train", context=None, **overrides):
 
     args = load_args_from_config(CONFIGS[dataset], [])
     args.device = "cpu"
-    # The formal v4 YAMLs are Stage 2-B1; a v3 config stands in and declares the
-    # protocol it is actually being run under.
-    args.lifecycle_training_strategy = "lcbt_v4"
     for key, value in overrides.items():
         setattr(args, key, value)
     return alfnet.Model.from_runtime_context(
@@ -127,8 +124,8 @@ def test_every_v4_entry_point_refuses_a_missing_context():
     import model.ALFTemporal.ALFTemporal as alftemporal
 
     for module, config in ((alfnet, CONFIGS["PEMS08"]),
-                           (alfgraph, "configs/ALFGraph/PEMS08_alfgraph_soft.yaml"),
-                           (alftemporal, "configs/ALFTemporal/PEMS08_cond1.yaml")):
+                           (alfgraph, "configs/paper/v4/experts/PEMS08_ALFGraph.yaml"),
+                           (alftemporal, "configs/paper/v4/experts/PEMS08_ALFTemporal.yaml")):
         args = load_args_from_config(config, [])
         args.device = "cpu"
         with pytest.raises(ValueError, match="requires a RuntimeDataContext"):

@@ -376,8 +376,11 @@ def finalize_args(args):
     if args.train_for_async_lifecycle or lifecycle_feature_enabled:
         if args.input_features != args.target_features or args.input_features not in {"q", "o", "v"}:
             raise ValueError("lifecycle-aware training/input augmentation currently supports one same input/target feature among q/o/v")
-    if args.train_for_async_lifecycle and args.lifecycle_training_strategy != "lcbt_v3":
-        raise ValueError("train_for_async_lifecycle requires lifecycle_training_strategy=lcbt_v3")
+    if args.train_for_async_lifecycle and args.lifecycle_training_strategy not in (
+            "lcbt_v3", lcbt_v4.STRATEGY):
+        raise ValueError(
+            "train_for_async_lifecycle requires lifecycle_training_strategy="
+            f"lcbt_v3 or {lcbt_v4.STRATEGY}")
     if args.test_for_async_lifecycle and args.lifecycle_training_strategy != "lcbt_v3":
         raise ValueError("test_async requires lifecycle_training_strategy=lcbt_v3")
     if args.lifecycle_training_strategy == "lcbt_v3":

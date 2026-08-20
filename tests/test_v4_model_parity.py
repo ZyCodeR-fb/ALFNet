@@ -29,10 +29,13 @@ from lib.teacher_forcing import (
 )
 from lib.v4_payload import load_v4_payload, save_v4_payload
 
-ALFNET_CONFIGS = {"PEMS08": "configs/ALFNet/gs_p8.yaml",
-                  "PEMSBAY": "configs/ALFNet/gs_bay.yaml"}
-MOGERNN_CONFIGS = {"PEMS08": "configs/MoGERNN/PEMS08_lcbt_v3.yaml",
-                   "PEMSBAY": "configs/MoGERNN/PEMSBAY_lcbt_v3.yaml"}
+ALFNET_CONFIGS = {"PEMS08": "configs/paper/v4/PEMS08_ALFNet.yaml",
+                  "PEMSBAY": "configs/paper/v4/PEMSBAY_ALFNet.yaml"}
+MOGERNN_CONFIGS = {"PEMS08": "configs/paper/v4/PEMS08_MoGERNN.yaml",
+                   "PEMSBAY": "configs/paper/v4/PEMSBAY_MoGERNN.yaml"}
+# The v3 archive entry point takes only v3 configs, and is exercised as such.
+V3_CONFIGS = {"ALFNet": "configs/ALFNet/gs_p8.yaml",
+              "MoGERNN": "configs/MoGERNN/PEMS08_lcbt_v3.yaml"}
 PAYLOADS = {"PEMS08": "data_v4/PEMS08/raw_data.pkl",
             "PEMSBAY": "data_v4/PEMS-BAY/raw_data.pkl"}
 
@@ -45,7 +48,6 @@ def _alfnet(dataset, context, seed=1234):
 
     args = load_args_from_config(ALFNET_CONFIGS[dataset], [])
     args.device = "cpu"
-    args.lifecycle_training_strategy = "lcbt_v4"
     torch.manual_seed(seed)
     return alfnet.Model.from_runtime_context(args, context)
 
@@ -55,7 +57,6 @@ def _mogernn(dataset, context, seed=1234):
 
     args = load_args_from_config(MOGERNN_CONFIGS[dataset], [])
     args.device = "cpu"
-    args.lifecycle_training_strategy = "lcbt_v4"
     torch.manual_seed(seed)
     return mogernn.Model.from_runtime_context(args, context)
 
@@ -236,7 +237,6 @@ def test_a_wrong_target_channel_is_refused_by_both(context, who):
     config = ALFNET_CONFIGS if who == "ALFNet" else MOGERNN_CONFIGS
     args = load_args_from_config(config["PEMS08"], [])
     args.device = "cpu"
-    args.lifecycle_training_strategy = "lcbt_v4"
     args.target_channel = context.target_channel + 3
     with pytest.raises(ValueError, match="refusing rather than silently winning"):
         module.Model.from_runtime_context(args, context)
@@ -253,7 +253,8 @@ def test_the_v3_path_and_a_missing_context_are_refused_by_both(context, batch, w
         module.Model.from_runtime_context(
             load_args_from_config(config["PEMS08"], []), None)
 
-    args = load_args_from_config(config["PEMS08"], [])
+    # The archive constructor takes a v3 config; a v4 one is refused there.
+    args = load_args_from_config(V3_CONFIGS[who], [])
     args.device = "cpu"
     archive = module.Model(args).eval()
     with pytest.raises(ValueError, match="built through from_runtime_context"):
