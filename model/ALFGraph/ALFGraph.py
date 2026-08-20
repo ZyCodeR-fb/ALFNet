@@ -9,6 +9,7 @@ from layers.lifecycle_moge import (
     LifecycleRoutedGraphConv,
     build_lifecycle_supports,
 )
+from lib.teacher_forcing import step_teacher_input
 
 
 class Encoder(nn.Module):
@@ -90,6 +91,7 @@ class ResidualDeltaDecoder(nn.Module):
         teacher_forcing_ratio,
         supports=None,
         state=None,
+        teacher_mask=None,
     ):
         current = initial_input
         outputs = []
@@ -109,17 +111,21 @@ class ResidualDeltaDecoder(nn.Module):
             hidden = torch.stack(next_states, dim=0)
             output = anchor[..., :self.output_size] + self.scale * self.projection(current)
             outputs.append(output)
-            # `teacher_input is not None` short-circuits before the draw, so a
-            # call that supplies one consumes exactly the RNG it always did.
-            # Without the guard a decoder-input-free training call indexes None:
-            # v4 withholds the future entirely this stage, and a masked decoder
-            # input is the next stage's job, not a crash here.
-            use_teacher = (
-                self.training
-                and teacher_input is not None
-                and torch.rand(1).item() < teacher_forcing_ratio
-            )
-            current = teacher_input[:, step] if use_teacher else output
+            if teacher_mask is not None:
+                # v4: the decision is per (sample, step, node) and was made
+                # outside the model, so nothing is drawn here.
+                current = step_teacher_input(teacher_input, teacher_mask, step, output)
+            else:
+                # v3 archive path. `teacher_input is not None` short-circuits
+                # before the draw, so a call that supplies one consumes exactly
+                # the RNG it always did; without the guard a decoder-input-free
+                # training call indexes None.
+                use_teacher = (
+                    self.training
+                    and teacher_input is not None
+                    and torch.rand(1).item() < teacher_forcing_ratio
+                )
+                current = teacher_input[:, step] if use_teacher else output
         return torch.stack(outputs, dim=1)
 
 
@@ -261,6 +267,7 @@ class Model(nn.Module):
         dec_t_mark=None,
         epoch=0,
         film=None,
+        teacher_mask=None,
     ):
         forward_support = calculate_random_walk_matrix(adjacency)
         backward_support = calculate_random_walk_matrix(adjacency.T)
@@ -308,6 +315,7 @@ class Model(nn.Module):
             # No lifecycle state exists beyond the input window, so the decoder
             # holds the last observed one rather than inventing a future.
             None if state_sequence is None else state_sequence[:, -1],
+            teacher_mask,
         )
         # The last encoder layer's state, detached: the residual branch reads
         # the anchor's summary without pushing gradients back into it.

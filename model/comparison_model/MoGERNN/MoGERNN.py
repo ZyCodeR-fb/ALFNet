@@ -3,6 +3,8 @@ import torch.nn.functional as F
 from einops import rearrange
 from .layers.agg import MeanAggregator, WMeanAggregator, MaxPoolingAggregator, MinPoolingAggregator, DiffusionAggregator
 from .layers.DCRNNCell import DCRNNCell
+from lib.teacher_forcing import masked_teacher_forcing, step_teacher_input
+from lib.v4_batch import bind_static_assets, read_common
 
 
 class Expert(nn.Module):
@@ -162,7 +164,8 @@ class Decoder(nn.Module):
         self.rnn_cells = nn.ModuleList([DCRNNCell(input_size if i == 0 else hidden_size, hidden_size, k) for i in range(num_layers)])
         self.fc = nn.Linear(hidden_size, input_size)
 
-    def forward(self, intial_input, h, A_q, A_h, tearcher_input, teacher_forcing_ratio=0.5):
+    def forward(self, intial_input, h, A_q, A_h, tearcher_input, teacher_forcing_ratio=0.5,
+                teacher_mask=None):
         # label_seq: [batch_size, seq_len, num_nodes, input_size]
         # h: [num_layers, batch_size, num_nodes, hidden_size]
         input_at_t = intial_input
@@ -176,12 +179,20 @@ class Decoder(nn.Module):
             h = torch.stack(hs, dim=0)
             output = self.fc(next_h)
             outputs[t] = output
-            # Teacher forcing
-            use_teacher_forcing = True if (torch.rand(1).item() < teacher_forcing_ratio and self.training) else False
-            if use_teacher_forcing:
-                input_at_t = tearcher_input[:, t]
+            if teacher_mask is not None:
+                # v4: the decision is per (sample, step, node) and was made
+                # outside the model, so nothing is drawn here. The source's one
+                # `torch.rand` per step was a single boolean that fed *every*
+                # node its future or none of them.
+                input_at_t = step_teacher_input(tearcher_input, teacher_mask, t, output)
             else:
-                input_at_t = outputs[t]
+                # v3 archive path, expression unchanged so the RNG stream and
+                # every historical run reproduce exactly.
+                use_teacher_forcing = True if (torch.rand(1).item() < teacher_forcing_ratio and self.training) else False
+                if use_teacher_forcing:
+                    input_at_t = tearcher_input[:, t]
+                else:
+                    input_at_t = outputs[t]
         outputs = torch.stack(outputs, dim=1)  # type: ignore
         return outputs
 
@@ -193,20 +204,80 @@ class Seq2Seq(nn.Module):
         self.encoder = Encoder(input_size, hidden_size, num_layers, k)
         self.decoder = Decoder(input_size, hidden_size, out_seq_len, num_layers, k)
 
-    def forward(self, x_enc, x_dec, A_q, A_h, teacher_forcing_ratio=0.5):
+    def forward(self, x_enc, x_dec, A_q, A_h, teacher_forcing_ratio=0.5,
+                teacher_mask=None):
         h = self.encoder(x_enc, A_q, A_h)
-        dec_out = self.decoder(x_enc[:, -1], h, A_q, A_h, x_dec, teacher_forcing_ratio)
+        dec_out = self.decoder(x_enc[:, -1], h, A_q, A_h, x_dec, teacher_forcing_ratio,
+                               teacher_mask)
         return dec_out
 
 
 class Model(nn.Module):
 
+    @classmethod
+    def from_runtime_context(cls, configs, runtime_context):
+        """The v4 entry point.
+
+        MoGERNN reads no graph from disk and must not start: its adjacency
+        arrives per forward call. So this binds only what it can be held to --
+        the static asset hash, the node count, the node order, the dataset and
+        the target channel -- and verifies the config does not contradict them.
+        The architecture is untouched: same experts, same gating, same encoder,
+        decoder, hidden size, layer count and initialisation. `Model(configs)`
+        stays as the v3 archive path and is not extended.
+        """
+        if runtime_context is None:
+            raise ValueError(
+                "MoGERNN.from_runtime_context requires a RuntimeDataContext; "
+                "v4 fails closed rather than falling back to data_path")
+        return bind_static_assets(cls(configs), configs, runtime_context, "MoGERNN")
+
     def __init__(self, configs):
         super(Model, self).__init__()
+        self.runtime_context = None
+        self.static_asset_hash = None
+        self._v4_adjacency_cache = {}
         self.out_len = configs.pred_len if configs.pred_len > 0 else configs.look_back
         self.raw_enc_in = getattr(configs, "raw_enc_in", configs.enc_in)
         self.data_pre = DataPreparation(configs)
         self.seq2seq = Seq2Seq(self.raw_enc_in, configs.d_model, configs.e_layers, self.out_len, configs.k_hop)
+
+    def forward_v4(self, batch, runtime_context, epoch=0, teacher_forcing_mask=None):
+        """Run one v4 named batch on the source-native input only.
+
+        The common dynamic signal is `base_visible_input` and nothing else. The
+        lifecycle channels are ALFNet's method inputs; a baseline that is given
+        them is a different model and would have to be reported under a separate
+        `+LC` name. They are not read here, not concatenated here, and the batch
+        field is not even requested -- `read_common` is called without it, so
+        asking would be a code change and not an accident.
+
+        `epoch` is accepted for interface symmetry and is deliberately unused:
+        the v3 path derived a teacher-forcing ratio from it, and under v4 the
+        schedule arrives as an explicit mask instead.
+        """
+        common = read_common(batch, runtime_context, self.static_asset_hash,
+                             self.raw_enc_in, "MoGERNN", self._v4_adjacency_cache,
+                             require_target=True)
+        x_enc = common["base_visible_input"]
+        teacher_input, teacher_mask = masked_teacher_forcing(
+            batch["target"][..., :self.raw_enc_in],
+            batch["decoder_available_mask"], teacher_forcing_mask,
+            self.training, "MoGERNN")
+
+        adj = common["adjacency"]
+        A_q = calculate_random_walk_matrix(adj)
+        A_h = calculate_random_walk_matrix(adj.T)
+        completed = self.data_pre(adj, x_enc)
+        prediction = self.seq2seq(completed, teacher_input, A_q, A_h,
+                                  teacher_forcing_ratio=0.0,
+                                  teacher_mask=teacher_mask)
+        if prediction.shape[:3] != (x_enc.shape[0], self.out_len, common["num_nodes"]):
+            raise ValueError(
+                f"MoGERNN v4 produced {tuple(prediction.shape)}, expected "
+                f"[{x_enc.shape[0]}, {self.out_len}, {common['num_nodes']}, "
+                f"{self.raw_enc_in}]")
+        return {"pred": prediction}
 
     def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, *args):
         x_dec = args[0]
