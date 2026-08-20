@@ -75,6 +75,8 @@ TIE_RULE = "keep_earlier_epoch"
 COMPLETE_MARKER = "COMPLETE"
 FAILED_MARKER = "FAILED.json"
 LAUNCHER_VERSION = "v2_parallel_tmux"
+# Files the launcher owns. They are not evidence that a run produced anything.
+LAUNCHER_BOOKKEEPING = frozenset({".lock", FAILED_MARKER})
 # Code whose change would make a resumed run a different experiment.
 CODE_SOURCES = ("experiments/v4_runner.py", "experiments/v4_validation_collector.py",
                 "scripts/train_v4.py", "lib/lcbt_v4.py")
@@ -324,6 +326,22 @@ def archive_incomplete(run_directory):
     return target
 
 
+def run_artefacts(directory):
+    """What the run itself produced, ignoring the launcher's bookkeeping.
+
+    The launcher takes its per-run lock before starting the trainer, so a fresh
+    run's directory already contains `.lock` by the time the trainer looks at
+    it. Counting that as "an unfinished run is here" made every new run refuse
+    to start -- caught by the health phase in ten seconds, which is what the
+    health phase is for.
+    """
+    directory = Path(directory)
+    if not directory.exists():
+        return []
+    return [entry for entry in directory.iterdir()
+            if entry.name not in LAUNCHER_BOOKKEEPING]
+
+
 def assert_not_clobbering(run_directory, resume, restart_incomplete=False):
     marker = Path(run_directory) / COMPLETE_MARKER
     if marker.exists():
@@ -331,7 +349,7 @@ def assert_not_clobbering(run_directory, resume, restart_incomplete=False):
             f"{run_directory} is marked {COMPLETE_MARKER}; refusing to overwrite "
             "a finished run. Delete it deliberately or choose another output root")
     directory = Path(run_directory)
-    if not (directory.exists() and any(directory.iterdir())):
+    if not run_artefacts(directory):
         return
     if restart_incomplete:
         archive_incomplete(directory)
@@ -438,7 +456,7 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
 
     history, best, best_table = [], {"epoch": None, "life_avg_mae": None}, None
     start_epoch, wait = 0, 0
-    if resume and Path(run_directory).exists() and any(Path(run_directory).iterdir()):
+    if resume and run_artefacts(run_directory):
         state = load_run_state(run_directory, session, config_path, config_sha, plan)
         session.model.load_state_dict(state["model_state"])
         session.model.to(device)

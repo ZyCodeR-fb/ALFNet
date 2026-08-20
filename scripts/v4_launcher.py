@@ -50,6 +50,7 @@ from scripts.train_v4 import (  # noqa: E402
     FAILED_MARKER,
     LAUNCHER_VERSION,
     RUN_STATE_NAME,
+    run_artefacts,
 )
 
 DATASETS = ("PEMS08", "PEMSBAY")
@@ -156,7 +157,7 @@ def run_state(run):
         return "COMPLETE"
     if (directory / FAILED_MARKER).exists():
         return "FAILED"
-    if not directory.exists() or not any(directory.iterdir()):
+    if not run_artefacts(directory):
         return "NEW"
     return "RESUMABLE" if (directory / RUN_STATE_NAME).exists() else "UNRESUMABLE"
 
