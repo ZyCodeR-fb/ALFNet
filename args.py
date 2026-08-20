@@ -3,6 +3,7 @@ import os
 from copy import deepcopy
 
 from omegaconf import OmegaConf
+from lib import lcbt_v4
 from utils.canonical_config import freeze_canonical_config
 
 
@@ -103,7 +104,7 @@ def _add_arguments(parser):
         "--lifecycle_training_strategy",
         type=str,
         default="none",
-        choices=["none", "lcbt_v3"],
+        choices=["none", "lcbt_v3", "lcbt_v4"],
         help="lifecycle-aware training recipe",
     )
     parser.add_argument("--lcbt_manifest_root", type=str, default="./protocol_manifests", help="dataset-specific LCBT manifest root")
@@ -465,6 +466,45 @@ def finalize_args(args):
             raise ValueError(f"{args.lifecycle_training_strategy} requires ples_protocol_version=3")
         if int(args.batch_size) % 4:
             raise ValueError("lcbt_v3 batch_size must be divisible by four")
+    if args.lifecycle_training_strategy == lcbt_v4.STRATEGY:
+        # v4 is not v3 with different numbers: the split, the node scope and the
+        # training computation graph all moved. The ratios are pinned here so a
+        # config cannot claim v4 while describing the v3 protocol -- that would
+        # be undetectable in a manifest, which records the name and not the
+        # boundaries it implies.
+        expected = {
+            "lcbt_train_end_ratio": lcbt_v4.TRAIN_END_RATIO,
+            "lcbt_val_end_ratio": lcbt_v4.VAL_END_RATIO,
+            "lcbt_test_start_ratio": lcbt_v4.TEST_START_RATIO,
+            "lcbt_scaler_end_ratio": lcbt_v4.SCALER_END_RATIO,
+        }
+        expected.update(lcbt_v4.SCENARIO_RATIOS)
+        wrong = [
+            f"{name}={getattr(args, name)} (expected {value})"
+            for name, value in expected.items()
+            if abs(float(getattr(args, name)) - value) > 1e-9
+        ]
+        if wrong:
+            raise ValueError(
+                "lcbt_v4 fixes the 60/20/20 split and equal scenario shares; "
+                + ", ".join(wrong))
+        if args.stop_based != "val_lifecycle":
+            raise ValueError("lcbt_v4 requires stop_based=val_lifecycle")
+        # The lifecycle channels are ALFNet's method inputs. MoGERNN runs under
+        # the same protocol and reads only `base_visible_input`, so requiring
+        # them of every v4 config would be requiring a baseline to carry a
+        # feature it must never consume.
+        if str(args.model) == "ALFNet":
+            missing = [
+                name for name in ("lifecycle_role_features",
+                                  "lifecycle_history_age_feature",
+                                  "lifecycle_observation_mask_feature")
+                if not getattr(args, name)
+            ]
+            if missing:
+                raise ValueError(
+                    "lcbt_v4 ALFNet requires raw + role(4) + age(1) + mask(1); "
+                    "missing: " + ", ".join(missing))
     args.c_out = len(args.target_features)
     args.raw_enc_in = len(args.input_features)
     args.enc_in = args.raw_enc_in

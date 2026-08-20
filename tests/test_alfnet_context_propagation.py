@@ -57,6 +57,9 @@ def _build(dataset, phase="train", context=None, **overrides):
 
     args = load_args_from_config(CONFIGS[dataset], [])
     args.device = "cpu"
+    # The formal v4 YAMLs are Stage 2-B1; a v3 config stands in and declares the
+    # protocol it is actually being run under.
+    args.lifecycle_training_strategy = "lcbt_v4"
     for key, value in overrides.items():
         setattr(args, key, value)
     return alfnet.Model.from_runtime_context(

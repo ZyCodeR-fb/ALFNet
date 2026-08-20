@@ -27,6 +27,7 @@ from lib.runtime_context import ContextRefused
 from data_provider.lifecycle_roles import (
     ROLE_AAS, ROLE_CHANNEL_COUNT, ROLE_FS, ROLE_NAS, ROLE_VS,
 )
+from lib.lcbt_v4 import SPLIT_FRACTIONS
 from lib.v4_payload import load_v4_payload
 from utils.timefeatures import time_features
 
@@ -35,8 +36,8 @@ class V4LifecycleDataset(Dataset):
     """Full-N windows with sample-level exposure masks."""
 
     def __init__(self, context, payload_path, input_len=12, pred_len=12,
-                 seed=32, epoch=0, split_fractions=(0.6, 0.2, 0.2), scaler=None,
-                 freq="min"):
+                 seed=32, epoch=0, split_fractions=SPLIT_FRACTIONS, scaler=None,
+                 freq="min", validation_seed=12026):
         if context is None:
             raise ContextRefused(
                 "v4 requires a RuntimeDataContext; it is not inferred from the "
@@ -86,8 +87,16 @@ class V4LifecycleDataset(Dataset):
             raise ContextRefused(
                 f"time marks cover {self.time_marks.shape[0]} steps, the signal "
                 f"has {steps}")
+        # Two seeds, deliberately. Training redraws its schedule every epoch
+        # from `seed`; every other phase draws once from `validation_seed` and
+        # never moves, so a validation number from epoch 7 is comparable with
+        # one from epoch 3. Sharing one seed would make the validation schedule
+        # a function of the training epoch counter.
+        self.seed = int(seed)
+        self.validation_seed = int(validation_seed)
+        self.epoch = int(epoch)
         self._build_origins()
-        self._build_schedule(seed, epoch, stamps)
+        self._build_schedule(stamps)
 
     # --- construction ---------------------------------------------------------
 
@@ -117,16 +126,43 @@ class V4LifecycleDataset(Dataset):
                 origins.append(origin)
         self.origins = np.asarray(origins, dtype=np.int64)
 
-    def _build_schedule(self, seed, epoch, stamps):
+    def _schedule_draw(self):
+        """(seed, epoch) for this phase's schedule."""
+        if self.context.phase == "train":
+            return self.seed, self.epoch
+        return self.validation_seed, 0
+
+    def _build_schedule(self, stamps=None):
+        if stamps is None:
+            stamps = self.stamps
         regimes = [calendar_stratum(stamps[origin + self.input_len - 1])
                    for origin in self.origins]
         adjacency = self.context.adjacency.numpy()
+        seed, epoch = self._schedule_draw()
         self.schedule = build_lcbt_schedule(
             num_samples=len(self.origins), input_len=self.input_len,
             adjacency=adjacency, calendar_regimes=regimes, seed=seed, epoch=epoch,
             scenario_node_pools=self._scenario_pools(),
             topology_adjacency=adjacency, node_ids=np.arange(self.num_nodes),
             cohort_size_base=self.num_nodes)
+
+    def set_epoch(self, epoch):
+        """Redraw the training schedule for `epoch`. Deterministic in (seed, epoch).
+
+        Only the schedule moves. The origins, the scaler, the K/V/T sets and the
+        time boundaries are facts about the dataset and are not recomputed --
+        re-fitting the scaler per epoch would make the normalisation a function
+        of the epoch counter.
+
+        A no-op on validation and test by construction: `_schedule_draw` returns
+        the fixed validation seed and epoch 0 for them, so the rebuild would
+        produce the identical schedule. It is skipped rather than repeated so
+        the object identity holds too, which is what the test asserts.
+        """
+        self.epoch = int(epoch)
+        if self.context.phase == "train":
+            self._build_schedule()
+        return self
 
     def _scenario_pools(self):
         """Which nodes each scenario may draw, per phase.

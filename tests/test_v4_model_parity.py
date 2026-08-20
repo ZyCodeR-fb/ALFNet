@@ -45,6 +45,7 @@ def _alfnet(dataset, context, seed=1234):
 
     args = load_args_from_config(ALFNET_CONFIGS[dataset], [])
     args.device = "cpu"
+    args.lifecycle_training_strategy = "lcbt_v4"
     torch.manual_seed(seed)
     return alfnet.Model.from_runtime_context(args, context)
 
@@ -54,6 +55,7 @@ def _mogernn(dataset, context, seed=1234):
 
     args = load_args_from_config(MOGERNN_CONFIGS[dataset], [])
     args.device = "cpu"
+    args.lifecycle_training_strategy = "lcbt_v4"
     torch.manual_seed(seed)
     return mogernn.Model.from_runtime_context(args, context)
 
@@ -234,6 +236,7 @@ def test_a_wrong_target_channel_is_refused_by_both(context, who):
     config = ALFNET_CONFIGS if who == "ALFNet" else MOGERNN_CONFIGS
     args = load_args_from_config(config["PEMS08"], [])
     args.device = "cpu"
+    args.lifecycle_training_strategy = "lcbt_v4"
     args.target_channel = context.target_channel + 3
     with pytest.raises(ValueError, match="refusing rather than silently winning"):
         module.Model.from_runtime_context(args, context)

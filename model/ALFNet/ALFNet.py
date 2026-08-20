@@ -19,6 +19,7 @@ from layers.evidence_router import (
     self_evidence,
 )
 from layers.source_grin import GRINInputImputer
+from lib.lcbt_v4 import assert_v4_strategy
 from lib.teacher_forcing import masked_teacher_forcing
 from lib.utils import load_project_adjacency, resolve_known_unknown_nodes
 from lib.v4_batch import read_common, resolve_adjacency
@@ -223,8 +224,15 @@ class Model(nn.Module):
             and configs.lifecycle_observation_mask_feature
         ):
             raise ValueError("ALFNet requires availability, state-age, and observation-mask inputs")
-        if configs.lifecycle_training_strategy != "lcbt_v3":
-            raise ValueError("ALFNet streamlined mainline requires lifecycle_training_strategy=lcbt_v3")
+        # v3 archive runs under v3; a model bound to a RuntimeDataContext runs
+        # under v4. Neither may borrow the other's name -- the two protocols
+        # differ on the split and the node scope, and a checkpoint that recorded
+        # the wrong one could not be placed in either table.
+        if runtime_context is None:
+            if configs.lifecycle_training_strategy != "lcbt_v3":
+                raise ValueError("ALFNet streamlined mainline requires lifecycle_training_strategy=lcbt_v3")
+        else:
+            assert_v4_strategy(configs, "ALFNet")
 
         family = getattr(configs, "model_family_cfg", {}) or {}
         experts = family.get("experts", {})

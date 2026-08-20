@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from .layers.agg import MeanAggregator, WMeanAggregator, MaxPoolingAggregator, MinPoolingAggregator, DiffusionAggregator
 from .layers.DCRNNCell import DCRNNCell
+from lib.lcbt_v4 import assert_v4_strategy
 from lib.teacher_forcing import masked_teacher_forcing, step_teacher_input
 from lib.v4_batch import bind_static_assets, read_common
 
@@ -230,6 +231,10 @@ class Model(nn.Module):
             raise ValueError(
                 "MoGERNN.from_runtime_context requires a RuntimeDataContext; "
                 "v4 fails closed rather than falling back to data_path")
+        # The same protocol as ALFNet, so the two are comparable. It obliges
+        # MoGERNN to nothing about its inputs: it still reads only
+        # `base_visible_input` and never a lifecycle channel.
+        assert_v4_strategy(configs, "MoGERNN")
         return bind_static_assets(cls(configs), configs, runtime_context, "MoGERNN")
 
     def __init__(self, configs):
