@@ -7,13 +7,13 @@
   "scripts/collect_v4_development_base.py": "119fb5befbb5a2f43fc9971824c6b374b985dbffea729f005e878dd7045c317c",
   "scripts/train_v4.py": "8d96cf4da260d8800bf3de1c476ec73f03b1909fb0b8fe1319b5f987bf39aa0f",
   "scripts/v4_development_eval.py": "b753ccffe38fd8943e17849ea18fec08dc2cea8a6ffc872370b7fb4c3bd42d18",
-  "scripts/v4_launcher.py": "ffc8e80df905ef7edba8a2007afd0951ba37a3ff77bed98ba5d272a531e92aeb"
+  "scripts/v4_launcher.py": "1ca9b1237d0156a617e44c5024d612729281475cb0b65ec82faaddb76a47b24c"
  },
  "candidate_configurations_this_round": 0,
  "configs": {
   "PEMS08_ALFNet": {
    "path": "configs/paper/v4/PEMS08_ALFNet.yaml",
-   "sha256": "4c8bba86b3af4bfad51b11a675abcc739db7105ec09de48f477b2d447cc7e081",
+   "sha256": "a7924a702a7d4a1204969a6df41568fb993305f1ce840bcc34d790b897146a7a",
    "status": "development_base"
   },
   "PEMS08_MoGERNN": {
@@ -23,7 +23,7 @@
   },
   "PEMSBAY_ALFNet": {
    "path": "configs/paper/v4/PEMSBAY_ALFNet.yaml",
-   "sha256": "962b7e71c75a988dd6ac24f3777d1177721b5ee2a87ad4b902a6d8675963401a",
+   "sha256": "03972e8bb403b410ad9393f21fe6f7034894f75d65b11b954d9de93d97d0a0d9",
    "status": "development_base"
   },
   "PEMSBAY_MoGERNN": {
@@ -56,7 +56,7 @@
   "PEMS08",
   "PEMSBAY"
  ],
- "git_commit": "f7d54ef3939a9fd15781fc83e67dc5b22a41ea9d",
+ "git_commit": "ab451ccb5bc7099e87540c88efedf4cf577d7376",
  "hyper_parameter_changes_this_round": "none",
  "infrastructure": {
   "launcher_version": "v2_parallel_tmux",
@@ -83,13 +83,35 @@
   "train",
   "validation"
  ],
- "plan_sha256": "a2881312e606adbe7613f28a44ff91e6a508fde7cfa1fae6f25b9d674f428b9e",
+ "plan_sha256": "deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f",
  "prohibited": [
   "selecting a model or configuration using PEMS03 or PEMS04",
   "constructing a test context for any dataset",
   "describing these validation tables as final or confirmatory"
  ],
  "protocol": "lcbt_v4",
+ "provenance_corrections": [
+  {
+   "evidence_read_once_at_registration_not_a_runtime_dependency": [
+    "configs/paper/final_runs.json",
+    "outputs/ALFNet/alfnet-pems08-s32/checkpoints/training_summary.json"
+   ],
+   "kind": "configuration provenance correction",
+   "learning_rates_unchanged": {
+    "ALFNet": 5e-05,
+    "MoGERNN": 0.001
+   },
+   "not_a_tuning_decision": true,
+   "selected_using_v4_results": false,
+   "what": "ALFNet effective batch_size 16 -> 64",
+   "why": "The v3 ALFNet YAMLs declare 16, but that value never took effect: configs/paper/final_runs.json is frozen at batch_size 64 and passes it on every run, and the run it produced recorded efficiency.batch_size=64 with train_samples_per_epoch=8905 over optimizer_steps_per_epoch=140. Generating v4 from the YAML default gave ALFNet a batch size no v3 experiment used."
+  },
+  {
+   "kind": "launcher semantics correction",
+   "what": "a user stop is no longer recorded as FAILED",
+   "why": "SIGINT/SIGTERM forwarded by the launcher, with a valid last.pt, leaves the run RESUMABLE; only a crash writes FAILED.json. Told apart by whether the launcher sent the signal, not by the exit code."
+  }
+ ],
  "purpose": "v4_base_diagnosis_before_limited_optimization",
  "schema_version": 1,
  "seeds": [

@@ -22,8 +22,12 @@ Four properties, each of which the first launcher lacked:
 * **real resume.** A run with a valid `last.pt` is continued with `--resume`, at
   its next epoch, not restarted. A directory that is non-empty but has no
   `last.pt` is refused rather than overwritten.
-* **failures that are visible.** A failed run writes `FAILED.json`, stops its
-  phase, and makes the launcher exit non-zero.
+* **failures that are visible, and stops that are not failures.** A run that
+  crashes writes `FAILED.json`, stops its phase, and makes the launcher exit
+  non-zero. A run the *user* stopped writes no such thing: it keeps its
+  `last.pt`, stays RESUMABLE, and the same command resumes it. The two are told
+  apart by whether this launcher forwarded the signal, not by the exit code --
+  an OOM kill also exits on a signal.
 """
 
 import argparse
@@ -346,6 +350,17 @@ class Launcher:
                  f"{'resume' if extra == ['--resume'] else 'fresh'}")
         return True
 
+    def was_stopped_by_us(self, run):
+        """Did *we* end this run, at a point it can be resumed from?
+
+        Deliberately not "did it exit with a negative code". A trainer that
+        segfaults or is OOM-killed also exits on a signal, and calling that a
+        clean stop would hide a real failure behind the same message. The test
+        is that the launcher was already stopping -- i.e. it forwarded the
+        signal itself -- *and* the run left a `last.pt` to continue from.
+        """
+        return self.stopping and (run.directory / RUN_STATE_NAME).exists()
+
     def reap(self):
         for run in list(self.active):
             code = run.process.poll()
@@ -357,6 +372,13 @@ class Launcher:
             minutes = (time.time() - run.started) / 60.0
             if code == 0 and (run.directory / COMPLETE_MARKER).exists():
                 self.say(f"DONE  {run.name:26s} {minutes:.1f} min")
+            elif self.was_stopped_by_us(run):
+                # Not a failure: the user asked for this. No FAILED.json, so the
+                # run stays RESUMABLE and the same command picks it up.
+                epoch = current_epoch(run)
+                self.say(f"STOPPED {run.name:24s} INTERRUPTED at epoch {epoch}, "
+                         f"resumable after {minutes:.1f} min -- rerun the same "
+                         "command to continue")
             else:
                 write_failure(run, code, build_command(run, self.output_root))
                 self.failed.append(run)

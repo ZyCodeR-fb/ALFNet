@@ -98,7 +98,8 @@ case "$ACTION" in
         echo "SIGINT -> launcher ${PID}"
         kill -INT "$PID"
       done
-      echo "waiting for trainers to stop; each last.pt is preserved"
+      echo "waiting for trainers to stop; each last.pt is preserved and the"
+      echo "run stays RESUMABLE -- a user stop is not recorded as a failure"
       for _ in $(seq 1 60); do
         pgrep -f 'scripts/v4_launcher.py' >/dev/null 2>&1 || break
         sleep 2

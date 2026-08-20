@@ -130,6 +130,36 @@ def build_plan(include_commit=True):
             "launcher_version": "v2_parallel_tmux",
             "scheduling_is_not_part_of_run_identity": True,
         },
+        "provenance_corrections": [
+            {
+                "what": "ALFNet effective batch_size 16 -> 64",
+                "kind": "configuration provenance correction",
+                "not_a_tuning_decision": True,
+                "selected_using_v4_results": False,
+                "why": ("The v3 ALFNet YAMLs declare 16, but that value never "
+                        "took effect: configs/paper/final_runs.json is frozen "
+                        "at batch_size 64 and passes it on every run, and the "
+                        "run it produced recorded efficiency.batch_size=64 with "
+                        "train_samples_per_epoch=8905 over "
+                        "optimizer_steps_per_epoch=140. Generating v4 from the "
+                        "YAML default gave ALFNet a batch size no v3 experiment "
+                        "used."),
+                "evidence_read_once_at_registration_not_a_runtime_dependency": [
+                    "configs/paper/final_runs.json",
+                    "outputs/ALFNet/alfnet-pems08-s32/checkpoints/"
+                    "training_summary.json",
+                ],
+                "learning_rates_unchanged": {"ALFNet": 5e-05, "MoGERNN": 0.001},
+            },
+            {
+                "what": "a user stop is no longer recorded as FAILED",
+                "kind": "launcher semantics correction",
+                "why": ("SIGINT/SIGTERM forwarded by the launcher, with a valid "
+                        "last.pt, leaves the run RESUMABLE; only a crash writes "
+                        "FAILED.json. Told apart by whether the launcher sent "
+                        "the signal, not by the exit code."),
+            },
+        ],
         "phases_allowed": ["train", "validation"],
         "test_access": "forbidden",
         "candidate_configurations_this_round": 0,

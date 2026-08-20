@@ -335,6 +335,115 @@ def test_a_signal_stops_the_trainer_and_leaves_no_orphan(tmp_path, plan):
     assert not list(root.rglob(train_v4.COMPLETE_MARKER))
 
 
+# --- a user stop is not a failure ----------------------------------------------
+
+
+def _stub_run(launcher, tmp_path, exit_code, with_last_pt=True):
+    """A finished run with a chosen exit code, ready for `reap`."""
+    class Finished:
+        pid = 4242
+
+        def poll(self):
+            return exit_code
+
+    run = launcher.runs[0]
+    run.directory.mkdir(parents=True, exist_ok=True)
+    if with_last_pt:
+        (run.directory / train_v4.RUN_STATE_NAME).write_text("x", "utf-8")
+    run.log.parent.mkdir(parents=True, exist_ok=True)
+    run.log.write_text("epoch  13  train_base 0.05\n", "utf-8")
+    run.process = Finished()
+    run.started = time.time()
+    run.device = "cpu"
+    launcher.active = [run]
+    return run
+
+
+def test_a_user_stop_leaves_the_run_resumable(plan, tmp_path, capsys):
+    """SIGTERM that *we* sent, with a last.pt: not a failure."""
+    launcher = v4_launcher.Launcher(tmp_path, plan, ["cpu"])
+    run = _stub_run(launcher, tmp_path, exit_code=-signal.SIGTERM)
+    launcher.stopping = True                      # the launcher forwarded it
+    launcher.reap()
+
+    assert not (run.directory / train_v4.FAILED_MARKER).exists()
+    assert (run.directory / train_v4.RUN_STATE_NAME).exists()
+    assert run_state(run) == "RESUMABLE"
+    assert launcher.failed == []
+    output = capsys.readouterr().out
+    assert "STOPPED" in output and "INTERRUPTED" in output and "resumable" in output
+
+
+def test_the_same_command_resumes_after_a_user_stop(plan, tmp_path):
+    """RESUMABLE means the next start passes --resume, with no extra flag."""
+    launcher = v4_launcher.Launcher(tmp_path, plan, ["cpu"])
+    run = _stub_run(launcher, tmp_path, exit_code=-signal.SIGTERM)
+    launcher.stopping = True
+    launcher.reap()
+
+    started = {}
+    fresh = v4_launcher.Launcher(tmp_path, plan, ["cpu"])
+    target = fresh.runs[0]
+    assert run_state(target) == "RESUMABLE"
+    original = v4_launcher.subprocess.Popen
+
+    def capture(command, **kwargs):
+        started["command"] = command
+        return original([sys.executable, "-c", "pass"], **kwargs)
+
+    v4_launcher.subprocess.Popen = capture
+    try:
+        assert fresh.start(target, "cpu")
+    finally:
+        v4_launcher.subprocess.Popen = original
+        v4_launcher.release_lock(target)
+    assert "--resume" in started["command"], started["command"]
+    assert "--retry-failed" not in started["command"]
+    assert "--restart-incomplete" not in started["command"]
+
+
+def test_a_crash_is_still_a_failure(plan, tmp_path):
+    """Nobody asked for this one, so it blocks the phase and needs a flag."""
+    launcher = v4_launcher.Launcher(tmp_path, plan, ["cpu"])
+    run = _stub_run(launcher, tmp_path, exit_code=1)
+    launcher.reap()                                # stopping stays False
+    assert (run.directory / train_v4.FAILED_MARKER).exists()
+    assert run_state(run) == "FAILED"
+    assert launcher.failed == [run]
+    record = json.loads((run.directory / train_v4.FAILED_MARKER).read_text("utf-8"))
+    assert record["exit_code"] == 1 and record["log_tail"]
+
+
+def test_a_signal_death_we_did_not_send_is_still_a_failure(plan, tmp_path):
+    """An OOM kill exits on a signal too; it must not read as a clean stop."""
+    launcher = v4_launcher.Launcher(tmp_path, plan, ["cpu"])
+    run = _stub_run(launcher, tmp_path, exit_code=-signal.SIGKILL)
+    launcher.reap()                                # we were not stopping
+    assert (run.directory / train_v4.FAILED_MARKER).exists()
+    assert run_state(run) == "FAILED"
+
+
+def test_a_stop_without_an_epoch_boundary_is_still_a_failure(plan, tmp_path):
+    """Stopped before any last.pt: there is nothing to resume from."""
+    launcher = v4_launcher.Launcher(tmp_path, plan, ["cpu"])
+    run = _stub_run(launcher, tmp_path, exit_code=-signal.SIGTERM,
+                    with_last_pt=False)
+    launcher.stopping = True
+    launcher.reap()
+    assert (run.directory / train_v4.FAILED_MARKER).exists()
+
+
+def test_a_completed_run_is_never_reported_as_stopped(plan, tmp_path):
+    launcher = v4_launcher.Launcher(tmp_path, plan, ["cpu"])
+    run = _stub_run(launcher, tmp_path, exit_code=0)
+    (run.directory / train_v4.COMPLETE_MARKER).write_text("{}", "utf-8")
+    launcher.stopping = True
+    launcher.reap()
+    assert not (run.directory / train_v4.FAILED_MARKER).exists()
+    assert run_state(run) == "COMPLETE"
+    assert launcher.failed == []
+
+
 # --- the gates ------------------------------------------------------------------
 
 

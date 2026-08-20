@@ -12,6 +12,7 @@ than on the text. Nothing is monkeypatched: a config that needs a runtime fix to
 work is a config that is wrong.
 """
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -119,6 +120,36 @@ def test_the_config_declares_the_manifests_target_and_paths(manifests, dataset,
            args.lcbt_join_ratio == args.lcbt_fault_ratio == 0.25
     assert args.input_len == 12 and args.pred_len == 12
     assert args.stop_based == "val_lifecycle" and args.loss == "mse"
+
+
+@pytest.mark.parametrize("dataset, model", COMBINATIONS)
+def test_the_effective_batch_size_is_the_one_v3_actually_ran(dataset, model):
+    """64 for both, from the launcher that ran v3, not from a dead YAML default.
+
+    `configs/paper/final_runs.json` is frozen at `batch_size: 64` and passes it
+    on every run, so the 16 in the v3 ALFNet YAMLs never took effect. The run it
+    produced records the truth: `efficiency.batch_size = 64` with
+    `train_samples_per_epoch = 8905` over `optimizer_steps_per_epoch = 140`
+    (8905 / 64 -> 140). Generating v4 from the YAML default gave ALFNet a batch
+    size no v3 experiment used, and four times the optimiser steps per epoch.
+
+    This is provenance, not tuning: no v4 result was consulted, and neither
+    learning rate moved with it.
+    """
+    args = _args(dataset, model)
+    assert args.batch_size == 64, f"{dataset}/{model} batch_size={args.batch_size}"
+    assert args.lr == (5e-05 if model == "ALFNet" else 0.001)
+
+    frozen = json.loads((ROOT / "configs/paper/final_runs.json").read_text("utf-8"))
+    assert frozen["batch_size"] == 64
+    assert all(run["batch_size"] == 64 for run in frozen["runs"])
+
+    summary = ROOT / "outputs/ALFNet/alfnet-pems08-s32/checkpoints/training_summary.json"
+    if summary.exists():
+        efficiency = json.loads(summary.read_text("utf-8"))["efficiency"]
+        assert efficiency["batch_size"] == 64
+        assert efficiency["train_samples_per_epoch"] == 8905
+        assert efficiency["optimizer_steps_per_epoch"] == 140
 
 
 @pytest.mark.parametrize("dataset", DATASETS)

@@ -36,9 +36,23 @@ EXPERTS = OUTPUT / "experts"
 DATASETS = ("PEMS03", "PEMS04", "PEMS08", "PEMSBAY")
 
 # Per model, not per dataset: each keeps the capacity and optimiser settings it
-# already runs under. Nothing here was chosen by a v4 measurement.
+# already ran under. Nothing here was chosen by a v4 measurement.
+#
+# `batch_size: 64` for both is a **configuration provenance correction**, not a
+# tuning decision. The v3 ALFNet YAMLs declare 16, but that value never took
+# effect: `configs/paper/final_runs.json` is frozen at `batch_size: 64` and
+# passes it on every run, and the run it produced records the truth --
+# `outputs/ALFNet/alfnet-pems08-s32/checkpoints/training_summary.json` has
+# `efficiency.batch_size = 64`, `optimizer_steps_per_epoch = 140` and
+# `train_samples_per_epoch = 8905` (8905 / 64 -> 140 steps). Generating v4 from
+# the YAML default rather than the launcher's override gave ALFNet a batch size
+# no v3 experiment ever used, and a four-fold change in optimiser steps per
+# epoch with it.
+#
+# No learning rate moves with it. Linear scaling would be a tuning choice, and
+# 5e-5 / 1e-3 are the rates the v3 runs actually used at batch 64.
 MODEL_SETTINGS = {
-    "ALFNet": {"batch_size": 16, "lr": 0.00005, "model_variant": "gs_v4"},
+    "ALFNet": {"batch_size": 64, "lr": 0.00005, "model_variant": "gs_v4"},
     "MoGERNN": {"batch_size": 64, "lr": 0.001, "model_variant": "mg_v4"},
 }
 
