@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from lib.lcbt_v4 import (  # noqa: E402
+    SHUFFLE_POLICY,
     SPLIT_FRACTIONS,
     STRATEGY,
     TEACHER_FORCING_POLICY,
@@ -40,7 +41,12 @@ SEEDS = (32, 42, 52)
 # different collector is identifiable as such.
 ANALYSIS_SOURCES = ("experiments/v4_validation_collector.py",
                     "experiments/v4_runner.py",
-                    "scripts/train_v4.py")
+                    "scripts/train_v4.py",
+                    "lib/lcbt_v4.py",
+                    "scripts/v4_launcher.py",
+                    "scripts/audit_v4_development_base.py",
+                    "scripts/v4_development_eval.py",
+                    "scripts/collect_v4_development_base.py")
 
 
 def sha256_file(path):
@@ -109,6 +115,20 @@ def build_plan(include_commit=True):
             "checkpoint_metric": "validation life_avg_mae",
             "tie_rule": "keep_earlier_epoch",
             "allowed_overrides": ["seed", "device", "output_root"],
+            # The training order is a function of (run seed, epoch), so a
+            # resumed run sees the permutation an uninterrupted one would have.
+            "shuffle_policy": SHUFFLE_POLICY,
+        },
+        "infrastructure": {
+            # How a run is executed, not what it is. JOBS and the device
+            # assignment are scheduling and are deliberately absent: they belong
+            # in the run log, never in the model's identity.
+            "run_state_schema": 1,
+            "run_state_file": "last.pt",
+            "resume": "epoch boundary; model, optimizer, scheduler, best, "
+                      "patience wait, history and RNG state are all restored",
+            "launcher_version": "v2_parallel_tmux",
+            "scheduling_is_not_part_of_run_identity": True,
         },
         "phases_allowed": ["train", "validation"],
         "test_access": "forbidden",

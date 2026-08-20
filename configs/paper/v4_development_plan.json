@@ -1,8 +1,13 @@
 {
  "analysis_code": {
-  "experiments/v4_runner.py": "051e358f4353a9ee477a0f676881726d950a3693456db2238a3465a63856327a",
+  "experiments/v4_runner.py": "9a0df460fa17205139e43f147bf98eb03080643ffaf8e040e35c3401cda51e29",
   "experiments/v4_validation_collector.py": "90416de97cc86cd318a442614c28904c40c9394d3e392ee818d26230c5317099",
-  "scripts/train_v4.py": "0291c02aba08235df4c9b0598f7a03e940e59bb5bdc717b22b9b332c4aa518ca"
+  "lib/lcbt_v4.py": "6963b3a3985502adef1d58901094a7940538de576103ebd9f0cf242e14f75e0a",
+  "scripts/audit_v4_development_base.py": "c043bfac1a1ab9521925cfb1a5bb43f9f049f6b6732b646560ab5f4cfe077244",
+  "scripts/collect_v4_development_base.py": "119fb5befbb5a2f43fc9971824c6b374b985dbffea729f005e878dd7045c317c",
+  "scripts/train_v4.py": "1f1be257f9024da58788071e1dc3745447d29c1bb51bd3c6eb3145ecc010a931",
+  "scripts/v4_development_eval.py": "b753ccffe38fd8943e17849ea18fec08dc2cea8a6ffc872370b7fb4c3bd42d18",
+  "scripts/v4_launcher.py": "7212a414171695e34ef2319d6117a582ffe5f434551a8e205a58ef5fa756abbf"
  },
  "candidate_configurations_this_round": 0,
  "configs": {
@@ -51,8 +56,15 @@
   "PEMS08",
   "PEMSBAY"
  ],
- "git_commit": "075be9deb8f12db93df99789b0ca2686cb677e4e",
+ "git_commit": "439a2090ba4c4f7db0e4fbe98be85c9b485a932d",
  "hyper_parameter_changes_this_round": "none",
+ "infrastructure": {
+  "launcher_version": "v2_parallel_tmux",
+  "resume": "epoch boundary; model, optimizer, scheduler, best, patience wait, history and RNG state are all restored",
+  "run_state_file": "last.pt",
+  "run_state_schema": 1,
+  "scheduling_is_not_part_of_run_identity": true
+ },
  "models": [
   "ALFNet",
   "MoGERNN"
@@ -71,7 +83,7 @@
   "train",
   "validation"
  ],
- "plan_sha256": "1b1cba2f09a01e0cc58fabc99298f89437696999016617dbc9c8ec48e8caa41f",
+ "plan_sha256": "d29135f37c8b466b7f729feafb932a85c9e066c877dfc527fd27635fa31a38d7",
  "prohibited": [
   "selecting a model or configuration using PEMS03 or PEMS04",
   "constructing a test context for any dataset",
@@ -97,6 +109,7 @@
   "checkpoint_metric": "validation life_avg_mae",
   "max_epoch": 100,
   "patience": 10,
+  "shuffle_policy": "lcbt_v4_shuffle_v1",
   "split_fractions": [
    0.6,
    0.2,

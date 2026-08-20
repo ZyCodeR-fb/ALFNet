@@ -58,6 +58,20 @@ SCENARIO_RATIOS = {
 TEACHER_FORCING_POLICY = "lcbt_v4_tf_v1"
 TEACHER_FORCING_DECAY_EPOCHS = 40.0
 
+# The training shuffle, keyed on (run seed, epoch) rather than carried in a
+# generator. A `DataLoader(shuffle=True, generator=...)` advances that generator
+# once per epoch, so epoch 7's permutation depends on six epochs having been
+# drawn in this process -- which makes a resumed run see a different epoch 7
+# from an uninterrupted one, silently. Hashing the epoch instead makes the
+# permutation a function of the run, not of the process that produced it.
+SHUFFLE_POLICY = "lcbt_v4_shuffle_v1"
+
+
+def shuffle_seed(run_seed, epoch):
+    key = f"{SHUFFLE_POLICY}|{int(run_seed)}|{int(epoch)}"
+    digest = hashlib.sha256(key.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % (2 ** 63)
+
 
 def assert_v4_strategy(configs, who):
     """A v4 model runs under the v4 protocol or it does not run."""

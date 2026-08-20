@@ -25,15 +25,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 
 from args import load_args_from_config
 from data_provider.lifecycle_roles import ROLE_CHANNEL_COUNT
 from data_provider.v4_lifecycle_loader import V4LifecycleDataset
 from experiments.inductive_epoch import _element_loss, _role_balanced_loss
 from lib.lcbt_v4 import (
+    SHUFFLE_POLICY,
     STRATEGY,
     build_v4_teacher_forcing_mask,
+    shuffle_seed,
     teacher_forcing_metadata,
 )
 from lib.runtime_context import build_runtime_context
@@ -58,6 +60,35 @@ FORBIDDEN_PHASES = ("test",)
 
 class RunnerRefused(ValueError):
     """The requested session or step is not something this runner will do."""
+
+
+class EpochSeededSampler(Sampler):
+    """A training permutation that is a function of (run seed, epoch).
+
+    The DistributedSampler pattern, for the same reason it exists there: the
+    order must not depend on how many epochs this particular process has already
+    drawn. A run resumed at epoch 7 gets exactly the permutation an uninterrupted
+    run would have had at epoch 7.
+    """
+
+    policy = SHUFFLE_POLICY
+
+    def __init__(self, data_source, run_seed):
+        self.length = len(data_source)
+        self.run_seed = int(run_seed)
+        self.epoch = 0
+
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+        return self
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(shuffle_seed(self.run_seed, self.epoch))
+        yield from torch.randperm(self.length, generator=generator).tolist()
+
+    def __len__(self):
+        return self.length
 
 
 def resolve_context(dataset, phase, seed):
@@ -88,8 +119,12 @@ class V4Session:
     scaler: dict = field(default=None)
 
     def set_epoch(self, epoch):
+        """Move the schedule and the shuffle together. Both are (seed, epoch)."""
         self.train_dataset.set_epoch(epoch)
         self.validation_dataset.set_epoch(epoch)
+        sampler = getattr(self.train_loader, "sampler", None)
+        if hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch)
         return self
 
 
@@ -161,11 +196,13 @@ def build_v4_session(config_path, device="cpu", run_seed=None, batch_size=None,
     if validation_dataset.scaler is not train_dataset.scaler:
         raise RunnerRefused("validation did not receive the training scaler")
 
-    # 6. Loaders. Shuffling is the loader's business; the teacher-forcing policy
-    #    is keyed on the sample's origin and cannot see it.
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, drop_last=False,
-                              generator=torch.Generator().manual_seed(run_seed))
+    # 6. Loaders. The training order is drawn from (run seed, epoch) so it
+    #    survives a resume; the teacher-forcing policy is keyed on the sample's
+    #    origin and cannot see the order at all.
+    train_sampler = EpochSeededSampler(train_dataset, run_seed)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size,
+                              sampler=train_sampler, num_workers=num_workers,
+                              drop_last=False)
     validation_loader = DataLoader(validation_dataset, batch_size=batch_size,
                                    shuffle=False, num_workers=num_workers)
 
@@ -277,7 +314,7 @@ def _forward(session, batch, context, epoch, teacher_forcing_mask):
 def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"):
     """One training pass. Deterministic given the session, seed and epoch."""
     session.model.train()
-    session.train_dataset.set_epoch(epoch)
+    session.set_epoch(epoch)
     totals = {"batches": 0, "skipped": 0, "base": 0.0, "optimize": 0.0,
               "role_mix": 0.0, "aux": 0.0, "forced_positions": 0,
               "available_positions": 0}

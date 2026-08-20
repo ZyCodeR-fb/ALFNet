@@ -29,12 +29,15 @@ import argparse
 import hashlib
 import json
 import os
+import random
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +57,7 @@ from experiments.v4_validation_collector import (  # noqa: E402
     collect_validation_table,
 )
 from lib.lcbt_v4 import (  # noqa: E402
+    SHUFFLE_POLICY,
     SPLIT_FRACTIONS,
     TEACHER_FORCING_POLICY,
     teacher_forcing_ratio,
@@ -65,8 +69,15 @@ from scripts.build_v4_development_plan import (  # noqa: E402
 )
 
 CHECKPOINT_SCHEMA = 1
+RUN_STATE_SCHEMA = 1
+RUN_STATE_NAME = "last.pt"
 TIE_RULE = "keep_earlier_epoch"
 COMPLETE_MARKER = "COMPLETE"
+FAILED_MARKER = "FAILED.json"
+LAUNCHER_VERSION = "v2_parallel_tmux"
+# Code whose change would make a resumed run a different experiment.
+CODE_SOURCES = ("experiments/v4_runner.py", "experiments/v4_validation_collector.py",
+                "scripts/train_v4.py", "lib/lcbt_v4.py")
 # Arguments whose presence means the caller is asking this entry point for
 # something it does not do. Refused by name so the refusal survives a rename of
 # whatever module would otherwise have implemented them.
@@ -177,16 +188,181 @@ def atomic_save(payload, path):
     return path
 
 
-def assert_not_clobbering(run_directory, resume):
+def rng_state():
+    """Everything a resumed epoch would otherwise draw differently."""
+    state = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["torch_cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def restore_rng_state(state):
+    if not state:
+        return
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch_cpu"].cpu()
+                        if torch.is_tensor(state["torch_cpu"]) else state["torch_cpu"])
+    if torch.cuda.is_available() and state.get("torch_cuda") is not None:
+        try:
+            torch.cuda.set_rng_state_all([s.cpu() for s in state["torch_cuda"]])
+        except (RuntimeError, ValueError):
+            # A different device count than the run was saved on. The training
+            # schedule and the shuffle are both stateless functions of
+            # (seed, epoch), so this affects nothing the protocol depends on --
+            # but it is recorded rather than swallowed silently.
+            print("warning: could not restore CUDA RNG state (device count "
+                  "differs); (seed, epoch)-derived schedules are unaffected",
+                  flush=True)
+
+
+def run_state_payload(session, config_path, config_sha, epoch, best, wait,
+                      history, optimizer, scheduler, plan):
+    """`last.pt`: everything needed to continue, plus everything to verify it.
+
+    The identity fields are not decoration. Resuming into a different config, a
+    different payload or a different protocol produces a model whose first half
+    was trained on one experiment and whose second half on another, and nothing
+    downstream could tell.
+    """
+    manifest = json.loads(
+        (MANIFEST_DIR / f"{session.dataset}_run_manifest.json").read_text("utf-8"))
+    return {
+        "schema_version": RUN_STATE_SCHEMA,
+        "protocol": "lcbt_v4",
+        "dataset": session.dataset,
+        "model": session.model_name,
+        "model_variant": getattr(session.args, "model_variant", None),
+        "seed": session.run_seed,
+        "completed_epoch": int(epoch),
+        "next_epoch": int(epoch) + 1,
+        "best_epoch": best["epoch"],
+        "best_validation_life_avg_mae": best["life_avg_mae"],
+        "patience_wait": int(wait),
+        "history": history,
+        "model_state": session.model.state_dict(),
+        "optimizer_state": optimizer.state_dict(),
+        "scheduler_state": None if scheduler is None else scheduler.state_dict(),
+        "rng_state": rng_state(),
+        "config_path": str(Path(config_path).relative_to(ROOT)),
+        "config_sha256": config_sha,
+        "plan_sha256": None if plan is None else plan["plan_sha256"],
+        "code_sha256": {name: _sha256_file(ROOT / name) for name in CODE_SOURCES},
+        "git_commit": _git_commit(),
+        "payload_sha256": manifest["payload"]["sha256"],
+        "unseen_sha256": manifest["unseen"]["sha256"],
+        "manifest_sha256": _sha256_file(
+            MANIFEST_DIR / f"{session.dataset}_run_manifest.json"),
+        "static_asset_hash": session.train_context.static_asset_hash(),
+        "train_exposure_hash": session.train_context.exposure_hash(),
+        "validation_exposure_hash": session.validation_context.exposure_hash(),
+        "scaler": dict(session.scaler),
+        "split_fractions": list(SPLIT_FRACTIONS),
+        "teacher_forcing_policy": TEACHER_FORCING_POLICY,
+        "shuffle_policy": SHUFFLE_POLICY,
+        "loss": getattr(session.args, "loss", "mse"),
+        "parameter_count": sum(p.numel() for p in session.model.parameters()),
+    }
+
+
+RESUME_IDENTITY_FIELDS = (
+    "protocol", "dataset", "model", "seed", "config_sha256", "plan_sha256",
+    "payload_sha256", "unseen_sha256", "manifest_sha256", "static_asset_hash",
+    "train_exposure_hash", "validation_exposure_hash", "split_fractions",
+    "teacher_forcing_policy", "shuffle_policy", "loss", "parameter_count",
+)
+
+
+def load_run_state(run_directory, session, config_path, config_sha, plan):
+    """Read `last.pt` and refuse it unless it describes *this* run."""
+    path = Path(run_directory) / RUN_STATE_NAME
+    if not path.exists():
+        raise RunnerRefused(
+            f"{run_directory} has no {RUN_STATE_NAME}; there is no epoch "
+            "boundary to resume from. Use --restart-incomplete to archive it and "
+            "start over")
+    try:
+        state = torch.load(path, weights_only=False, map_location="cpu")
+    except Exception as error:                       # noqa: BLE001 - reported
+        raise RunnerRefused(f"{path} could not be read: {error}") from error
+    if not isinstance(state, dict) or state.get("schema_version") != RUN_STATE_SCHEMA:
+        raise RunnerRefused(
+            f"{path} is not a schema {RUN_STATE_SCHEMA} run state")
+    expected = run_state_payload(session, config_path, config_sha, -1,
+                                 {"epoch": None, "life_avg_mae": None}, 0, [],
+                                 build_optimizer(session), None, plan)
+    differing = {field: (expected[field], state.get(field))
+                 for field in RESUME_IDENTITY_FIELDS
+                 if state.get(field) != expected[field]}
+    if differing:
+        raise RunnerRefused(
+            f"{path} describes a different run and may not be resumed into this "
+            "one: " + ", ".join(f"{name} expected {want!r} got {got!r}"
+                                for name, (want, got) in sorted(differing.items())))
+    for field in ("completed_epoch", "next_epoch", "history", "model_state",
+                  "optimizer_state"):
+        if field not in state:
+            raise RunnerRefused(f"{path} is missing {field}")
+    return state
+
+
+def archive_incomplete(run_directory):
+    """Move an unfinished run aside. Never delete, never overwrite."""
+    run_directory = Path(run_directory)
+    if not run_directory.exists():
+        return None
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    target = (ROOT / "outputs_v4/development_aborted"
+              / f"restart-{run_directory.name}-{stamp}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(run_directory), str(target))
+    print(f"archived the incomplete run to {target}", flush=True)
+    return target
+
+
+def assert_not_clobbering(run_directory, resume, restart_incomplete=False):
     marker = Path(run_directory) / COMPLETE_MARKER
     if marker.exists():
         raise RunnerRefused(
             f"{run_directory} is marked {COMPLETE_MARKER}; refusing to overwrite "
             "a finished run. Delete it deliberately or choose another output root")
-    if Path(run_directory).exists() and any(Path(run_directory).iterdir()) and not resume:
+    directory = Path(run_directory)
+    if not (directory.exists() and any(directory.iterdir())):
+        return
+    if restart_incomplete:
+        archive_incomplete(directory)
+        return
+    if not resume:
         raise RunnerRefused(
             f"{run_directory} holds an unfinished run; pass --resume to continue "
-            "it rather than silently overwriting")
+            f"it from {RUN_STATE_NAME}, or --restart-incomplete to archive it and "
+            "start over. Neither silently overwrites")
+
+
+def _table_from_best(session, run_directory, best_epoch):
+    """Recompute the 36 cells from the stored best weights, then restore.
+
+    Used only on resume. The weights in memory are the *last* epoch's, not the
+    selected one, so the table has to come from best.pt or it would describe a
+    different model from the one the run reports.
+    """
+    path = Path(run_directory) / "best.pt"
+    if not path.exists():
+        return None
+    live = {name: tensor.detach().clone()
+            for name, tensor in session.model.state_dict().items()}
+    stored = torch.load(path, weights_only=False, map_location="cpu")
+    session.model.load_state_dict(stored["model_state"])
+    session.model.to(session.device)
+    try:
+        return collect_validation_table(session, epoch=int(best_epoch))
+    finally:
+        session.model.load_state_dict(live)
+        session.model.to(session.device)
 
 
 def build_optimizer(session):
@@ -230,7 +406,7 @@ def resolve_plan(config_path, plan=None):
 def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
           max_epochs=None, max_train_batches=None, max_validation_batches=None,
           batch_size=None, num_workers=None, save=True, plan=None,
-          collect_development_table=False):
+          collect_development_table=False, restart_incomplete=False):
     """One v4 run. Returns the run report; writes nothing when `save` is false."""
     config_path = Path(config_path).resolve()
     if config_path not in {path.resolve() for path in v4_config_paths()}:
@@ -253,7 +429,7 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
         output_root = tempfile.mkdtemp(prefix="v4-preflight-")
     run_directory = resolve_run_directory(output_root, session, config_path, config_sha)
     if save:
-        assert_not_clobbering(run_directory, resume)
+        assert_not_clobbering(run_directory, resume, restart_incomplete)
 
     optimizer = build_optimizer(session)
     scheduler = build_scheduler(session, optimizer)
@@ -261,7 +437,32 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
     patience = int(session.args.patience)
 
     history, best, best_table = [], {"epoch": None, "life_avg_mae": None}, None
-    for epoch in range(epochs):
+    start_epoch, wait = 0, 0
+    if resume and Path(run_directory).exists() and any(Path(run_directory).iterdir()):
+        state = load_run_state(run_directory, session, config_path, config_sha, plan)
+        session.model.load_state_dict(state["model_state"])
+        session.model.to(device)
+        optimizer = build_optimizer(session)
+        optimizer.load_state_dict(state["optimizer_state"])
+        if scheduler is not None and state.get("scheduler_state") is not None:
+            scheduler.load_state_dict(state["scheduler_state"])
+        restore_rng_state(state.get("rng_state"))
+        history = list(state["history"])
+        best = {"epoch": state["best_epoch"],
+                "life_avg_mae": state["best_validation_life_avg_mae"]}
+        wait = int(state.get("patience_wait", 0))
+        start_epoch = int(state["next_epoch"])
+        print(f"resumed from {RUN_STATE_NAME}: completed through epoch "
+              f"{state['completed_epoch']}, best epoch {best['epoch']} "
+              f"({best['life_avg_mae']}), continuing at epoch {start_epoch}",
+              flush=True)
+        if collect_development_table and best["epoch"] is not None:
+            # The table belongs to the selected epoch. After a resume the
+            # selected epoch may be one already behind us, so it is rebuilt from
+            # best.pt rather than left absent or attributed to the wrong epoch.
+            best_table = _table_from_best(session, run_directory, best["epoch"])
+
+    for epoch in range(start_epoch, epochs):
         train_report = train_one_epoch(session, optimizer, epoch,
                                        max_batches=max_train_batches,
                                        loss_name=session.args.loss)
@@ -283,6 +484,7 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
         # Strictly less than: a tie keeps the earlier epoch, decided before any
         # number existed and recorded in the checkpoint.
         improved = best["life_avg_mae"] is None or candidate < best["life_avg_mae"]
+        wait = 0 if improved else wait + 1
         if improved:
             best = {"epoch": epoch, "life_avg_mae": candidate}
             if collect_development_table:
@@ -299,7 +501,14 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
                     run_directory / "best.pt")
         if scheduler is not None:
             scheduler.step(candidate)
-        if epoch - best["epoch"] >= patience:
+        if save:
+            # The epoch boundary, written after best.pt so a crash between the
+            # two leaves last.pt describing the older, already-durable state.
+            atomic_save(
+                run_state_payload(session, config_path, config_sha, epoch, best,
+                                  wait, history, optimizer, scheduler, plan),
+                run_directory / RUN_STATE_NAME)
+        if wait >= patience:
             print(f"early stop at epoch {epoch}; best epoch {best['epoch']} "
                   f"lifeavg {best['life_avg_mae']:.4f}", flush=True)
             break
@@ -343,7 +552,11 @@ def main(argv=None):
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--output_root", default="./outputs_v4")
-    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--resume", action="store_true",
+                        help=f"continue from {RUN_STATE_NAME} at its next epoch")
+    parser.add_argument("--restart-incomplete", dest="restart_incomplete",
+                        action="store_true",
+                        help="archive an unfinished run and start it over")
     parser.add_argument("--preflight", action="store_true",
                         help="one train batch, one validation batch, no checkpoint")
     parser.add_argument("--max_train_batches", type=int, default=None)
@@ -368,7 +581,7 @@ def main(argv=None):
                    seed=arguments.seed, resume=arguments.resume,
                    max_train_batches=arguments.max_train_batches,
                    max_validation_batches=arguments.max_validation_batches,
-                   plan=plan,
+                   plan=plan, restart_incomplete=arguments.restart_incomplete,
                    collect_development_table=arguments.development_plan)
     print(json.dumps({key: value for key, value in report.items()
                       if key not in ("history", "development_validation_table")},
