@@ -84,6 +84,7 @@ class V4Session:
     train_loader: DataLoader
     validation_loader: DataLoader
     run_seed: int
+    device: str = "cpu"
     scaler: dict = field(default=None)
 
     def set_epoch(self, epoch):
@@ -178,7 +179,7 @@ def build_v4_session(config_path, device="cpu", run_seed=None, batch_size=None,
         train_context=train_context, validation_context=validation_context,
         train_dataset=train_dataset, validation_dataset=validation_dataset,
         train_loader=train_loader, validation_loader=validation_loader,
-        run_seed=run_seed, scaler=train_dataset.scaler)
+        run_seed=run_seed, device=str(device), scaler=train_dataset.scaler)
 
 
 # --- the loss ------------------------------------------------------------------
@@ -247,6 +248,27 @@ def compute_losses(model_output, batch, loss_name="mse"):
 # --- the two passes ------------------------------------------------------------
 
 
+def to_device(batch, device):
+    """Move the batch's tensors to the model's device, metadata untouched.
+
+    The model is moved with `.to(device)` at construction; the batch comes off a
+    DataLoader on the CPU. Every test up to here ran on the CPU, where the two
+    agree by accident, so the first GPU call was the first time it mattered --
+    which is what the pre-flight health check exists to find.
+
+    `context_identity` is metadata that never reaches a module, so it stays as
+    it is; moving it would only make the exposure check compare CUDA tensors.
+    """
+    if str(device).startswith("cpu"):
+        return batch
+    moved = {}
+    for key, value in batch.items():
+        moved[key] = (value.to(device, non_blocking=True)
+                      if torch.is_tensor(value) and key != "context_identity"
+                      else value)
+    return moved
+
+
 def _forward(session, batch, context, epoch, teacher_forcing_mask):
     return session.model.forward_v4(batch, context, epoch=epoch,
                                     teacher_forcing_mask=teacher_forcing_mask)
@@ -266,6 +288,7 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
     for index, batch in enumerate(session.train_loader):
         if max_batches is not None and index >= max_batches:
             break
+        batch = to_device(batch, session.device)
         teacher = build_v4_teacher_forcing_mask(batch, session.run_seed, epoch, True)
         totals["forced_positions"] += int(teacher.sum())
         totals["available_positions"] += int(batch["decoder_available_mask"].sum())
@@ -309,6 +332,7 @@ def validate(session, epoch=0, max_batches=None, loss_name="mse"):
     for index, batch in enumerate(session.validation_loader):
         if max_batches is not None and index >= max_batches:
             break
+        batch = to_device(batch, session.device)
         teacher = build_v4_teacher_forcing_mask(batch, session.run_seed, epoch, False)
         if bool(teacher.any()):
             raise RunnerRefused("validation produced a non-empty teacher mask")

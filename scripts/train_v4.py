@@ -32,6 +32,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import torch
@@ -48,10 +49,19 @@ from experiments.v4_runner import (  # noqa: E402
     train_one_epoch,
     validate,
 )
+from experiments.v4_validation_collector import (  # noqa: E402
+    cell_count,
+    collect_validation_table,
+)
 from lib.lcbt_v4 import (  # noqa: E402
     SPLIT_FRACTIONS,
     TEACHER_FORCING_POLICY,
     teacher_forcing_ratio,
+)
+from scripts.build_v4_development_plan import (  # noqa: E402
+    assert_plan_still_holds,
+    load_plan,
+    sha256_file as _plan_sha256_file,
 )
 
 CHECKPOINT_SCHEMA = 1
@@ -103,7 +113,7 @@ def resolve_run_directory(output_root, session, config_path, config_sha):
 
 def checkpoint_payload(session, config_path, config_sha, epoch, best_epoch,
                        best_validation, optimizer, scheduler, train_report,
-                       validation_report):
+                       validation_report, plan=None):
     manifest = json.loads(
         (MANIFEST_DIR / f"{session.dataset}_run_manifest.json").read_text("utf-8"))
     return {
@@ -145,6 +155,7 @@ def checkpoint_payload(session, config_path, config_sha, epoch, best_epoch,
         "early_stopping_metric": "validation life_avg_mae",
         "tie_rule": TIE_RULE,
         "parameter_count": sum(p.numel() for p in session.model.parameters()),
+        "plan_sha256": None if plan is None else plan["plan_sha256"],
     }
 
 
@@ -199,9 +210,27 @@ def build_scheduler(session, optimizer):
     raise RunnerRefused(f"unknown scheduler {setting!r}; none is added here")
 
 
+def resolve_plan(config_path, plan=None):
+    """The pre-registered plan, verified against what is on disk.
+
+    Fails closed on drift rather than re-hashing and carrying on: a plan that
+    silently updates itself is not a pre-registration.
+    """
+    plan = load_plan() if plan is None else plan
+    assert_plan_still_holds(plan)
+    relative = str(Path(config_path).resolve().relative_to(ROOT))
+    registered = {entry["path"]: entry for entry in plan["configs"].values()}
+    if relative not in registered:
+        raise RunnerRefused(
+            f"{relative} is not one of the {len(registered)} configs the "
+            f"development plan registered: {sorted(registered)}")
+    return plan, registered[relative]
+
+
 def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
           max_epochs=None, max_train_batches=None, max_validation_batches=None,
-          batch_size=None, num_workers=None, save=True):
+          batch_size=None, num_workers=None, save=True, plan=None,
+          collect_development_table=False):
     """One v4 run. Returns the run report; writes nothing when `save` is false."""
     config_path = Path(config_path).resolve()
     if config_path not in {path.resolve() for path in v4_config_paths()}:
@@ -209,6 +238,13 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
             f"{config_path} is not one of the eight v4 configs in "
             f"{CONFIG_DIR.relative_to(ROOT)}")
     config_sha = _sha256_file(config_path)
+    plan_entry = None
+    if plan is not None or collect_development_table:
+        plan, plan_entry = resolve_plan(config_path, plan)
+        if plan_entry["sha256"] != config_sha:
+            raise RunnerRefused(
+                f"{config_path.name} hashes to {config_sha} but the plan "
+                f"registered {plan_entry['sha256']}")
     session = build_v4_session(config_path, device=device, run_seed=seed,
                                batch_size=batch_size, num_workers=num_workers)
     if output_root is None:
@@ -224,7 +260,7 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
     epochs = int(max_epochs if max_epochs is not None else session.args.max_epoch)
     patience = int(session.args.patience)
 
-    history, best = [], {"epoch": None, "life_avg_mae": None}
+    history, best, best_table = [], {"epoch": None, "life_avg_mae": None}, None
     for epoch in range(epochs):
         train_report = train_one_epoch(session, optimizer, epoch,
                                        max_batches=max_train_batches,
@@ -235,21 +271,37 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
         candidate = early_stopping_metric(validation_report)
         history.append({"epoch": epoch, "train": train_report,
                         "validation": validation_report})
+        # One line per epoch, flushed. A multi-day queue with no output is
+        # indistinguishable from a hung one, and the per-epoch validation curve
+        # is not recoverable from the checkpoint afterwards.
+        print(f"epoch {epoch:3d}  train_base {train_report['base']:.6f}  "
+              f"optimize {train_report['optimize']:.6f}  "
+              f"val_mae {validation_report['mae']:.4f}  "
+              f"val_lifeavg {candidate:.4f}  "
+              f"tf_ratio {train_report['ratio']:.3f}  "
+              f"({time.strftime('%H:%M:%S')})", flush=True)
         # Strictly less than: a tie keeps the earlier epoch, decided before any
         # number existed and recorded in the checkpoint.
         improved = best["life_avg_mae"] is None or candidate < best["life_avg_mae"]
         if improved:
             best = {"epoch": epoch, "life_avg_mae": candidate}
+            if collect_development_table:
+                # The 36 development cells belong to the *selected* epoch, so
+                # they are recomputed whenever the selection moves and never
+                # carried over from a worse one.
+                best_table = collect_validation_table(session, epoch=epoch)
             if save:
                 atomic_save(
                     checkpoint_payload(session, config_path, config_sha, epoch,
                                        best["epoch"], best["life_avg_mae"],
                                        optimizer, scheduler, train_report,
-                                       validation_report),
+                                       validation_report, plan),
                     run_directory / "best.pt")
         if scheduler is not None:
             scheduler.step(candidate)
         if epoch - best["epoch"] >= patience:
+            print(f"early stop at epoch {epoch}; best epoch {best['epoch']} "
+                  f"lifeavg {best['life_avg_mae']:.4f}", flush=True)
             break
     report = {
         "dataset": session.dataset, "model": session.model_name,
@@ -261,9 +313,22 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
         "parameter_count": sum(p.numel() for p in session.model.parameters()),
         "history": history,
     }
+    if plan is not None:
+        report["plan_sha256"] = plan["plan_sha256"]
+        report["plan_status"] = plan["status"]
+    if collect_development_table:
+        if best_table is None or cell_count(best_table) != 36:
+            raise RunnerRefused(
+                "the development table is missing or is not 36 cells; refusing "
+                "to report a shrunken table")
+        report["development_validation_table"] = best_table
     if save:
         (run_directory / "run_report.json").write_text(
-            json.dumps(report, indent=1, default=str), "utf-8")
+            json.dumps(report, indent=1, default=str, allow_nan=False), "utf-8")
+        if collect_development_table:
+            (run_directory / "development_validation_table.json").write_text(
+                json.dumps(best_table, indent=1, sort_keys=True,
+                           allow_nan=False) + "\n", "utf-8")
         (run_directory / COMPLETE_MARKER).write_text(
             json.dumps({"best_epoch": best["epoch"]}), "utf-8")
     return report
@@ -283,6 +348,10 @@ def main(argv=None):
                         help="one train batch, one validation batch, no checkpoint")
     parser.add_argument("--max_train_batches", type=int, default=None)
     parser.add_argument("--max_validation_batches", type=int, default=None)
+    parser.add_argument(
+        "--development_plan", action="store_true",
+        help=("run under the pre-registered development plan: verify its hash "
+              "and write the 36 validation-only development cells"))
     arguments = parser.parse_args(argv)
 
     if arguments.preflight:
@@ -294,12 +363,16 @@ def main(argv=None):
                           ("dataset", "model", "parameter_count", "best_epoch")},
                          indent=1))
         return 0
+    plan = load_plan() if arguments.development_plan else None
     report = train(arguments.config, arguments.output_root, device=arguments.device,
                    seed=arguments.seed, resume=arguments.resume,
                    max_train_batches=arguments.max_train_batches,
-                   max_validation_batches=arguments.max_validation_batches)
+                   max_validation_batches=arguments.max_validation_batches,
+                   plan=plan,
+                   collect_development_table=arguments.development_plan)
     print(json.dumps({key: value for key, value in report.items()
-                      if key != "history"}, indent=1))
+                      if key not in ("history", "development_validation_table")},
+                     indent=1))
     return 0
 
 
