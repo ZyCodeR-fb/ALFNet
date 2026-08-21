@@ -28,7 +28,10 @@ from lib.lcbt_v4 import STRATEGY
 from lib.runtime_context import build_runtime_context
 
 ROOT = Path(__file__).resolve().parents[1]
-DATASETS = ("PEMS03", "PEMS04", "PEMS08", "PEMSBAY")
+# Five datasets: three flow (q), two speed (v). METR-LA joined at Stage
+# 2-B2B; its 207-node payload, directed graph and real WGS84 coordinates
+# come from the same canonical source PEMS-BAY does.
+DATASETS = ("PEMS03", "PEMS04", "PEMS08", "METRLA", "PEMSBAY")
 MODELS = ("ALFNet", "MoGERNN")
 COMBINATIONS = [(dataset, model) for dataset in DATASETS for model in MODELS]
 
@@ -81,13 +84,53 @@ def manifests():
 # --- the files exist and were generated ---------------------------------------
 
 
-def test_all_eight_outer_and_eight_nested_configs_exist():
+def test_every_outer_and_nested_config_exists():
+    """Ten outer, ten nested: one pair per dataset per model."""
     for dataset, model in COMBINATIONS:
         assert config_path(dataset, model).exists(), (dataset, model)
     for dataset in DATASETS:
         for expert in ("ALFGraph", "ALFTemporal"):
             assert (CONFIG_DIR / "experts" / f"{dataset}_{expert}.yaml").exists()
-    assert len(list(CONFIG_DIR.glob("*.yaml"))) == 8
+    assert len(list(CONFIG_DIR.glob("*.yaml"))) == 2 * len(DATASETS) == 10
+    assert len(list((CONFIG_DIR / "experts").glob("*.yaml"))) == 2 * len(DATASETS)
+
+
+def test_the_five_datasets_carry_their_declared_units():
+    """Three flow, two speed. The two are never averaged together."""
+    units = {dataset: _args(dataset, "ALFNet").target_features
+             for dataset in DATASETS}
+    assert units == {"PEMS03": "q", "PEMS04": "q", "PEMS08": "q",
+                     "METRLA": "v", "PEMSBAY": "v"}
+    channels = {dataset: json.loads(
+        (MANIFEST_DIR / f"{dataset}_run_manifest.json").read_text("utf-8")
+    )["target"]["channel"] for dataset in DATASETS}
+    assert channels == {"PEMS03": 0, "PEMS04": 0, "PEMS08": 0,
+                        "METRLA": 2, "PEMSBAY": 2}
+
+
+def test_metrla_keeps_its_canonical_graph_and_coordinates():
+    manifest = json.loads(
+        (MANIFEST_DIR / "METRLA_run_manifest.json").read_text("utf-8"))
+    assert manifest["payload"]["shape"] == [34272, 207, 3]
+    assert manifest["payload"]["adj_directed"] is True
+    assert manifest["propagation_graph"]["directed"] is True
+    assert manifest["positions"]["policy"] == "verified_wgs84"
+    assert manifest["unseen"]["count"] == 50
+    assert manifest["layout"]["algorithm"] == "kdtree_on_verified_wgs84"
+    assert manifest["layout"]["spa_patchsize"] == 8
+    assert manifest["time"]["start"].startswith("2012-03-01")
+    assert manifest["time"]["end"].startswith("2012-06-27")
+    assert manifest["files"] == ["raw_data.pkl", "unknown_nodes.npy"]
+
+
+@pytest.mark.parametrize("dataset", DATASETS)
+def test_each_run_directory_holds_exactly_two_files(dataset):
+    """A third file beside the payload is a third model input waiting to happen."""
+    manifest = json.loads(
+        (MANIFEST_DIR / f"{dataset}_run_manifest.json").read_text("utf-8"))
+    directory = ROOT / manifest["run_directory"]
+    assert sorted(p.name for p in directory.iterdir()) == \
+           ["raw_data.pkl", "unknown_nodes.npy"]
 
 
 def test_the_generator_is_deterministic():

@@ -33,7 +33,10 @@ from lib import lcbt_v4  # noqa: E402
 MANIFESTS = ROOT / "configs/paper/v4_data_manifests"
 OUTPUT = ROOT / "configs/paper/v4"
 EXPERTS = OUTPUT / "experts"
-DATASETS = ("PEMS03", "PEMS04", "PEMS08", "PEMSBAY")
+# Five datasets: three flow (q) and two speed (v). The two units are never
+# averaged together downstream -- an "avg_mae" over flow and speed would be
+# a number with no unit.
+DATASETS = ("PEMS03", "PEMS04", "PEMS08", "METRLA", "PEMSBAY")
 
 # Per model, not per dataset: each keeps the capacity and optimiser settings it
 # already ran under. Nothing here was chosen by a v4 measurement.

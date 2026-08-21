@@ -33,12 +33,15 @@ LAYOUT_SETTINGS = {
     "PEMS03": {"recur_times": 5, "spa_patchsize": 12},
     "PEMS04": {"recur_times": 5, "spa_patchsize": 11},
     "PEMS08": {"recur_times": 5, "spa_patchsize": 7},
+    # METR-LA's 8 is the largest-part+1 geometry its existing base config has
+    # always used (207 nodes -> 32 parts of 6-7), not a value chosen here.
+    "METRLA": {"recur_times": 5, "spa_patchsize": 8},
     "PEMSBAY": {"recur_times": 5, "spa_patchsize": 12},
 }
 DEST_ROOT = ROOT / "data_v4"
 # Directory name under data/ differs from the registry key for PEMS-BAY.
 SOURCE_DIR = {"PEMS03": "PEMS03", "PEMS04": "PEMS04", "PEMS08": "PEMS08",
-              "PEMSBAY": "PEMS-BAY"}
+              "METRLA": "METR-LA", "PEMSBAY": "PEMS-BAY"}
 DEST_DIR = dict(SOURCE_DIR)
 
 
