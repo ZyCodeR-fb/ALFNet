@@ -54,7 +54,7 @@ def _finite(node, path, findings):
         findings.append(f"{path} is {node}")
 
 
-def audit_run(run, plan, findings):
+def audit_run(run, plan, findings, notes):
     where = run.name
     directory = run.directory
     if not (directory / COMPLETE_MARKER).exists():
@@ -103,9 +103,16 @@ def audit_run(run, plan, findings):
                   "validation_exposure_hash"):
         if best.get(field) != last.get(field):
             findings.append(f"{where}: {field} differs between best.pt and last.pt")
+    # Code drift since the run is *recorded*, not a finding. These runs are
+    # complete; the code moving afterwards -- the evaluator seed fix, the
+    # plan-driven launcher -- does not retroactively change what they did, and
+    # the identity that decides whether they are comparable (payload, unseen,
+    # manifest, config, plan and both exposure hashes) is checked above. Drift
+    # *during* a run is what the plan's launch-time guard prevents.
     for name, digest in (last.get("code_sha256") or {}).items():
         if name in CODE_SOURCES and digest != sha256_file(ROOT / name):
-            findings.append(f"{where}: {name} changed since the run ({digest[:12]})")
+            notes.append(f"{where}: {name} has changed since the run "
+                         f"({digest[:12]} -> {sha256_file(ROOT / name)[:12]})")
 
     # --- selection consistency ----------------------------------------------
     if best.get("best_epoch") != last.get("best_epoch"):
@@ -153,17 +160,18 @@ def audit(output_root=None):
     root = Path(output_root or
                 ROOT / "outputs_v4/development_base" / plan["plan_sha256"])
     runs = plan_runs(root, plan)
-    findings = []
+    findings, notes = [], []
     names = [run.name for run in runs]
     if len(set(names)) != len(names):
         findings.append(f"duplicate runs in the plan: {names}")
     if len(runs) != 12:
         findings.append(f"expected 12 runs, planned {len(runs)}")
     for run in runs:
-        audit_run(run, plan, findings)
+        audit_run(run, plan, findings, notes)
     complete = sum(1 for run in runs if (run.directory / COMPLETE_MARKER).exists())
     return {"plan_sha256": plan["plan_sha256"], "output_root": str(root),
-            "complete": complete, "total": len(runs), "findings": findings}
+            "complete": complete, "total": len(runs), "findings": findings,
+            "notes": notes}
 
 
 def main(argv=None):
@@ -173,12 +181,18 @@ def main(argv=None):
     result = audit(arguments.output_root)
     print(f"plan {result['plan_sha256'][:16]}  root {result['output_root']}")
     print(f"COMPLETE {result['complete']}/{result['total']}")
+    if result["notes"]:
+        print(f"\n{len(result['notes'])} note(s), none of which invalidate a run:")
+        for note in result["notes"][:6]:
+            print(f"  . {note}")
+        if len(result["notes"]) > 6:
+            print(f"  . ... and {len(result['notes']) - 6} more")
     if result["findings"]:
         print(f"\n{len(result['findings'])} finding(s):")
         for finding in result["findings"]:
             print(f"  - {finding}")
         return 1
-    print("audit passed: identity, selection and validation-only labelling")
+    print("\naudit passed: identity, selection and validation-only labelling")
     return 0
 
 

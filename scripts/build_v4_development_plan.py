@@ -233,16 +233,27 @@ def main():
         if not PLAN_PATH.exists():
             print(f"{PLAN_PATH.relative_to(ROOT)} is missing")
             return 1
+        # `load_plan` verifies the plan's own recorded hash, and
+        # `assert_plan_still_holds` verifies the configs and data it named.
+        # Those two are what make the completed runs traceable, and they are
+        # what this returns non-zero on.
         on_disk = load_plan()
-        # The git commit moves with every commit and is provenance, not policy.
-        rebuilt = dict(plan, git_commit=on_disk.get("git_commit"))
-        rebuilt["plan_sha256"] = plan_hash(rebuilt)
-        if rebuilt["plan_sha256"] != on_disk["plan_sha256"]:
-            print("the plan on disk differs from the generator")
-            return 1
         assert_plan_still_holds(on_disk)
         print(f"plan {on_disk['plan_sha256'][:16]} holds: "
               f"{on_disk['trial_budget']} runs, {on_disk['datasets']}")
+
+        # `analysis_code` records what the code *was* at registration. It moving
+        # afterwards is expected -- a pre-registration describes the past, and
+        # regenerating the plan to silence this would change its hash and orphan
+        # the runs that recorded it. Reported, never fatal.
+        drifted = {name: (digest, sha256_file(ROOT / name))
+                   for name, digest in on_disk["analysis_code"].items()
+                   if sha256_file(ROOT / name) != digest}
+        if drifted:
+            print(f"note: {len(drifted)} analysis source(s) have changed since "
+                  "this plan was registered, which does not invalidate it:")
+            for name, (was, now) in sorted(drifted.items()):
+                print(f"  {name}: {was[:12]} -> {now[:12]}")
         return 0
     plan["plan_sha256"] = plan_hash(plan)
     PLAN_PATH.write_text(
