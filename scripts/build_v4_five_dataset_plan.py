@@ -57,6 +57,8 @@ CODE_SOURCES = (
     "scripts/train_v4.py", "scripts/v4_launcher.py",
     "scripts/v4_development_eval_v2.py",
     "scripts/audit_v4_development_base.py",
+    "scripts/v4_reuse_audit.py",
+    "scripts/build_v4_readiness.py",
 )
 
 # What has already been read on each dataset's *test* split, stated rather than
@@ -157,11 +159,56 @@ def build_plan(include_commit=True):
             for seed in SEEDS:
                 runs.append({"dataset": dataset, "model": model, "seed": seed,
                              "config": str(path.relative_to(ROOT)),
-                             "phase": 0 if seed == SEEDS[0] else 1})
+                             "phase": 0 if seed == SEEDS[0] else 1,
+                             # filled in below from the reuse audit
+                             "execution_action": "train"})
+
+    # Twelve PEMS08/PEMS-BAY runs already exist under the development plan. Each
+    # is audited individually against what this plan needs; one that fails any
+    # check is marked `train` and the others are unaffected. A reused run is
+    # never presented as a run of this plan -- it carries its source plan, its
+    # source commit, its source directory and its checkpoint digest.
+    from scripts.build_v4_development_plan import (assert_plan_still_holds,
+                                                   load_plan as load_development)
+    from scripts.v4_reuse_audit import audit_reusable
+
+    development = assert_plan_still_holds(load_development())
+    reuse = {record["run"]: record
+             for record in audit_reusable(development, data, configs)}
+    for entry in runs:
+        key = f"{entry['dataset']}/{entry['model']}/seed{entry['seed']}"
+        record = reuse.get(key)
+        if record is None or record["execution_action"] != "reuse":
+            entry["execution_action"] = "train"
+            if record is not None:
+                entry["reuse_compatibility_status"] = record[
+                    "reuse_compatibility_status"]
+                entry["reuse_rejected_because"] = record["findings"]
+            continue
+        entry.update({
+            "execution_action": "reuse",
+            "reuse_compatibility_status": record["reuse_compatibility_status"],
+            "source_plan_sha256": record["source_plan_sha256"],
+            "source_git_commit": record["source_git_commit"],
+            "source_run_directory": record["source_run_directory"],
+            "checkpoint_sha256": record["checkpoint_sha256"],
+            "best_epoch": record["best_epoch"],
+        })
+    reused = [entry for entry in runs if entry["execution_action"] == "reuse"]
+    to_train = [entry for entry in runs if entry["execution_action"] == "train"]
 
     plan = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "v4_five_dataset_plan",
+        "execution": {
+            "total_result_slots": len(runs),
+            "provenance_verified_reused_runs": len(reused),
+            "new_training_runs": len(to_train),
+            "gpu_jobs_to_execute": len(to_train),
+            "reused_runs_are_not_runs_of_this_plan": True,
+            "reused_runs_source_plan": development["plan_sha256"],
+            "reuse_audit_code_sha256": sha256_file(ROOT / "scripts/v4_reuse_audit.py"),
+        },
         "status": "preregistered_confirmatory_and_supportive",
         "purpose": "one-shot five-dataset three-seed v4 experiment",
         "protocol": STRATEGY,
@@ -234,6 +281,20 @@ def build_plan(include_commit=True):
             "development_runs_are_historical_exploratory": True,
             "development_checkpoints_may_not_be_reported_under_this_plan": True,
             "development_checkpoints_may_not_initialise_a_run_of_this_plan": True,
+        },
+        "readiness_attestation": {
+            # Path and schema only. Hashing the attestation here while it hashes
+            # this plan would make the two a fixed point that could be satisfied
+            # only by rewriting one until they agreed, which verifies nothing.
+            # The reference is one-way: attestation -> plan.
+            "path": "configs/paper/v4_five_dataset_readiness.json",
+            "schema_version": 1,
+            "generator": "scripts/build_v4_readiness.py",
+            "must_reference_this_plan_sha256": True,
+            "required_flags": ["data_ready", "graph_ready", "exposure_ready",
+                               "training_ready"],
+            "checked_before": ["creating a run directory", "spawning a child",
+                               "initialising CUDA"],
         },
         "code_sha256": {name: sha256_file(ROOT / name) for name in CODE_SOURCES},
     }

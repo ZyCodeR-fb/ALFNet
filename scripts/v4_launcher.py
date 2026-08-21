@@ -74,8 +74,17 @@ def resolve_plan_and_root(plan_path=None):
         plan = assert_plan_still_holds(load_plan())
         return plan, ROOT / "outputs_v4/development_base" / plan["plan_sha256"]
     from scripts import build_v4_five_dataset_plan as five
+    from scripts.build_v4_readiness import ReadinessRefused, assert_ready
 
     plan = five.assert_plan_still_holds(five.load_plan(plan_path))
+    # The running permit, checked here -- before a run directory exists, before
+    # a child is spawned and before anything touches CUDA. A manifest flag that
+    # the entry point ignores is worse than no flag.
+    if plan.get("readiness_attestation"):
+        try:
+            assert_ready(plan)
+        except ReadinessRefused as error:
+            raise LauncherRefused(f"{plan_path}: {error}") from error
     root = plan.get("output_root")
     if not root:
         raise LauncherRefused(f"{plan_path} declares no output_root")
@@ -95,6 +104,10 @@ class Run:
     process: object = field(default=None, repr=False)
     lock: object = field(default=None, repr=False)
     started: float = None
+    # "train" or "reuse". A reused run is an already-verified checkpoint from
+    # another plan; it occupies a result slot, never a GPU worker.
+    execution_action: str = "train"
+    entry: dict = field(default_factory=dict, repr=False)
 
     @property
     def name(self):
@@ -132,13 +145,20 @@ def assign_slots(jobs, devices, allow_sharing=False):
     return [unique[index % len(unique)] for index in range(jobs)]
 
 
-def _make_run(output_root, dataset, model, seed, phase):
+def _make_run(output_root, dataset, model, seed, phase, entry=None):
+    entry = entry or {}
     config = ROOT / f"configs/paper/v4/{dataset}_{model}.yaml"
     digest = sha256_file(config)[:16]
+    action = entry.get("execution_action", "train")
+    # A reused run points at the directory that already holds its checkpoint, so
+    # nothing writes into it and its provenance stays where it was produced.
+    directory = (ROOT / entry["source_run_directory"]
+                 if action == "reuse" and entry.get("source_run_directory")
+                 else Path(output_root) / dataset / model / digest / f"seed{seed}")
     return Run(dataset=dataset, model=model, seed=int(seed), phase=int(phase),
-               config=config,
-               directory=Path(output_root) / dataset / model / digest / f"seed{seed}",
-               log=Path(output_root) / "logs" / f"{dataset}_{model}_seed{seed}.log")
+               config=config, directory=directory,
+               log=Path(output_root) / "logs" / f"{dataset}_{model}_seed{seed}.log",
+               execution_action=action, entry=entry)
 
 
 def plan_runs(output_root, plan):
@@ -159,7 +179,7 @@ def plan_runs(output_root, plan):
                 raise LauncherRefused(f"duplicate run {key}")
             seen.add(key)
             runs.append(_make_run(output_root, *key, entry.get(
-                "phase", 0 if int(entry["seed"]) == HEALTH_SEED else 1)))
+                "phase", 0 if int(entry["seed"]) == HEALTH_SEED else 1), entry))
     else:
         datasets = tuple(plan["datasets"])
         models = tuple(plan["models"])
@@ -193,8 +213,12 @@ def plan_runs(output_root, plan):
 
 
 def run_state(run):
-    """COMPLETE | FAILED | RESUMABLE | UNRESUMABLE | NEW."""
+    """REUSED_COMPLETE | COMPLETE | FAILED | RESUMABLE | UNRESUMABLE | NEW."""
     directory = run.directory
+    if run.execution_action == "reuse":
+        # Its provenance was audited when the plan was frozen; the launcher
+        # neither resumes it, restarts it, nor writes anything into it.
+        return "REUSED_COMPLETE"
     if (directory / COMPLETE_MARKER).exists():
         return "COMPLETE"
     if (directory / FAILED_MARKER).exists():
@@ -347,6 +371,10 @@ class Launcher:
     # -- execution ------------------------------------------------------------
 
     def start(self, run, device):
+        if run.execution_action != "train":
+            raise LauncherRefused(
+                f"{run.name} is {run.execution_action}, not a training run; the "
+                "launcher does not touch a reused checkpoint")
         state = run_state(run)
         extra = []
         if state == "RESUMABLE":
@@ -426,8 +454,10 @@ class Launcher:
     def run_phase(self, phase):
         """One phase to completion. Returns False if anything failed."""
         pending = [run for run in self.runs if run.phase == phase
+                   and run.execution_action == "train"
                    and run_state(run) != "COMPLETE"]
         skipped = [run for run in self.runs if run.phase == phase
+                   and run.execution_action == "train"
                    and run_state(run) == "COMPLETE"]
         for run in skipped:
             self.say(f"SKIP  {run.name:26s} already COMPLETE")
@@ -473,24 +503,52 @@ class Launcher:
 # --- entry point ---------------------------------------------------------------
 
 
+def summarise(runs):
+    reused = [run for run in runs if run.execution_action == "reuse"]
+    training = [run for run in runs if run.execution_action == "train"]
+    return {"total_result_slots": len(runs),
+            "reused_complete": len(reused),
+            "new_training": len(training),
+            "gpu_jobs_to_execute": len(training),
+            "reused": reused, "training": training}
+
+
 def dry_run(output_root, plan, slots):
     runs = plan_runs(output_root, plan)
+    counts = summarise(runs)
     print(f"plan     {plan['plan_sha256']}")
     print(f"output   {output_root}")
     print(f"slots    {slots}")
+    print(f"\ntotal result slots: {counts['total_result_slots']}")
+    print(f"reused complete:    {counts['reused_complete']}")
+    print(f"new training:       {counts['new_training']}")
+    print(f"GPU jobs to execute:{counts['gpu_jobs_to_execute']:>3d}")
+    if counts["reused"]:
+        print("\nreused (no GPU worker, never resumed, never written to):")
+        for run in counts["reused"]:
+            entry = run.entry
+            print(f"  REUSED_COMPLETE {run.name:26s} "
+                  f"source_plan={str(entry.get('source_plan_sha256',''))[:12]}... "
+                  f"checkpoint_sha={str(entry.get('checkpoint_sha256',''))[:12]}...")
     for phase, label in ((0, "health (seed 32)"), (1, "remaining seeds")):
-        members = [run for run in runs if run.phase == phase]
-        print(f"\nphase {phase}: {label}  ({len(members)} runs, "
+        members = [run for run in counts["training"] if run.phase == phase]
+        print(f"\nphase {phase}: {label}  ({len(members)} runs to train, "
               f"at most {len(slots)} at a time)")
         for index, run in enumerate(members):
             print(f"  [{index + 1:2d}] {run.name:26s} gpu={slots[index % len(slots)]:8s} "
-                  f"state={run_state(run):12s} {run.directory}")
+                  f"state={run_state(run):16s} {run.directory}")
     names = [run.name for run in runs]
     if len(names) != len(set(names)) or len(names) != plan["trial_budget"]:
         raise LauncherRefused(
             f"{len(names)} runs, {len(set(names))} unique, plan registered "
             f"{plan['trial_budget']}")
-    print(f"\n{len(names)} unique runs, no duplicates")
+    declared = plan.get("execution")
+    if declared and declared["gpu_jobs_to_execute"] != counts["gpu_jobs_to_execute"]:
+        raise LauncherRefused(
+            f"the plan declares {declared['gpu_jobs_to_execute']} GPU jobs, the "
+            f"queue enumerated {counts['gpu_jobs_to_execute']}")
+    print(f"\n{len(names)} unique result slots, no duplicates; "
+          f"{counts['gpu_jobs_to_execute']} to train")
     return 0
 
 

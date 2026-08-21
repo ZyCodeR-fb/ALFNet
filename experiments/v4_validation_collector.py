@@ -59,14 +59,21 @@ class CollectorRefused(ValueError):
     """The collector will not produce a table from this input."""
 
 
-def _refuse_non_validation(context):
+def _refuse_non_validation(context, allow_phase="validation"):
+    """Validation unless a caller names another phase explicitly.
+
+    `allow_phase` exists for the final test evaluator, which is the one place a
+    test split may be read and which has eight gates of its own. It is a named
+    argument rather than a bypass so that every caller reading test appears in a
+    grep for it; the default stays validation-only.
+    """
     if context is None:
-        raise CollectorRefused("the development collector requires a context")
-    if context.phase != "validation":
+        raise CollectorRefused("the collector requires a context")
+    if context.phase != allow_phase:
         raise CollectorRefused(
-            f"the development collector reads validation only, got phase "
-            f"{context.phase!r}; a test split is read once, by the evaluator, "
-            "and never by a development diagnostic")
+            f"this collector reads {allow_phase} only, got phase "
+            f"{context.phase!r}; a test split is read once, by the final test "
+            "evaluator, and never by a development diagnostic")
 
 
 class ValidationCellCollector:
@@ -77,8 +84,8 @@ class ValidationCellCollector:
     them unchanged.
     """
 
-    def __init__(self, context, scaler):
-        _refuse_non_validation(context)
+    def __init__(self, context, scaler, allow_phase="validation"):
+        _refuse_non_validation(context, allow_phase)
         self.context = context
         self.mean = float(scaler["mean"])
         self.std = float(scaler["std"])

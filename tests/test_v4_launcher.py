@@ -93,7 +93,11 @@ def test_the_health_phase_is_every_seed_thirty_two_run(plan, tmp_path):
 def test_the_dry_run_starts_nothing(plan, tmp_path, capsys):
     v4_launcher.dry_run(tmp_path, plan, ["cuda:0", "cuda:1", "cuda:2"])
     output = capsys.readouterr().out
-    assert "12 unique runs, no duplicates" in output
+    assert "12 unique result slots, no duplicates" in output
+    # The development plan predates execution_action, so every slot is trained.
+    assert "total result slots: 12" in output
+    assert "reused complete:    0" in output
+    assert "new training:       12" in output
     # Four phase-0 lines, each naming a seed-32 run.
     health = [line for line in output.splitlines() if "/seed32 " in line]
     assert len(health) == 4, health

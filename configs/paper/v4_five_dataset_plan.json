@@ -2,15 +2,17 @@
  "code_sha256": {
   "data_provider/v4_lifecycle_loader.py": "16feeee640237f3790bf455cc54834d5f969c54bc86a50d41a1da40e38ebb690",
   "experiments/v4_runner.py": "9a0df460fa17205139e43f147bf98eb03080643ffaf8e040e35c3401cda51e29",
-  "experiments/v4_validation_collector.py": "90416de97cc86cd318a442614c28904c40c9394d3e392ee818d26230c5317099",
+  "experiments/v4_validation_collector.py": "00d738d706106ad85042364b952c2777d8855484396f0c204e346061321b9c52",
   "lib/lcbt_v4.py": "6963b3a3985502adef1d58901094a7940538de576103ebd9f0cf242e14f75e0a",
   "lib/runtime_context.py": "2d695ed3c54404bee2d53d5b59d8068f316105632ab6a6b2749c299c4e7f7bb0",
   "lib/teacher_forcing.py": "a27687fa6ca27c76b70bd7e2b60aafb58345a1eb34a1057d9a6266b2969f2c16",
   "lib/v4_batch.py": "e3551814c436751648d46dabad859bce8ded845358cfac8f3a2695500a7b8bb7",
   "scripts/audit_v4_development_base.py": "040557d5354a241c72b7744561d4f3d3022a189079968fbef32426b1d8312449",
+  "scripts/build_v4_readiness.py": "7af73ef2fcdaef6a16a5e9433004fe41f832501df978f906c0e7350b6b3027c9",
   "scripts/train_v4.py": "b3c9a84b470adbbdaf0e8acb26430d7a0d9e19e09374def1b1031f52f5f08242",
   "scripts/v4_development_eval_v2.py": "8eef7d52d69616333c7dbab45b6ae8d09cf9ca9dba18d6bed3730c5d39f12515",
-  "scripts/v4_launcher.py": "ea3dca9258c6ad010a511d261ffe5080f2900214dfb48d30965781d23bf2227b"
+  "scripts/v4_launcher.py": "ce5926f915cdcd41ae0038742d9a7d42cb1f2f0d6a12cc697b0a33752e9e4c4d",
+  "scripts/v4_reuse_audit.py": "2d3efd275177127032cc16f6f6ccae4de9d4ccc0320d150c851d8d61c8cf997f"
  },
  "configs": {
   "METRLA_ALFNet": {
@@ -408,16 +410,42 @@
    "std_ddof": 1
   }
  },
- "git_commit": "3f2b652bbed881c6d55674e79df6676f5c077893",
+ "execution": {
+  "gpu_jobs_to_execute": 18,
+  "new_training_runs": 18,
+  "provenance_verified_reused_runs": 12,
+  "reuse_audit_code_sha256": "2d3efd275177127032cc16f6f6ccae4de9d4ccc0320d150c851d8d61c8cf997f",
+  "reused_runs_are_not_runs_of_this_plan": true,
+  "reused_runs_source_plan": "deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f",
+  "total_result_slots": 30
+ },
+ "git_commit": "50687a3b7880427b64f7ac64d70a2bbe2f1325a4",
  "kind": "v4_five_dataset_plan",
  "models": [
   "ALFNet",
   "MoGERNN"
  ],
  "output_root": "outputs_v4/five_dataset",
- "plan_sha256": "6e89ce5ca5a55517ffe237312cadce56ce244b86a3c89a3fdf9f2b9b6fa3e1f9",
+ "plan_sha256": "717b23fc71168732e63bc5294a65058d1b601a04f2f20134d75666231ffd3b19",
  "protocol": "lcbt_v4",
  "purpose": "one-shot five-dataset three-seed v4 experiment",
+ "readiness_attestation": {
+  "checked_before": [
+   "creating a run directory",
+   "spawning a child",
+   "initialising CUDA"
+  ],
+  "generator": "scripts/build_v4_readiness.py",
+  "must_reference_this_plan_sha256": true,
+  "path": "configs/paper/v4_five_dataset_readiness.json",
+  "required_flags": [
+   "data_ready",
+   "graph_ready",
+   "exposure_ready",
+   "training_ready"
+  ],
+  "schema_version": 1
+ },
  "relationship_to_development_runs": {
   "development_checkpoints_may_not_be_reported_under_this_plan": true,
   "development_checkpoints_may_not_initialise_a_run_of_this_plan": true,
@@ -434,6 +462,7 @@
   {
    "config": "configs/paper/v4/PEMS03_ALFNet.yaml",
    "dataset": "PEMS03",
+   "execution_action": "train",
    "model": "ALFNet",
    "phase": 0,
    "seed": 32
@@ -441,6 +470,7 @@
   {
    "config": "configs/paper/v4/PEMS03_ALFNet.yaml",
    "dataset": "PEMS03",
+   "execution_action": "train",
    "model": "ALFNet",
    "phase": 1,
    "seed": 42
@@ -448,6 +478,7 @@
   {
    "config": "configs/paper/v4/PEMS03_ALFNet.yaml",
    "dataset": "PEMS03",
+   "execution_action": "train",
    "model": "ALFNet",
    "phase": 1,
    "seed": 52
@@ -455,6 +486,7 @@
   {
    "config": "configs/paper/v4/PEMS03_MoGERNN.yaml",
    "dataset": "PEMS03",
+   "execution_action": "train",
    "model": "MoGERNN",
    "phase": 0,
    "seed": 32
@@ -462,6 +494,7 @@
   {
    "config": "configs/paper/v4/PEMS03_MoGERNN.yaml",
    "dataset": "PEMS03",
+   "execution_action": "train",
    "model": "MoGERNN",
    "phase": 1,
    "seed": 42
@@ -469,6 +502,7 @@
   {
    "config": "configs/paper/v4/PEMS03_MoGERNN.yaml",
    "dataset": "PEMS03",
+   "execution_action": "train",
    "model": "MoGERNN",
    "phase": 1,
    "seed": 52
@@ -476,6 +510,7 @@
   {
    "config": "configs/paper/v4/PEMS04_ALFNet.yaml",
    "dataset": "PEMS04",
+   "execution_action": "train",
    "model": "ALFNet",
    "phase": 0,
    "seed": 32
@@ -483,6 +518,7 @@
   {
    "config": "configs/paper/v4/PEMS04_ALFNet.yaml",
    "dataset": "PEMS04",
+   "execution_action": "train",
    "model": "ALFNet",
    "phase": 1,
    "seed": 42
@@ -490,6 +526,7 @@
   {
    "config": "configs/paper/v4/PEMS04_ALFNet.yaml",
    "dataset": "PEMS04",
+   "execution_action": "train",
    "model": "ALFNet",
    "phase": 1,
    "seed": 52
@@ -497,6 +534,7 @@
   {
    "config": "configs/paper/v4/PEMS04_MoGERNN.yaml",
    "dataset": "PEMS04",
+   "execution_action": "train",
    "model": "MoGERNN",
    "phase": 0,
    "seed": 32
@@ -504,6 +542,7 @@
   {
    "config": "configs/paper/v4/PEMS04_MoGERNN.yaml",
    "dataset": "PEMS04",
+   "execution_action": "train",
    "model": "MoGERNN",
    "phase": 1,
    "seed": 42
@@ -511,62 +550,107 @@
   {
    "config": "configs/paper/v4/PEMS04_MoGERNN.yaml",
    "dataset": "PEMS04",
+   "execution_action": "train",
    "model": "MoGERNN",
    "phase": 1,
    "seed": 52
   },
   {
+   "best_epoch": 75,
+   "checkpoint_sha256": "00f5735e6807fafc45a861e5a71074bb67e64448f383390574c3cf1ef2ff770f",
    "config": "configs/paper/v4/PEMS08_ALFNet.yaml",
    "dataset": "PEMS08",
+   "execution_action": "reuse",
+   "model": "ALFNet",
+   "phase": 0,
+   "reuse_compatibility_status": "COMPATIBLE",
+   "seed": 32,
+   "source_git_commit": "2496ffa9bfedd12dc6a94f5ca71d85ccbb177aa0",
+   "source_plan_sha256": "deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f",
+   "source_run_directory": "outputs_v4/development_base/deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f/PEMS08/ALFNet/a7924a702a7d4a12/seed32"
+  },
+  {
+   "best_epoch": 42,
+   "checkpoint_sha256": "260d158ac602daebf3d4ba227084edb5c5bb3f0e4334ba790994631b7e50d158",
+   "config": "configs/paper/v4/PEMS08_ALFNet.yaml",
+   "dataset": "PEMS08",
+   "execution_action": "reuse",
+   "model": "ALFNet",
+   "phase": 1,
+   "reuse_compatibility_status": "COMPATIBLE",
+   "seed": 42,
+   "source_git_commit": "2496ffa9bfedd12dc6a94f5ca71d85ccbb177aa0",
+   "source_plan_sha256": "deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f",
+   "source_run_directory": "outputs_v4/development_base/deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f/PEMS08/ALFNet/a7924a702a7d4a12/seed42"
+  },
+  {
+   "best_epoch": 62,
+   "checkpoint_sha256": "c5d9cd39b2814ad022932c95ceddcf1c54ef494de76fb42d010a5530dc6d932d",
+   "config": "configs/paper/v4/PEMS08_ALFNet.yaml",
+   "dataset": "PEMS08",
+   "execution_action": "reuse",
+   "model": "ALFNet",
+   "phase": 1,
+   "reuse_compatibility_status": "COMPATIBLE",
+   "seed": 52,
+   "source_git_commit": "2496ffa9bfedd12dc6a94f5ca71d85ccbb177aa0",
+   "source_plan_sha256": "deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f",
+   "source_run_directory": "outputs_v4/development_base/deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f/PEMS08/ALFNet/a7924a702a7d4a12/seed52"
+  },
+  {
+   "best_epoch": 13,
+   "checkpoint_sha256": "ef2315ee926a281488a00ee3199c3b437c3840fee227855ac8cf6e8387c84c0b",
+   "config": "configs/paper/v4/PEMS08_MoGERNN.yaml",
+   "dataset": "PEMS08",
+   "execution_action": "reuse",
+   "model": "MoGERNN",
+   "phase": 0,
+   "reuse_compatibility_status": "COMPATIBLE",
+   "seed": 32,
+   "source_git_commit": "2496ffa9bfedd12dc6a94f5ca71d85ccbb177aa0",
+   "source_plan_sha256": "deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f",
+   "source_run_directory": "outputs_v4/development_base/deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f/PEMS08/MoGERNN/0cea4e7c2de02fc5/seed32"
+  },
+  {
+   "best_epoch": 43,
+   "checkpoint_sha256": "df0f71acd6a76cb5127604e202e25a18eca778deb1d2ccaa0437241beca7ddc0",
+   "config": "configs/paper/v4/PEMS08_MoGERNN.yaml",
+   "dataset": "PEMS08",
+   "execution_action": "reuse",
+   "model": "MoGERNN",
+   "phase": 1,
+   "reuse_compatibility_status": "COMPATIBLE",
+   "seed": 42,
+   "source_git_commit": "2496ffa9bfedd12dc6a94f5ca71d85ccbb177aa0",
+   "source_plan_sha256": "deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f",
+   "source_run_directory": "outputs_v4/development_base/deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f/PEMS08/MoGERNN/0cea4e7c2de02fc5/seed42"
+  },
+  {
+   "best_epoch": 95,
+   "checkpoint_sha256": "f900de2fb8a4672ef13a3a21f0c4bbc9f3ccad0ddce84ff7719970f82ac28c1f",
+   "config": "configs/paper/v4/PEMS08_MoGERNN.yaml",
+   "dataset": "PEMS08",
+   "execution_action": "reuse",
+   "model": "MoGERNN",
+   "phase": 1,
+   "reuse_compatibility_status": "COMPATIBLE",
+   "seed": 52,
+   "source_git_commit": "2496ffa9bfedd12dc6a94f5ca71d85ccbb177aa0",
+   "source_plan_sha256": "deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f",
+   "source_run_directory": "outputs_v4/development_base/deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f/PEMS08/MoGERNN/0cea4e7c2de02fc5/seed52"
+  },
+  {
+   "config": "configs/paper/v4/METRLA_ALFNet.yaml",
+   "dataset": "METRLA",
+   "execution_action": "train",
    "model": "ALFNet",
    "phase": 0,
    "seed": 32
   },
   {
-   "config": "configs/paper/v4/PEMS08_ALFNet.yaml",
-   "dataset": "PEMS08",
-   "model": "ALFNet",
-   "phase": 1,
-   "seed": 42
-  },
-  {
-   "config": "configs/paper/v4/PEMS08_ALFNet.yaml",
-   "dataset": "PEMS08",
-   "model": "ALFNet",
-   "phase": 1,
-   "seed": 52
-  },
-  {
-   "config": "configs/paper/v4/PEMS08_MoGERNN.yaml",
-   "dataset": "PEMS08",
-   "model": "MoGERNN",
-   "phase": 0,
-   "seed": 32
-  },
-  {
-   "config": "configs/paper/v4/PEMS08_MoGERNN.yaml",
-   "dataset": "PEMS08",
-   "model": "MoGERNN",
-   "phase": 1,
-   "seed": 42
-  },
-  {
-   "config": "configs/paper/v4/PEMS08_MoGERNN.yaml",
-   "dataset": "PEMS08",
-   "model": "MoGERNN",
-   "phase": 1,
-   "seed": 52
-  },
-  {
    "config": "configs/paper/v4/METRLA_ALFNet.yaml",
    "dataset": "METRLA",
-   "model": "ALFNet",
-   "phase": 0,
-   "seed": 32
-  },
-  {
-   "config": "configs/paper/v4/METRLA_ALFNet.yaml",
-   "dataset": "METRLA",
+   "execution_action": "train",
    "model": "ALFNet",
    "phase": 1,
    "seed": 42
@@ -574,6 +658,7 @@
   {
    "config": "configs/paper/v4/METRLA_ALFNet.yaml",
    "dataset": "METRLA",
+   "execution_action": "train",
    "model": "ALFNet",
    "phase": 1,
    "seed": 52
@@ -581,6 +666,7 @@
   {
    "config": "configs/paper/v4/METRLA_MoGERNN.yaml",
    "dataset": "METRLA",
+   "execution_action": "train",
    "model": "MoGERNN",
    "phase": 0,
    "seed": 32
@@ -588,6 +674,7 @@
   {
    "config": "configs/paper/v4/METRLA_MoGERNN.yaml",
    "dataset": "METRLA",
+   "execution_action": "train",
    "model": "MoGERNN",
    "phase": 1,
    "seed": 42
@@ -595,54 +682,97 @@
   {
    "config": "configs/paper/v4/METRLA_MoGERNN.yaml",
    "dataset": "METRLA",
+   "execution_action": "train",
    "model": "MoGERNN",
    "phase": 1,
    "seed": 52
   },
   {
+   "best_epoch": 79,
+   "checkpoint_sha256": "9e7cb513ad9e660a982bdc5268956ec24d2ce138b1a9ed6e54ec506dda052775",
    "config": "configs/paper/v4/PEMSBAY_ALFNet.yaml",
    "dataset": "PEMSBAY",
+   "execution_action": "reuse",
    "model": "ALFNet",
    "phase": 0,
-   "seed": 32
+   "reuse_compatibility_status": "COMPATIBLE",
+   "seed": 32,
+   "source_git_commit": "2496ffa9bfedd12dc6a94f5ca71d85ccbb177aa0",
+   "source_plan_sha256": "deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f",
+   "source_run_directory": "outputs_v4/development_base/deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f/PEMSBAY/ALFNet/03972e8bb403b410/seed32"
   },
   {
+   "best_epoch": 58,
+   "checkpoint_sha256": "ec0893e236147ec24d54679b9830341dfdfeb17b05ff5ad56a18c4841b0f8bba",
    "config": "configs/paper/v4/PEMSBAY_ALFNet.yaml",
    "dataset": "PEMSBAY",
+   "execution_action": "reuse",
    "model": "ALFNet",
    "phase": 1,
-   "seed": 42
+   "reuse_compatibility_status": "COMPATIBLE",
+   "seed": 42,
+   "source_git_commit": "2496ffa9bfedd12dc6a94f5ca71d85ccbb177aa0",
+   "source_plan_sha256": "deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f",
+   "source_run_directory": "outputs_v4/development_base/deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f/PEMSBAY/ALFNet/03972e8bb403b410/seed42"
   },
   {
+   "best_epoch": 41,
+   "checkpoint_sha256": "fd8a487b170604d31250e01acf656e5b07387ab64c20a80c0f53580ce1194007",
    "config": "configs/paper/v4/PEMSBAY_ALFNet.yaml",
    "dataset": "PEMSBAY",
+   "execution_action": "reuse",
    "model": "ALFNet",
    "phase": 1,
-   "seed": 52
+   "reuse_compatibility_status": "COMPATIBLE",
+   "seed": 52,
+   "source_git_commit": "2496ffa9bfedd12dc6a94f5ca71d85ccbb177aa0",
+   "source_plan_sha256": "deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f",
+   "source_run_directory": "outputs_v4/development_base/deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f/PEMSBAY/ALFNet/03972e8bb403b410/seed52"
   },
   {
+   "best_epoch": 69,
+   "checkpoint_sha256": "83a54881c7372cc318035a7017df14774cf2a42f334ac9fc6a2da043c64e4edb",
    "config": "configs/paper/v4/PEMSBAY_MoGERNN.yaml",
    "dataset": "PEMSBAY",
+   "execution_action": "reuse",
    "model": "MoGERNN",
    "phase": 0,
-   "seed": 32
+   "reuse_compatibility_status": "COMPATIBLE",
+   "seed": 32,
+   "source_git_commit": "2496ffa9bfedd12dc6a94f5ca71d85ccbb177aa0",
+   "source_plan_sha256": "deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f",
+   "source_run_directory": "outputs_v4/development_base/deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f/PEMSBAY/MoGERNN/e136dfa2ea11739c/seed32"
   },
   {
+   "best_epoch": 54,
+   "checkpoint_sha256": "2f56fe73d3640438e26a2295cd7188c4a957a2e5864834d9493a11f620502b3c",
    "config": "configs/paper/v4/PEMSBAY_MoGERNN.yaml",
    "dataset": "PEMSBAY",
+   "execution_action": "reuse",
    "model": "MoGERNN",
    "phase": 1,
-   "seed": 42
+   "reuse_compatibility_status": "COMPATIBLE",
+   "seed": 42,
+   "source_git_commit": "2496ffa9bfedd12dc6a94f5ca71d85ccbb177aa0",
+   "source_plan_sha256": "deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f",
+   "source_run_directory": "outputs_v4/development_base/deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f/PEMSBAY/MoGERNN/e136dfa2ea11739c/seed42"
   },
   {
+   "best_epoch": 46,
+   "checkpoint_sha256": "f2634e9bae9019c8c5d371e3237460c6942d8ce650a97619afc3ad44887172e1",
    "config": "configs/paper/v4/PEMSBAY_MoGERNN.yaml",
    "dataset": "PEMSBAY",
+   "execution_action": "reuse",
    "model": "MoGERNN",
    "phase": 1,
-   "seed": 52
+   "reuse_compatibility_status": "COMPATIBLE",
+   "seed": 52,
+   "source_git_commit": "2496ffa9bfedd12dc6a94f5ca71d85ccbb177aa0",
+   "source_plan_sha256": "deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f",
+   "source_run_directory": "outputs_v4/development_base/deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f/PEMSBAY/MoGERNN/e136dfa2ea11739c/seed52"
   }
  ],
- "schema_version": 1,
+ "schema_version": 2,
  "seeds": [
   32,
   42,
