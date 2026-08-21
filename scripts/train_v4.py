@@ -404,20 +404,59 @@ def build_scheduler(session, optimizer):
     raise RunnerRefused(f"unknown scheduler {setting!r}; none is added here")
 
 
-def resolve_plan(config_path, plan=None):
-    """The pre-registered plan, verified against what is on disk.
+def load_plan_authority(plan_path=None):
+    """Load and verify whichever plan was asked for. Never a default fallback.
 
-    Fails closed on drift rather than re-hashing and carrying on: a plan that
-    silently updates itself is not a pre-registration.
+    Dispatch is on the plan's own `kind`, not on a config name or a directory:
+    guessing which plan a config belongs to is how a five-dataset launcher ended
+    up having its METR-LA runs judged against the two-dataset development plan,
+    which rejected them before CUDA was ever touched.
+
+    A five-dataset plan additionally has to present a valid readiness
+    attestation, and it is checked here -- before a session, a run directory, a
+    model or a CUDA context exists.
     """
-    plan = load_plan() if plan is None else plan
-    assert_plan_still_holds(plan)
+    if plan_path is None:
+        # The historical development entry point, and only that.
+        return assert_plan_still_holds(load_plan())
+    plan_path = Path(plan_path)
+    if not plan_path.exists():
+        raise RunnerRefused(f"{plan_path} does not exist")
+    kind = json.loads(plan_path.read_text("utf-8")).get("kind")
+    if kind == "v4_five_dataset_plan":
+        from scripts import build_v4_five_dataset_plan as five
+        from scripts.build_v4_readiness import ReadinessRefused, assert_ready
+
+        plan = five.assert_plan_still_holds(five.load_plan(plan_path))
+        try:
+            assert_ready(plan)
+        except ReadinessRefused as error:
+            raise RunnerRefused(f"{plan_path}: {error}") from error
+        return plan
+    if kind is None and plan_path.resolve() == (
+            ROOT / "configs/paper/v4_development_plan.json").resolve():
+        return assert_plan_still_holds(load_plan())
+    raise RunnerRefused(
+        f"{plan_path} declares kind={kind!r}; this entry point knows the "
+        "development plan and v4_five_dataset_plan")
+
+
+def resolve_plan(config_path, plan=None):
+    """Check the config belongs to *this* plan. Fails closed on drift.
+
+    `plan` is the already-verified plan the caller loaded. It is not reloaded
+    here and never falls back to another one -- that fallback is the bug this
+    signature exists to prevent.
+    """
+    if plan is None:
+        plan = load_plan_authority()
     relative = str(Path(config_path).resolve().relative_to(ROOT))
     registered = {entry["path"]: entry for entry in plan["configs"].values()}
     if relative not in registered:
         raise RunnerRefused(
-            f"{relative} is not one of the {len(registered)} configs the "
-            f"development plan registered: {sorted(registered)}")
+            f"{relative} is not one of the {len(registered)} configs registered "
+            f"by plan {plan['plan_sha256'][:16]} "
+            f"({plan.get('kind', 'v4_development_plan')}): {sorted(registered)}")
     return plan, registered[relative]
 
 
@@ -438,8 +477,8 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
         plan, plan_entry = resolve_plan(config_path, plan)
         if plan_entry["sha256"] != config_sha:
             raise RunnerRefused(
-                f"{config_path.name} hashes to {config_sha} but the plan "
-                f"registered {plan_entry['sha256']}")
+                f"{config_path.name} hashes to {config_sha} but plan "
+                f"{plan['plan_sha256'][:16]} registered {plan_entry['sha256']}")
     session = build_v4_session(config_path, device=device, run_seed=seed,
                                batch_size=batch_size, num_workers=num_workers)
     if output_root is None:
@@ -580,10 +619,15 @@ def main(argv=None):
                         help="one train batch, one validation batch, no checkpoint")
     parser.add_argument("--max_train_batches", type=int, default=None)
     parser.add_argument("--max_validation_batches", type=int, default=None)
-    parser.add_argument(
+    plan_source = parser.add_mutually_exclusive_group()
+    plan_source.add_argument(
         "--development_plan", action="store_true",
-        help=("run under the pre-registered development plan: verify its hash "
-              "and write the 36 validation-only development cells"))
+        help=("run under the historical two-dataset development plan; kept for "
+              "that entry point only"))
+    plan_source.add_argument(
+        "--plan", default=None,
+        help=("path to the frozen plan this run belongs to, e.g. "
+              "configs/paper/v4_five_dataset_plan.json"))
     arguments = parser.parse_args(argv)
 
     if arguments.preflight:
@@ -595,13 +639,17 @@ def main(argv=None):
                           ("dataset", "model", "parameter_count", "best_epoch")},
                          indent=1))
         return 0
-    plan = load_plan() if arguments.development_plan else None
+    # Whichever plan was named, loaded and verified once, here. `--plan` and
+    # `--development_plan` are mutually exclusive, so there is no order in which
+    # one can silently win over the other.
+    under_a_plan = bool(arguments.development_plan or arguments.plan)
+    plan = load_plan_authority(arguments.plan) if under_a_plan else None
     report = train(arguments.config, arguments.output_root, device=arguments.device,
                    seed=arguments.seed, resume=arguments.resume,
                    max_train_batches=arguments.max_train_batches,
                    max_validation_batches=arguments.max_validation_batches,
                    plan=plan, restart_incomplete=arguments.restart_incomplete,
-                   collect_development_table=arguments.development_plan)
+                   collect_development_table=under_a_plan)
     print(json.dumps({key: value for key, value in report.items()
                       if key not in ("history", "development_validation_table")},
                      indent=1))

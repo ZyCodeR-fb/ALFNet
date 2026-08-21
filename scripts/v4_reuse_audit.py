@@ -44,12 +44,20 @@ CODE_ALLOWANCES = [
     {
         "path": "scripts/train_v4.py",
         "from_sha256": "8d96cf4da260",
-        "to_sha256": "b3c9a84b470a",
-        "reason": ("the hardcoded 'eight v4 configs' message became the "
-                   "generator's count. The change is inside a guard that raises "
-                   "before any session, model or optimiser is built; no training "
-                   "computation, objective, schedule or checkpoint rule moved."),
-        "reviewed_diff": "3 lines, one `if` and its message",
+        "to_sha256": "572e6126e794",
+        "reason": ("two reviewed changes, both before any session, model or "
+                   "optimiser exists. (a) the hardcoded 'eight v4 configs' "
+                   "message became the generator's count. (b) plan resolution "
+                   "became explicit: `--plan` was added alongside the historical "
+                   "`--development_plan`, `resolve_plan` uses the plan its "
+                   "caller already verified instead of defaulting to the "
+                   "development one, and the config-hash check moved next to the "
+                   "membership check it belongs with. No loss, optimiser, "
+                   "schedule, scaler, batch, learning rate or checkpoint rule "
+                   "moved; a grep of the diff for those terms hits only a "
+                   "docstring."),
+        "reviewed_diff": ("argument parsing and plan membership only; the "
+                          "training loop is untouched"),
     },
     {
         "path": "experiments/v4_validation_collector.py",

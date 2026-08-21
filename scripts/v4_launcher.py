@@ -242,11 +242,21 @@ def current_epoch(run):
         return None
 
 
-def build_command(run, output_root, extra=()):
+def build_command(run, output_root, plan_path=None, extra=()):
+    """The trainer command, carrying the plan this launcher actually loaded.
+
+    Hardcoding `--development_plan` here is what made the five-dataset launcher
+    enumerate METR-LA correctly and then hand each run to the two-dataset plan,
+    which rejected the config before CUDA. The plan path travels with the
+    command, so the queue, the failure record and any resume all name the same
+    plan.
+    """
     command = [sys.executable, str(ROOT / "scripts/train_v4.py"),
                "--config", str(run.config.relative_to(ROOT)),
                "--device", run.device, "--seed", str(run.seed),
-               "--output_root", str(output_root), "--development_plan"]
+               "--output_root", str(output_root)]
+    command += (["--plan", str(Path(plan_path))] if plan_path
+                else ["--development_plan"])
     command.extend(extra)
     return command
 
@@ -301,9 +311,10 @@ def write_failure(run, returncode, command):
 class Launcher:
 
     def __init__(self, output_root, plan, slots, retry_failed=False,
-                 restart_unresumable=False):
+                 restart_unresumable=False, plan_path=None):
         self.output_root = Path(output_root)
         self.plan = plan
+        self.plan_path = plan_path
         self.slots = list(slots)
         self.retry_failed = retry_failed
         self.restart_unresumable = restart_unresumable
@@ -399,7 +410,7 @@ class Launcher:
             self.say(f"   {run.name} is locked by another launcher; skipping")
             return False
         run.device = device
-        command = build_command(run, self.output_root, extra)
+        command = build_command(run, self.output_root, self.plan_path, extra)
         run.log.parent.mkdir(parents=True, exist_ok=True)
         handle = run.log.open("a", buffering=1)
         handle.write(f"\n=== {time.strftime('%Y-%m-%dT%H:%M:%S%z')} "
@@ -446,7 +457,8 @@ class Launcher:
                          f"resumable after {minutes:.1f} min -- rerun the same "
                          "command to continue")
             else:
-                write_failure(run, code, build_command(run, self.output_root))
+                write_failure(run, code, build_command(run, self.output_root,
+                                                       self.plan_path))
                 self.failed.append(run)
                 self.say(f"FAIL  {run.name:26s} exit={code} after {minutes:.1f} min "
                          f"-- see {run.log}")
@@ -573,14 +585,15 @@ def main(argv=None):
     if arguments.dry_run:
         return dry_run(output_root, plan, slots)
     if arguments.status:
-        launcher = Launcher(output_root, plan, slots)
+        launcher = Launcher(output_root, plan, slots, plan_path=arguments.plan)
         for row in launcher.status_rows():
             print(f"{row['state']:12s} phase{row['phase']} {row['run']:26s} "
                   f"epoch={row['epoch']}  {row['log']}")
         return 0
     return Launcher(output_root, plan, slots,
                     retry_failed=arguments.retry_failed,
-                    restart_unresumable=arguments.restart_unresumable).execute()
+                    restart_unresumable=arguments.restart_unresumable,
+                    plan_path=arguments.plan).execute()
 
 
 if __name__ == "__main__":
