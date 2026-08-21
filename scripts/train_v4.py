@@ -427,9 +427,10 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
           collect_development_table=False, restart_incomplete=False):
     """One v4 run. Returns the run report; writes nothing when `save` is false."""
     config_path = Path(config_path).resolve()
-    if config_path not in {path.resolve() for path in v4_config_paths()}:
+    known = {path.resolve() for path in v4_config_paths()}
+    if config_path not in known:
         raise RunnerRefused(
-            f"{config_path} is not one of the eight v4 configs in "
+            f"{config_path} is not one of the {len(known)} v4 configs in "
             f"{CONFIG_DIR.relative_to(ROOT)}")
     config_sha = _sha256_file(config_path)
     plan_entry = None

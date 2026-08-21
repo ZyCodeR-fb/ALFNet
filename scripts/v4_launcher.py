@@ -57,16 +57,29 @@ from scripts.train_v4 import (  # noqa: E402
     run_artefacts,
 )
 
-DATASETS = ("PEMS08", "PEMSBAY")
-MODELS = ("ALFNet", "MoGERNN")
+# Retained only as the development plan's historical shape; nothing enumerates
+# runs from these. `plan_runs` reads the plan.
 HEALTH_SEED = 32
-LATER_SEEDS = (42, 52)
 LOCK_NAME = ".lock"
 POLL_SECONDS = 5
 
 
 class LauncherRefused(RuntimeError):
     """The queue will not start, or will not continue, in this state."""
+
+
+def resolve_plan_and_root(plan_path=None):
+    """Load a frozen plan and the output root it names. Never guesses either."""
+    if plan_path is None:
+        plan = assert_plan_still_holds(load_plan())
+        return plan, ROOT / "outputs_v4/development_base" / plan["plan_sha256"]
+    from scripts import build_v4_five_dataset_plan as five
+
+    plan = five.assert_plan_still_holds(five.load_plan(plan_path))
+    root = plan.get("output_root")
+    if not root:
+        raise LauncherRefused(f"{plan_path} declares no output_root")
+    return plan, ROOT / root / plan["plan_sha256"]
 
 
 @dataclass
@@ -119,26 +132,51 @@ def assign_slots(jobs, devices, allow_sharing=False):
     return [unique[index % len(unique)] for index in range(jobs)]
 
 
+def _make_run(output_root, dataset, model, seed, phase):
+    config = ROOT / f"configs/paper/v4/{dataset}_{model}.yaml"
+    digest = sha256_file(config)[:16]
+    return Run(dataset=dataset, model=model, seed=int(seed), phase=int(phase),
+               config=config,
+               directory=Path(output_root) / dataset / model / digest / f"seed{seed}",
+               log=Path(output_root) / "logs" / f"{dataset}_{model}_seed{seed}.log")
+
+
 def plan_runs(output_root, plan):
-    """The twelve runs, in phase order. Exactly one entry per (d, m, seed)."""
+    """The run list, in phase order, taken from the plan.
+
+    A plan that enumerates its own runs is used verbatim; the two-dataset
+    development plan predates that field and is derived from its datasets,
+    models and seeds. Either way the enumeration comes from the plan, never
+    from a constant in this file -- a launcher with `DATASETS = (...)` baked in
+    silently ignores a dataset the plan added, which is exactly the class of
+    error that makes a five-dataset experiment quietly a four-dataset one.
+    """
     runs, seen = [], set()
-    for phase, seeds in ((0, (HEALTH_SEED,)), (1, LATER_SEEDS)):
-        for seed in seeds:
-            for dataset in DATASETS:
-                for model in MODELS:
-                    key = (dataset, model, seed)
-                    if key in seen:
-                        raise LauncherRefused(f"duplicate run {key}")
-                    seen.add(key)
-                    config = ROOT / f"configs/paper/v4/{dataset}_{model}.yaml"
-                    digest = sha256_file(config)[:16]
-                    runs.append(Run(
-                        dataset=dataset, model=model, seed=seed, phase=phase,
-                        config=config,
-                        directory=Path(output_root) / dataset / model / digest
-                        / f"seed{seed}",
-                        log=Path(output_root) / "logs"
-                        / f"{dataset}_{model}_seed{seed}.log"))
+    if plan.get("runs"):
+        for entry in plan["runs"]:
+            key = (entry["dataset"], entry["model"], int(entry["seed"]))
+            if key in seen:
+                raise LauncherRefused(f"duplicate run {key}")
+            seen.add(key)
+            runs.append(_make_run(output_root, *key, entry.get(
+                "phase", 0 if int(entry["seed"]) == HEALTH_SEED else 1)))
+    else:
+        datasets = tuple(plan["datasets"])
+        models = tuple(plan["models"])
+        seeds = tuple(int(seed) for seed in plan["seeds"])
+        health = seeds[0]
+        for phase, phase_seeds in ((0, (health,)),
+                                   (1, tuple(s for s in seeds if s != health))):
+            for seed in phase_seeds:
+                for dataset in datasets:
+                    for model in models:
+                        key = (dataset, model, seed)
+                        if key in seen:
+                            raise LauncherRefused(f"duplicate run {key}")
+                        seen.add(key)
+                        runs.append(_make_run(output_root, dataset, model, seed,
+                                              phase))
+    runs.sort(key=lambda run: (run.phase, run.seed, run.dataset, run.model))
     registered = {entry["path"] for entry in plan["configs"].values()}
     for run in runs:
         relative = str(run.config.relative_to(ROOT))
@@ -448,7 +486,10 @@ def dry_run(output_root, plan, slots):
             print(f"  [{index + 1:2d}] {run.name:26s} gpu={slots[index % len(slots)]:8s} "
                   f"state={run_state(run):12s} {run.directory}")
     names = [run.name for run in runs]
-    assert len(names) == len(set(names)) == 12, names
+    if len(names) != len(set(names)) or len(names) != plan["trial_budget"]:
+        raise LauncherRefused(
+            f"{len(names)} runs, {len(set(names))} unique, plan registered "
+            f"{plan['trial_budget']}")
     print(f"\n{len(names)} unique runs, no duplicates")
     return 0
 
@@ -464,10 +505,11 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--status", action="store_true",
                         help="print the queue state and exit")
+    parser.add_argument("--plan", default=None,
+                        help="a frozen plan JSON; defaults to the development plan")
     arguments = parser.parse_args(argv)
 
-    plan = assert_plan_still_holds(load_plan())
-    output_root = ROOT / "outputs_v4/development_base" / plan["plan_sha256"]
+    plan, output_root = resolve_plan_and_root(arguments.plan)
     slots = assign_slots(arguments.jobs, parse_devices(arguments.devices),
                          arguments.allow_gpu_sharing)
     if arguments.dry_run:

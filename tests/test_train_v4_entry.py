@@ -23,7 +23,7 @@ from scripts import train_v4
 ROOT = Path(__file__).resolve().parents[1]
 CONFIGS = {"ALFNet": ROOT / "configs/paper/v4/PEMS08_ALFNet.yaml",
            "MoGERNN": ROOT / "configs/paper/v4/PEMS08_MoGERNN.yaml"}
-DATASETS = ("PEMS03", "PEMS04", "PEMS08", "PEMSBAY")
+DATASETS = ("PEMS03", "PEMS04", "PEMS08", "METRLA", "PEMSBAY")
 
 
 def _preflight(config, output_root=None, **kwargs):
@@ -67,9 +67,20 @@ def test_ordinary_arguments_are_accepted():
          "--output_root", "./o", "--preflight"])
 
 
-def test_only_the_eight_v4_configs_are_accepted():
-    assert len(train_v4.v4_config_paths()) == 8
-    with pytest.raises(RunnerRefused, match="not one of the eight v4 configs"):
+def test_only_the_generated_v4_configs_are_accepted():
+    """Two per dataset, and the count follows the generator rather than a literal.
+
+    A hardcoded 8 here is the same class of defect as a launcher with
+    `DATASETS = (...)` baked in: it silently ignores a dataset that was added.
+    """
+    from scripts.build_v4_configs import DATASETS
+
+    paths = train_v4.v4_config_paths()
+    assert len(paths) == 2 * len(DATASETS) == 10
+    assert {path.name for path in paths} == {
+        f"{dataset}_{model}.yaml" for dataset in DATASETS
+        for model in ("ALFNet", "MoGERNN")}
+    with pytest.raises(RunnerRefused, match="is not one of the .* v4 configs"):
         _preflight(ROOT / "configs/ALFNet/gs_p8.yaml", save=False)
 
 
