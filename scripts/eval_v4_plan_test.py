@@ -174,7 +174,8 @@ def _test_table(session, context, checkpoint, epoch):
                                  pred_len=session.args.pred_len,
                                  slide_step=session.args.slide_step,
                                  freq=session.args.freq,
-                                 seed=session.run_seed, epoch=0, scaler=scaler,
+                                 seed=session.seed_contract["derived"]["train_schedule"],
+                                 epoch=0, scaler=scaler,
                                  validation_seed=session.args.lcbt_validation_seed)
     if dataset.scaler is not scaler:
         raise TestAccessRefused("the test dataset refitted a scaler")
@@ -187,7 +188,9 @@ def _test_table(session, context, checkpoint, epoch):
     session.model.eval()
     for batch in loader:
         batch = to_device(batch, session.device)
-        forced = build_v4_teacher_forcing_mask(batch, session.run_seed, epoch, False)
+        forced = build_v4_teacher_forcing_mask(
+            batch, session.seed_contract["derived"]["teacher_forcing"],
+            epoch, False)
         if bool(forced.any()):
             raise TestAccessRefused("teacher forcing is not zero on test")
         prediction, _ = unpack_model_output(

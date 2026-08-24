@@ -16,7 +16,8 @@ different worker count, or two models that consume different amounts of RNG --
 and ALFNet and MoGERNN consume very different amounts. Under v4 the decision is
 a pure function of stable facts about the *sample*, hashed:
 
-    u = sha256(policy | run_seed | epoch | origin | horizon_step) -> [0, 1)
+    teacher_seed = H(run_seed, "teacher_forcing")
+    u = sha256(policy | teacher_seed | epoch | origin | horizon_step) -> [0, 1)
     force = u < ratio,  ratio = clip(1 - epoch / 40, 0, 1)
 
 `origin` is the window's start index in the payload, so the same sample gets the
@@ -48,6 +49,10 @@ TRAIN_END_RATIO = 0.60
 VAL_END_RATIO = 0.80
 TEST_START_RATIO = 0.80
 SCALER_END_RATIO = 0.60
+# Every valid five-minute origin is used.  This is a protocol constant, not a
+# model hyper-parameter: a value of 12 would retain only one hourly offset and
+# discard roughly 92% of otherwise valid windows.
+PRIMARY_SLIDE_STEP = 1
 SCENARIO_RATIOS = {
     "lcbt_zero_history_ratio": 0.25,
     "lcbt_steady_ratio": 0.25,
@@ -55,7 +60,7 @@ SCENARIO_RATIOS = {
     "lcbt_fault_ratio": 0.25,
 }
 
-TEACHER_FORCING_POLICY = "lcbt_v4_tf_v1"
+TEACHER_FORCING_POLICY = "lcbt_v4_tf_v2_named_subseed"
 TEACHER_FORCING_DECAY_EPOCHS = 40.0
 
 # The training shuffle, keyed on (run seed, epoch) rather than carried in a
@@ -64,11 +69,11 @@ TEACHER_FORCING_DECAY_EPOCHS = 40.0
 # drawn in this process -- which makes a resumed run see a different epoch 7
 # from an uninterrupted one, silently. Hashing the epoch instead makes the
 # permutation a function of the run, not of the process that produced it.
-SHUFFLE_POLICY = "lcbt_v4_shuffle_v1"
+SHUFFLE_POLICY = "lcbt_v4_shuffle_v2_named_subseed"
 
 
-def shuffle_seed(run_seed, epoch):
-    key = f"{SHUFFLE_POLICY}|{int(run_seed)}|{int(epoch)}"
+def shuffle_seed(shuffle_seed_base, epoch):
+    key = f"{SHUFFLE_POLICY}|{int(shuffle_seed_base)}|{int(epoch)}"
     digest = hashlib.sha256(key.encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big") % (2 ** 63)
 
@@ -83,6 +88,12 @@ def assert_v4_strategy(configs, who):
             f"{declared!r}; v3 and v4 differ on the split, the node scope and "
             "the training computation graph, and their numbers may not share a "
             "table")
+    stride = getattr(configs, "slide_step", None)
+    if stride is None or int(stride) != PRIMARY_SLIDE_STEP:
+        raise ValueError(
+            f"{who}: active v4 requires slide_step={PRIMARY_SLIDE_STEP}, "
+            f"config declares {stride!r}; stride changes the evaluated origin "
+            "population and is not selected per model")
 
 
 def teacher_forcing_ratio(epoch):
@@ -90,14 +101,14 @@ def teacher_forcing_ratio(epoch):
     return float(min(max(1.0 - float(epoch) / TEACHER_FORCING_DECAY_EPOCHS, 0.0), 1.0))
 
 
-def _uniform01(policy, run_seed, epoch, origin, horizon_step):
+def _uniform01(policy, teacher_seed, epoch, origin, horizon_step):
     """A stable [0, 1) draw from the sample's identity. No process state."""
-    key = f"{policy}|{int(run_seed)}|{int(epoch)}|{int(origin)}|{int(horizon_step)}"
+    key = f"{policy}|{int(teacher_seed)}|{int(epoch)}|{int(origin)}|{int(horizon_step)}"
     digest = hashlib.sha256(key.encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big") / float(1 << 64)
 
 
-def build_v4_teacher_forcing_mask(batch, run_seed, epoch, training):
+def build_v4_teacher_forcing_mask(batch, teacher_seed, epoch, training):
     """`[B, H, N]` bool: where a decoder may read the real future.
 
     Validation and test get an all-false mask, always. There is no argument that
@@ -122,18 +133,18 @@ def build_v4_teacher_forcing_mask(batch, run_seed, epoch, training):
     for index, origin in enumerate(origins):
         for step in range(horizon):
             draws[index, step] = _uniform01(
-                TEACHER_FORCING_POLICY, run_seed, epoch, origin, step)
+                TEACHER_FORCING_POLICY, teacher_seed, epoch, origin, step)
     # `<` and not `<=`: at ratio 0 nothing is forced even though a draw can be
     # exactly 0.0, and at ratio 1 everything is, since draws live in [0, 1).
     decided = torch.from_numpy(draws < ratio).to(available.device)
     return decided.unsqueeze(-1).expand_as(available) & available
 
 
-def teacher_forcing_metadata(run_seed, epoch, training):
+def teacher_forcing_metadata(teacher_seed, epoch, training):
     """What a manifest or checkpoint has to record to reproduce the schedule."""
     return {
         "teacher_forcing_policy": TEACHER_FORCING_POLICY,
-        "run_seed": int(run_seed),
+        "teacher_forcing_seed": int(teacher_seed),
         "epoch": int(epoch),
         "ratio": teacher_forcing_ratio(epoch) if training else 0.0,
         "training": bool(training),

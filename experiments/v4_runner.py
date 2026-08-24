@@ -28,12 +28,18 @@ from data_provider.v4_lifecycle_loader import V4LifecycleDataset
 from experiments.v4_losses import element_loss, role_balanced_loss
 from lib.lcbt_v4 import (
     SHUFFLE_POLICY,
-    STRATEGY,
+    assert_v4_strategy,
     build_v4_teacher_forcing_mask,
     shuffle_seed,
     teacher_forcing_metadata,
 )
 from lib.runtime_context import build_runtime_context
+from lib.v4_seeds import (
+    EpochWorkerSeeder,
+    derive_seed,
+    seed_bundle,
+    seed_process,
+)
 from utils.model_output import sum_aux_losses, unpack_model_output
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,6 +116,9 @@ class V4Session:
     train_loader: DataLoader
     validation_loader: DataLoader
     run_seed: int
+    seed_contract: dict
+    train_worker_seeder: object = field(default=None, repr=False)
+    validation_worker_seeder: object = field(default=None, repr=False)
     device: str = "cpu"
     scaler: dict = field(default=None)
 
@@ -120,6 +129,11 @@ class V4Session:
         sampler = getattr(self.train_loader, "sampler", None)
         if hasattr(sampler, "set_epoch"):
             sampler.set_epoch(epoch)
+        if self.train_worker_seeder is not None:
+            self.train_worker_seeder.set_epoch(epoch)
+        # Validation remains one frozen design, including worker state.
+        if self.validation_worker_seeder is not None:
+            self.validation_worker_seeder.set_epoch(0)
         return self
 
 
@@ -138,7 +152,7 @@ def resolve_payload_path(dataset, args):
 
 
 def build_v4_session(config_path, device="cpu", run_seed=None, batch_size=None,
-                     num_workers=None, payload_path=None, init_seed=1234):
+                     num_workers=None, payload_path=None, init_seed=None):
     """Build one v4 session from a v4 config. Data first, model second.
 
     Everything but the four run-level knobs comes from the config. The strategy
@@ -147,11 +161,10 @@ def build_v4_session(config_path, device="cpu", run_seed=None, batch_size=None,
     the run it produced disagreed, and only the code knew.
     """
     args = load_args_from_config(str(config_path), [])
-    if args.lifecycle_training_strategy != STRATEGY:
-        raise RunnerRefused(
-            f"{config_path} declares lifecycle_training_strategy="
-            f"{args.lifecycle_training_strategy!r}; the v4 runner takes "
-            f"{STRATEGY!r} configs only and does not rewrite one")
+    try:
+        assert_v4_strategy(args, "v4 runner")
+    except ValueError as error:
+        raise RunnerRefused(str(error)) from error
     model_name = str(args.model)
     if model_name not in MODEL_ENTRY_POINTS:
         raise RunnerRefused(
@@ -161,7 +174,18 @@ def build_v4_session(config_path, device="cpu", run_seed=None, batch_size=None,
     args.device = device
     run_seed = int(args.seed if run_seed is None else run_seed)
     args.seed = run_seed
+    seeds = seed_bundle(run_seed)
+    if init_seed is not None and int(init_seed) != seeds["derived"]["model_init"]:
+        raise RunnerRefused(
+            "v4 model initialisation is derived from run_seed; an independent "
+            "init_seed would make the advertised run seed incomplete")
+    args.model_init_seed = int(seeds["derived"]["model_init"])
     validation_seed = int(args.lcbt_validation_seed)
+    if validation_seed != int(seeds["evaluation_design_seed"]):
+        raise RunnerRefused(
+            f"v4 evaluation design seed is frozen at "
+            f"{seeds['evaluation_design_seed']}, config declares "
+            f"{validation_seed}")
     batch_size = int(args.batch_size if batch_size is None else batch_size)
     num_workers = int(args.num_workers if num_workers is None else num_workers)
     payload_path = payload_path or resolve_payload_path(dataset, args)
@@ -185,11 +209,13 @@ def build_v4_session(config_path, device="cpu", run_seed=None, batch_size=None,
     train_dataset = V4LifecycleDataset(
         train_context, payload_path, input_len=args.input_len,
         pred_len=args.pred_len, slide_step=args.slide_step, freq=args.freq,
-        seed=run_seed, epoch=0, validation_seed=validation_seed)
+        seed=seeds["derived"]["train_schedule"], epoch=0,
+        validation_seed=validation_seed)
     validation_dataset = V4LifecycleDataset(
         validation_context, payload_path, input_len=args.input_len,
         pred_len=args.pred_len, slide_step=args.slide_step, freq=args.freq,
-        seed=run_seed, epoch=0, validation_seed=validation_seed,
+        seed=seeds["derived"]["train_schedule"], epoch=0,
+        validation_seed=validation_seed,
         scaler=train_dataset.scaler)
     if validation_dataset.scaler is not train_dataset.scaler:
         raise RunnerRefused("validation did not receive the training scaler")
@@ -197,24 +223,41 @@ def build_v4_session(config_path, device="cpu", run_seed=None, batch_size=None,
     # 6. Loaders. The training order is drawn from (run seed, epoch) so it
     #    survives a resume; the teacher-forcing policy is keyed on the sample's
     #    origin and cannot see the order at all.
-    train_sampler = EpochSeededSampler(train_dataset, run_seed)
+    train_sampler = EpochSeededSampler(train_dataset, seeds["derived"]["shuffle"])
+    train_worker_seeder = EpochWorkerSeeder(run_seed, "train")
+    validation_worker_seeder = EpochWorkerSeeder(run_seed, "validation")
+    train_generator = torch.Generator().manual_seed(
+        derive_seed(run_seed, "dataloader_worker", index=0))
+    validation_generator = torch.Generator().manual_seed(
+        derive_seed(run_seed, "dataloader_worker", index=1))
     train_loader = DataLoader(train_dataset, batch_size=batch_size,
                               sampler=train_sampler, num_workers=num_workers,
-                              drop_last=False)
+                              drop_last=False,
+                              worker_init_fn=train_worker_seeder,
+                              generator=train_generator)
     validation_loader = DataLoader(validation_dataset, batch_size=batch_size,
-                                   shuffle=False, num_workers=num_workers)
+                                   shuffle=False, num_workers=num_workers,
+                                   worker_init_fn=validation_worker_seeder,
+                                   generator=validation_generator)
 
     # 7-8. One static model, built on the train context's assets, which the
     #      validation context shares. It then accepts either per batch.
     module = __import__(MODEL_ENTRY_POINTS[model_name], fromlist=["Model"])
-    torch.manual_seed(init_seed)
+    seed_process(seeds["derived"]["model_init"])
     model = module.Model.from_runtime_context(args, train_context).to(device)
+    # Training-time randomness (dropout and any future stochastic operation)
+    # starts from its own stream, independent of how many numbers construction
+    # consumed.
+    seed_process(seeds["derived"]["training_runtime"])
     return V4Session(
         dataset=dataset, model_name=model_name, args=args, model=model,
         train_context=train_context, validation_context=validation_context,
         train_dataset=train_dataset, validation_dataset=validation_dataset,
         train_loader=train_loader, validation_loader=validation_loader,
-        run_seed=run_seed, device=str(device), scaler=train_dataset.scaler)
+        run_seed=run_seed, seed_contract=seeds,
+        train_worker_seeder=train_worker_seeder,
+        validation_worker_seeder=validation_worker_seeder,
+        device=str(device), scaler=train_dataset.scaler)
 
 
 # --- the loss ------------------------------------------------------------------
@@ -324,7 +367,8 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
         if max_batches is not None and index >= max_batches:
             break
         batch = to_device(batch, session.device)
-        teacher = build_v4_teacher_forcing_mask(batch, session.run_seed, epoch, True)
+        teacher_seed = session.seed_contract["derived"]["teacher_forcing"]
+        teacher = build_v4_teacher_forcing_mask(batch, teacher_seed, epoch, True)
         totals["forced_positions"] += int(teacher.sum())
         totals["available_positions"] += int(batch["decoder_available_mask"].sum())
         optimizer.zero_grad(set_to_none=True)
@@ -351,7 +395,9 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
     report.update({"batches": totals["batches"], "skipped": totals["skipped"],
                    "forced_positions": totals["forced_positions"],
                    "available_positions": totals["available_positions"]})
-    report.update(teacher_forcing_metadata(session.run_seed, epoch, True))
+    report.update(teacher_forcing_metadata(
+        session.seed_contract["derived"]["teacher_forcing"], epoch, True))
+    report["run_seed"] = session.run_seed
     return report
 
 
@@ -379,7 +425,9 @@ def validate(session, epoch=0, max_batches=None, loss_name="mse",
         if max_batches is not None and index >= max_batches:
             break
         batch = to_device(batch, session.device)
-        teacher = build_v4_teacher_forcing_mask(batch, session.run_seed, epoch, False)
+        teacher = build_v4_teacher_forcing_mask(
+            batch, session.seed_contract["derived"]["teacher_forcing"],
+            epoch, False)
         if bool(teacher.any()):
             raise RunnerRefused("validation produced a non-empty teacher mask")
         prediction, _ = unpack_model_output(

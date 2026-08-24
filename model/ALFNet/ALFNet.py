@@ -179,12 +179,17 @@ def _expert_module_name(model_name):
     return model_name
 
 
-def _build_expert(spec, device, expert_name, runtime_context=None):
+def _build_expert(spec, device, expert_name, runtime_context=None,
+                  run_seed=None, model_init_seed=None):
     config_path = spec["config_path"]
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"ALFNet {expert_name} config not found: {config_path}")
     expert_args = load_args_from_config(config_path, overrides={"device": device})
     expert_args.model = spec["model"]
+    if run_seed is not None:
+        expert_args.seed = int(run_seed)
+    if model_init_seed is not None:
+        expert_args.model_init_seed = int(model_init_seed)
     module = importlib.import_module(f"model.{_expert_module_name(spec['model'])}")
     if runtime_context is None:
         raise ValueError("ALFNet requires the active v4 RuntimeDataContext")
@@ -227,10 +232,14 @@ class Model(nn.Module):
         if set(experts) != {"graph", "patch"}:
             raise ValueError("ALFNet requires exactly graph and patch experts")
         self.graph_expert, self.graph_args = _build_expert(
-            experts["graph"], configs.device, "graph", runtime_context
+            experts["graph"], configs.device, "graph", runtime_context,
+            run_seed=configs.seed,
+            model_init_seed=getattr(configs, "model_init_seed", configs.seed),
         )
         self.patch_expert, self.patch_args = _build_expert(
-            experts["patch"], configs.device, "patch", runtime_context
+            experts["patch"], configs.device, "patch", runtime_context,
+            run_seed=configs.seed,
+            model_init_seed=getattr(configs, "model_init_seed", configs.seed),
         )
         self.graph_input_dim = int(self.graph_args.enc_in)
         # The patch expert declares how much lifecycle context it consumes, so
@@ -361,7 +370,9 @@ class Model(nn.Module):
             # under the same seed, so a candidate and its base were no longer
             # comparable at step 0. The offsets are fixed per module, so turning
             # one switch on never perturbs another.
-            with _isolated_rng(configs.seed, _RNG_OFFSET_OBSERVED_NLINEAR):
+            with _isolated_rng(
+                    getattr(configs, "model_init_seed", configs.seed),
+                    _RNG_OFFSET_OBSERVED_NLINEAR):
                 self.observed_nlinear = ObservedNLinear(
                     self.input_len, self.pred_len, self.output_dim
                 )
@@ -371,7 +382,9 @@ class Model(nn.Module):
         if self.evidence_router_enabled:
             # C must run without D: a light projection turns the existing patch
             # condition features into Y_patch.
-            with _isolated_rng(configs.seed, _RNG_OFFSET_EVIDENCE_ROUTER):
+            with _isolated_rng(
+                    getattr(configs, "model_init_seed", configs.seed),
+                    _RNG_OFFSET_EVIDENCE_ROUTER):
                 self._build_evidence_modules(
                     gate_hidden_dim, recipe
                 )
@@ -397,7 +410,9 @@ class Model(nn.Module):
         self.freeze_anchor = bool(recipe.get("freeze_anchor", False))
         self.temporal_residual = None
         if self.temporal_residual_enabled:
-            with _isolated_rng(configs.seed, _RNG_OFFSET_PROTECTED_RESIDUAL):
+            with _isolated_rng(
+                    getattr(configs, "model_init_seed", configs.seed),
+                    _RNG_OFFSET_PROTECTED_RESIDUAL):
                 self.temporal_residual = ProtectedTemporalResidual(
                     int(configs.input_len),
                     int(configs.pred_len),

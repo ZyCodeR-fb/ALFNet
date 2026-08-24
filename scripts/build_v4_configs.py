@@ -104,7 +104,7 @@ def _dataset_block(fact, indent=""):
 {indent}look_back: 0
 {indent}# v4 enumerates every valid 5-minute origin; this is the effective
 {indent}# stride used by the completed five-dataset experiment.
-{indent}slide_step: 1
+{indent}slide_step: {lcbt_v4.PRIMARY_SLIDE_STEP}
 {indent}input_features: {fact['target']}
 {indent}target_features: {fact['target']}
 {indent}freq: min

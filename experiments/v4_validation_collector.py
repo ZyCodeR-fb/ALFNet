@@ -251,7 +251,9 @@ def collect_validation_table(session, epoch=0, max_batches=None):
         if max_batches is not None and index >= max_batches:
             break
         batch = to_device(batch, session.device)
-        teacher = build_v4_teacher_forcing_mask(batch, session.run_seed, epoch, False)
+        teacher = build_v4_teacher_forcing_mask(
+            batch, session.seed_contract["derived"]["teacher_forcing"],
+            epoch, False)
         if bool(teacher.any()):
             raise CollectorRefused("validation produced a non-empty teacher mask")
         prediction, _ = unpack_model_output(

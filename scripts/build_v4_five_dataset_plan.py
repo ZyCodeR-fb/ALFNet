@@ -36,12 +36,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from lib.lcbt_v4 import (  # noqa: E402
+    PRIMARY_SLIDE_STEP,
     SHUFFLE_POLICY,
     SPLIT_FRACTIONS,
     STRATEGY,
     TEACHER_FORCING_POLICY,
 )
 from lib.runtime_context import build_runtime_context  # noqa: E402
+from lib.v4_seeds import SEED_POLICY, seed_bundle  # noqa: E402
 from scripts.v4_utils import sha256_file  # noqa: E402
 
 PLAN_PATH = ROOT / "configs/paper/v4_five_dataset_plan.json"
@@ -53,7 +55,7 @@ SEEDS = (32, 42, 52)
 
 # Every source whose change would make a run a different experiment.
 CODE_SOURCES = (
-    "args.py", "lib/lcbt_v4.py", "lib/runtime_context.py",
+    "args.py", "lib/lcbt_v4.py", "lib/runtime_context.py", "lib/v4_seeds.py",
     "lib/v4_batch.py", "lib/v4_payload.py", "lib/teacher_forcing.py",
     "lib/context_binding.py", "lib/graph_native_layout.py",
     "data_provider/calendar_strata.py", "data_provider/lifecycle_roles.py",
@@ -199,7 +201,7 @@ def build_plan(include_commit=True):
         "data": data,
         "training": {
             "input_len": 12, "pred_len": 12,
-            "slide_step": 1,
+            "slide_step": PRIMARY_SLIDE_STEP,
             "split_fractions": list(SPLIT_FRACTIONS),
             "scenario_ratios": {name: 0.25 for name in
                                 ("zero_history", "steady", "join", "fault")},
@@ -209,6 +211,8 @@ def build_plan(include_commit=True):
             "tie_rule": "keep_earlier_epoch",
             "teacher_forcing_policy": TEACHER_FORCING_POLICY,
             "shuffle_policy": SHUFFLE_POLICY,
+            "seed_policy": SEED_POLICY,
+            "seed_contracts": {str(seed): seed_bundle(seed) for seed in SEEDS},
             "allowed_overrides": ["seed", "device", "output_root"],
             "resume": "epoch boundary from last.pt; COMPLETE is never overwritten",
             "failure_semantics": ("a crash writes FAILED.json and blocks the "
@@ -216,9 +220,11 @@ def build_plan(include_commit=True):
                                   "RESUMABLE"),
             "hyper_parameters_frozen": True,
             "changes_from_completed_946d": (
-                "semantic no-op config repair: YAML slide_step now records the "
-                "effective stride 1; runtime consumes it; duplicate validation "
-                "forward and derived WorstGroup reporting were removed"),
+                "slide_step=1 is now a fail-closed protocol constant; run_seed "
+                "controls named sub-streams including model initialisation, the "
+                "frozen direct node split, schedule, shuffle, teacher forcing "
+                "and workers; duplicate "
+                "validation forward and derived WorstGroup reporting were removed"),
         },
         "output_root": "outputs_v4/reproduction",
         "endpoints": {

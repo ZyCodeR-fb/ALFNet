@@ -80,7 +80,8 @@ def evaluate(run, plan, split="validation", device="cuda:0"):
         context, ROOT / session.args.data_path,
         input_len=session.args.input_len, pred_len=session.args.pred_len,
         slide_step=session.args.slide_step, freq=session.args.freq,
-        seed=run.seed, validation_seed=session.args.lcbt_validation_seed,
+        seed=session.seed_contract["derived"]["train_schedule"],
+        validation_seed=session.args.lcbt_validation_seed,
         scaler=scaler)
     loader = DataLoader(PairedDataset(dataset),
                         batch_size=session.train_loader.batch_size,
@@ -102,6 +103,7 @@ def evaluate(run, plan, split="validation", device="cuda:0"):
     report.update({
         "run": run.name, "dataset": run.dataset, "model": run.model,
         "seed": run.seed, "plan_sha256": plan["plan_sha256"],
+        "seed_contract": session.seed_contract,
         "checkpoint_sha256": sha256_file(checkpoint_path),
         "best_epoch": int(checkpoint["best_epoch"]),
         "selection_use": "forbidden",

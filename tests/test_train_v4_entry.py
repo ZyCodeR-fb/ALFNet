@@ -130,7 +130,8 @@ def test_a_saved_run_carries_its_whole_provenance(tmp_path, who):
                   "optimizer_state", "config_path", "config_sha256",
                   "payload_sha256", "unseen_sha256", "manifest_sha256",
                   "static_asset_hash", "train_exposure_hash",
-                  "validation_exposure_hash", "scaler", "split_fractions",
+                  "validation_exposure_hash", "seed_contract", "scaler",
+                  "split_fractions",
                   "teacher_forcing_policy", "loss", "objective_terms",
                   "validation_report", "best_validation_life_avg_mae",
                   "early_stopping_metric", "tie_rule", "parameter_count"):
@@ -139,7 +140,7 @@ def test_a_saved_run_carries_its_whole_provenance(tmp_path, who):
     assert checkpoint["payload_sha256"] == manifest["payload"]["sha256"]
     assert checkpoint["unseen_sha256"] == manifest["unseen"]["sha256"]
     assert checkpoint["split_fractions"] == [0.60, 0.20, 0.20]
-    assert checkpoint["teacher_forcing_policy"] == "lcbt_v4_tf_v1"
+    assert checkpoint["teacher_forcing_policy"] == "lcbt_v4_tf_v2_named_subseed"
     assert checkpoint["early_stopping_metric"] == "validation life_avg_mae"
     assert checkpoint["tie_rule"] == "keep_earlier_epoch"
     assert checkpoint["train_exposure_hash"] != checkpoint["validation_exposure_hash"]
@@ -210,7 +211,7 @@ def test_selection_reads_validation_life_avg_and_nothing_else(tmp_path,
         return {"base": next(train_calls), "optimize": 0.0, "role_mix": None,
                 "aux": None, "batches": 1, "skipped": 0, "ratio": 1.0,
                 "forced_positions": 0, "available_positions": 0,
-                "teacher_forcing_policy": "lcbt_v4_tf_v1", "run_seed": 32,
+                "teacher_forcing_policy": "lcbt_v4_tf_v2_named_subseed", "run_seed": 32,
                 "epoch": epoch, "training": True}
 
     monkeypatch.setattr(train_v4, "validate", fake_validate)

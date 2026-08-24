@@ -46,7 +46,7 @@ TOLERANCE = 1e-6
 IDENTITY_FIELDS = ("dataset", "model", "model_variant", "seed", "config_sha256",
                    "payload_sha256", "unseen_sha256", "manifest_sha256",
                    "static_asset_hash", "train_exposure_hash",
-                   "validation_exposure_hash")
+                   "validation_exposure_hash", "seed_contract")
 
 
 class PlanEvalRefused(ValueError):
@@ -80,6 +80,7 @@ def expected_identity(run, session, plan):
         "static_asset_hash": session.train_context.static_asset_hash(),
         "train_exposure_hash": session.train_context.exposure_hash(),
         "validation_exposure_hash": session.validation_context.exposure_hash(),
+        "seed_contract": session.seed_contract,
     }
 
 

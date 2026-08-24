@@ -32,6 +32,7 @@ import torch
 
 from lib.graph_native_layout import LAYOUT_VERSION, resolve_layout
 from lib.v4_payload import load_v4_payload
+from lib.v4_seeds import derive_seed
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_DIR = ROOT / "configs/paper/v4_data_manifests"
@@ -69,7 +70,7 @@ def split_unseen_pool(unseen, seed=32):
     read of the test split.
     """
     pool = np.asarray(sorted(set(int(node) for node in unseen)), dtype=np.int64)
-    order = np.random.default_rng(seed).permutation(pool.size)
+    order = np.random.default_rng(int(seed)).permutation(pool.size)
     cut = pool.size // 2
     validation = np.sort(pool[order[:cut]])
     test = np.sort(pool[order[cut:]])
@@ -313,7 +314,11 @@ def build_runtime_context(dataset, phase, seed=32, manifest_dir=None):
     parts = layout["parts"]
 
     unseen = np.load(ROOT / manifest["unseen"]["path"])
-    validation_unseen, test_unseen = split_unseen_pool(unseen, seed=seed)
+    # ``seed`` is the public run seed.  Its node-split sub-stream intentionally
+    # preserves the already-exposed direct mapping (32->32, 42->42, 52->52);
+    # redrawing test node identities after seeing results is forbidden.
+    split_seed = derive_seed(seed, "node_split")
+    validation_unseen, test_unseen = split_unseen_pool(unseen, seed=split_seed)
     known = np.setdiff1d(node_ids, np.asarray(unseen, dtype=np.int64))
     scope = {"train": known,
              "validation": np.union1d(known, validation_unseen),

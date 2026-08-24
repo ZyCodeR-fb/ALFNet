@@ -64,8 +64,8 @@ from lib.lcbt_v4 import (  # noqa: E402
 )
 from scripts.v4_utils import sha256_file as _plan_sha256_file  # noqa: E402
 
-CHECKPOINT_SCHEMA = 1
-RUN_STATE_SCHEMA = 1
+CHECKPOINT_SCHEMA = 2
+RUN_STATE_SCHEMA = 2
 RUN_STATE_NAME = "last.pt"
 TIE_RULE = "keep_earlier_epoch"
 COMPLETE_MARKER = "COMPLETE"
@@ -75,7 +75,7 @@ LAUNCHER_VERSION = "v2_parallel_tmux"
 LAUNCHER_BOOKKEEPING = frozenset({".lock", FAILED_MARKER})
 # Code whose change would make a resumed run a different experiment.
 CODE_SOURCES = ("experiments/v4_runner.py", "experiments/v4_validation_collector.py",
-                "scripts/train_v4.py", "lib/lcbt_v4.py")
+                "scripts/train_v4.py", "lib/lcbt_v4.py", "lib/v4_seeds.py")
 # Arguments whose presence means the caller is asking this entry point for
 # something it does not do. Refused by name so the refusal survives a rename of
 # whatever module would otherwise have implemented them.
@@ -132,6 +132,7 @@ def checkpoint_payload(session, config_path, config_sha, epoch, best_epoch,
         "model": session.model_name,
         "model_variant": getattr(session.args, "model_variant", None),
         "seed": session.run_seed,
+        "seed_contract": session.seed_contract,
         "epoch": epoch,
         "best_epoch": best_epoch,
         "model_state": session.model.state_dict(),
@@ -236,6 +237,7 @@ def run_state_payload(session, config_path, config_sha, epoch, best, wait,
         "model": session.model_name,
         "model_variant": getattr(session.args, "model_variant", None),
         "seed": session.run_seed,
+        "seed_contract": session.seed_contract,
         "completed_epoch": int(epoch),
         "next_epoch": int(epoch) + 1,
         "best_epoch": best["epoch"],
@@ -271,7 +273,8 @@ RESUME_IDENTITY_FIELDS = (
     "protocol", "dataset", "model", "seed", "config_sha256", "plan_sha256",
     "payload_sha256", "unseen_sha256", "manifest_sha256", "static_asset_hash",
     "train_exposure_hash", "validation_exposure_hash", "split_fractions",
-    "teacher_forcing_policy", "shuffle_policy", "loss", "parameter_count",
+    "teacher_forcing_policy", "shuffle_policy", "seed_contract", "loss",
+    "parameter_count",
 )
 
 
@@ -561,6 +564,7 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
     report = {
         "dataset": session.dataset, "model": session.model_name,
         "seed": session.run_seed, "config": str(config_path.relative_to(ROOT)),
+        "seed_contract": session.seed_contract,
         "config_sha256": config_sha, "run_directory": str(run_directory),
         "epochs_run": len(history), "best_epoch": best["epoch"],
         "best_validation_life_avg_mae": best["life_avg_mae"],

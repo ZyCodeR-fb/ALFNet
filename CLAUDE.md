@@ -52,16 +52,19 @@ payload, target, graph, layout and node identities by hash.
 - Time split: 60% train, 20% validation, 20% test.
 - Input and horizon: 12 steps each (one hour at five-minute cadence).
 - Sliding-window stride: **1**. YAML is authoritative and the loader consumes
-  `slide_step`; it is not hard-coded.
+  `slide_step`; the active v4 entry point also fails closed unless it equals
+  the frozen protocol constant 1.
 - Full static node axis and topology are visible in every phase.
 - Dynamic signal scope: train K; validation K union V; test K union T.
 - K, V and T are disjoint where required; the scaler fits train time on K only.
 - Four equally sampled scenarios: zero-history, steady, join and fault.
 - Join/Fault evidence length k is balanced over 1..12.
-- Run seed (32/42/52) controls the node split, schedule, shuffle and teacher
-  forcing. Validation schedule seed is fixed at 12026.
-- Model parameter initialization is fixed at seed 1234 for controlled model
-  comparison. `lcbt_protocol_seed` does not exist: it was unused in v4.
+- Run seed (32/42/52) controls the frozen direct node split and independently
+  hashed sub-streams for model initialisation, training schedule, shuffle,
+  teacher forcing, DataLoader workers and training-time dropout/router RNG.
+  The complete named seed contract is stored in the plan and checkpoints.
+  Validation schedule seed is fixed at 12026 so checkpoint comparisons use one
+  stable evaluation design. `lcbt_protocol_seed` does not exist.
 - Teacher forcing is sample-level, training-only and mask constrained; it is
   exactly zero on validation/test.
 - Checkpoint selection is validation LifeAvg MAE with strict `<`; ties keep the
@@ -80,6 +83,9 @@ JSON remains untouched for auditability.
 
 MAPE uses `abs(error) / clamp(abs(target), 1e-6)`. It is unstable at low flow;
 interpret it beside MAE/RMSE and the target-scale distribution, never alone.
+The optional low-flow diagnostic additionally reports fixed target bins,
+WMAPE, signed bias, overprediction rate and horizon breakdown. These fields do
+not enter early stopping or the 33-cell headline table; sMAPE is not reported.
 
 ## Model architecture
 
