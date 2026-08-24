@@ -15,10 +15,10 @@ The completed experiment is immutable evidence:
 - seeds: 32, 42, 52
 - archived table shape: 36 cells, including the derived WorstGroup row
 
-Those files are not rewritten. The active reproduction plan is
-`configs/paper/v4_five_dataset_plan.json`. It is a clean 30-run plan; old
-checkpoints are never relabelled as runs of the new plan. The reproduction
-removes WorstGroup from runtime reporting, so its table has 33 cells.
+Those files are not rewritten. The active plan is
+`configs/paper/v4_five_dataset_plan.json`: a clean 30-run final LF_SUP/SUP
+experiment. Old checkpoints are never relabelled as runs of the new plan. The
+active table removes WorstGroup and therefore has 33 cells.
 
 ## Data and prediction targets
 
@@ -54,7 +54,9 @@ payload, target, graph, layout and node identities by hash.
 - Sliding-window stride: **1**. YAML is authoritative and the loader consumes
   `slide_step`; the active v4 entry point also fails closed unless it equals
   the frozen protocol constant 1.
-- Full static node axis and topology are visible in every phase.
+- This is **topology-known, signal-inductive lifecycle forecasting**, not a
+  strict topology-unseen claim. The full static node axis and topology are
+  visible to both models in every phase.
 - Dynamic signal scope: train K; validation K union V; test K union T.
 - K, V and T are disjoint where required; the scaler fits train time on K only.
 - Four equally sampled scenarios: zero-history, steady, join and fault.
@@ -94,11 +96,13 @@ masks, time marks and adjacency. A shared GRIN-style imputer produces one
 `filled` tensor before ALFNet branches; ALFGraph and ALFTemporal both consume
 that same tensor.
 
-ALFNet adds only method-specific lifecycle context (role one-hot, state age and
+ALFNet adds only its declared method-specific lifecycle context (role one-hot, state age and
 observation mask). ALFGraph applies lifecycle-conditioned graph propagation.
 ALFTemporal applies the resolved static spatial layout plus the one-token
 12-step temporal encoder. Their features are fused by FiLM and passed through
-the graph refiner. The frozen parameter count is 1,037,529.
+the graph refiner. With the resolved support inventory, ALFNet has 1,037,529
+parameters on the three flow graphs and 1,112,937 on the two directed speed
+graphs; MoGERNN has 226,270 on every dataset.
 
 Archived plan 946d exposed five labels but fewer numerically distinct
 propagation operators:
@@ -108,21 +112,25 @@ propagation operators:
 - binary/symmetric PEMS03/PEMS04/PEMS08: 3 effective supports because weighted
   mean equals forward diffusion and forward equals backward.
 
-The bounded SUP candidate replaces that inventory with ordered candidates
+The final SUP design replaces that inventory with ordered candidates
 `I, binary-mean, forward-1, backward-1, forward-2, backward-2`, then removes
 numerically duplicated matrices per dataset before constructing the router.
 The existing soft lifecycle router and its load-balance auxiliary remain; no
-second evidence router exists. SUP is a model change and requires retraining.
+second evidence router exists.
 
-The bounded LF candidate is flow-only. It adds a small safe-relative term in
+LF is flow-only. It adds a small safe-relative term in
 original units, role-balanced exactly like the existing ALFNet objective, with
 a denominator floor fitted as the positive-target q10 on train-time known
-nodes only. Weight zero is bit-identical to BASE. Generated PEMS08 development
-configs live under `configs/paper/v4_candidates/PEMS08/`; they must not access
-the test split or overwrite plan 946d.
+nodes only. The bounded PEMS08/seed-32 validation study selected LF_SUP without
+opening test (candidate plan SHA
+`8f8a48a949f442a2ee7fd8df3f0502077219325f75272648c4d085e7abe8b0cd`).
+Therefore PEMS03/04/08 use SUP plus LF weight 0.05; METR-LA/PEMS-BAY use SUP
+with LF weight 0 because the objective is not defined for speed. Retired
+candidate YAMLs and launchers are absent; their outputs and Git history remain
+the audit evidence.
 
-MoGERNN is the sole headline baseline and has 226,270 parameters. It receives
-the common inputs but not ALFNet's lifecycle context.
+MoGERNN is the sole headline baseline. It receives the common inputs but not
+ALFNet's method-specific lifecycle context.
 
 ## Mechanism diagnostics
 
@@ -142,13 +150,14 @@ Activate `ReaCH` first.
 python scripts/build_v4_configs.py --check
 python scripts/build_v4_five_dataset_plan.py --check
 bash scripts/run_v4_five_dataset.sh --dry-run
-JOBS=1 DEVICES=0 bash scripts/tmux_v4_five_dataset.sh start
+ALLOW_GPU_SHARING=1 JOBS=5 DEVICES=0,0,0,0,0 \
+  bash scripts/tmux_v4_five_dataset.sh start
 bash scripts/tmux_v4_five_dataset.sh status
 ```
 
 After all 30 runs are complete, validation audit/evaluation/collection and the
 explicit test evaluator are the only supported reporting path. Do not call
-legacy `main.py`, `run_final_18.sh`, candidate-data builders or v3 PLES tools.
+legacy v3/candidate launchers or archived evaluation tools.
 
 ## Editing rules
 

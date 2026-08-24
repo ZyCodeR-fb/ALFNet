@@ -82,7 +82,8 @@ def test_a_dropped_context_is_an_error_not_a_fallback(monkeypatch):
     original = alfnet._build_expert
     monkeypatch.setattr(
         alfnet, "_build_expert",
-        lambda spec, device, name, runtime_context=None: original(spec, device, name, None))
+        lambda spec, device, name, runtime_context=None, **kwargs:
+            original(spec, device, name, None, **kwargs))
     with pytest.raises(ValueError, match="RuntimeDataContext"):
         _build("PEMS08")
 
@@ -168,4 +169,4 @@ def test_construction_is_deterministic_and_the_parameter_set_is_unchanged(
     for name in a:
         assert a[name].shape == b[name].shape and torch.equal(a[name], b[name]), name
     # The count CLAUDE.md records for ALFNet after the strict-inductive fix.
-    assert sum(p.numel() for p in _build("PEMSBAY").parameters()) == 1_037_529
+    assert sum(p.numel() for p in _build("PEMSBAY").parameters()) == 1_112_937

@@ -20,7 +20,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-SESSION="${SESSION:-v4-dev}"
+SESSION="${SESSION:-v4-final-lf-sup}"
 PYTHON_BIN="${PYTHON:-python}"
 ACTION="${1:-status}"
 shift || true

@@ -10,7 +10,7 @@ What this refuses, by name rather than by omission:
 
 * any `test`, `evaluate` or `confirmation` argument -- the confirmation splits
   are read once, by the evaluator, and never during training or selection;
-* a config that is not one of the eight v4 development-base configs;
+* a config that is not one of the ten final v4 configs;
 * an override of anything but seed, device, output root and the preflight caps.
   Split, target, layout and capacity are properties of the experiment, not of
   the command line that happened to launch it;
@@ -80,16 +80,8 @@ CODE_SOURCES = ("experiments/v4_runner.py", "experiments/v4_validation_collector
 # something it does not do. Refused by name so the refusal survives a rename of
 # whatever module would otherwise have implemented them.
 FORBIDDEN_ARGUMENT_SUBSTRINGS = ("test", "evaluate", "confirmation")
-CANDIDATE_CONFIG_DIR = ROOT / "configs/paper/v4_candidates/PEMS08"
-
-
 def v4_config_paths():
     return sorted(path for path in CONFIG_DIR.glob("*.yaml"))
-
-
-def v4_candidate_config_paths():
-    """Generated bounded-development configs; nested expert YAMLs excluded."""
-    return sorted(path for path in CANDIDATE_CONFIG_DIR.glob("*.yaml"))
 
 
 def _sha256_file(path):
@@ -339,7 +331,7 @@ def archive_incomplete(run_directory):
     if not run_directory.exists():
         return None
     stamp = time.strftime("%Y%m%dT%H%M%S")
-    target = (ROOT / "outputs_v4/development_aborted"
+    target = (ROOT / "outputs_v4/aborted_runs"
               / f"restart-{run_directory.name}-{stamp}")
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(run_directory), str(target))
@@ -433,20 +425,10 @@ def load_plan_authority(plan_path=None):
     if not plan_path.exists():
         raise RunnerRefused(f"{plan_path} does not exist")
     active = (ROOT / "configs/paper/v4_five_dataset_plan.json").resolve()
-    candidate = (ROOT / "configs/paper/v4_lf_sup_candidate_plan.json").resolve()
-    if plan_path.resolve() == candidate:
-        from scripts import build_v4_lf_sup_plan as candidate_builder
-        plan = candidate_builder.assert_plan_still_holds(
-            candidate_builder.load_plan(plan_path))
-        if plan.get("kind") != "v4_lf_sup_candidate_plan" \
-                or plan.get("status") != "development_validation_only" \
-                or not plan.get("selection", {}).get("test_forbidden"):
-            raise RunnerRefused("candidate plan is not validation-only")
-        return plan
     if plan_path.resolve() != active:
         raise RunnerRefused(
-            f"{plan_path} is neither active plan {active} nor candidate plan "
-            f"{candidate}; archived plans are evidence, not authorities")
+            f"{plan_path} is not the active plan {active}; archived plans are "
+            "evidence, not authorities")
     kind = json.loads(plan_path.read_text("utf-8")).get("kind")
     if kind != "v4_five_dataset_plan":
         raise RunnerRefused(f"{plan_path} declares unsupported kind={kind!r}")
@@ -486,16 +468,11 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
     """One v4 run. Returns the run report; writes nothing when `save` is false."""
     config_path = Path(config_path).resolve()
     canonical = {path.resolve() for path in v4_config_paths()}
-    candidates = {path.resolve() for path in v4_candidate_config_paths()}
-    known = canonical | candidates
+    known = canonical
     if config_path not in known:
         raise RunnerRefused(
             f"{config_path} is not one of the {len(known)} v4 configs in "
             f"{CONFIG_DIR.relative_to(ROOT)}")
-    if config_path in candidates and save and plan is None:
-        raise RunnerRefused(
-            "a development candidate may preflight without a plan but may not "
-            "write a run until a candidate plan registers its config hash")
     config_sha = _sha256_file(config_path)
     plan_entry = None
     if plan is not None or collect_development_table:

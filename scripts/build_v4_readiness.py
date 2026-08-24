@@ -62,6 +62,9 @@ def attestation_hash(record):
 def build(plan=None, preflight=None):
     plan = plan or five.load_plan()
     five.assert_plan_still_holds(plan)
+    if preflight is not None:
+        from scripts.run_v4_cpu_preflight import validate
+        validate(preflight, plan)
     data = {}
     for dataset, entry in plan["data"].items():
         data[dataset] = {

@@ -276,7 +276,8 @@ def test_the_loss_uses_exactly_the_loaders_mask(who):
         losses = compute_losses(
             session.model.forward_v4(dict(batch, target=target),
                                      session.train_context, teacher_forcing_mask=None),
-            batch if target is batch["target"] else dict(batch, target=target))
+            batch if target is batch["target"] else dict(batch, target=target),
+            scaler=session.scaler)
         losses["optimize"].backward()
         return (float(losses["base"]),
                 {name: (None if p.grad is None else p.grad.detach().clone())

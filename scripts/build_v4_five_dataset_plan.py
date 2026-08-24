@@ -1,13 +1,14 @@
 #!/usr/bin/env python
-"""Build the canonical five-dataset, three-seed v4 reproduction plan.
+"""Build the final five-dataset, three-seed LF_SUP/SUP plan.
 
 Written before the runs and hashed, so the datasets, the seeds, the endpoint,
 the tie rule and the reporting obligations cannot be chosen once numbers exist.
 The completed 946d experiment remains byte-for-byte under
 ``configs/paper/archive/v4_result_946d`` and ``outputs_v4/five_dataset/946d...``.
-This generator describes a clean from-scratch reproduction after configuration
-authority was fixed (notably ``slide_step: 1``) and never aliases old checkpoints
-into a new plan identity.
+This generator describes the clean from-scratch experiment after the bounded
+PEMS08/seed-32 validation study selected LF_SUP. Flow targets use LF+SUP; speed
+targets use SUP because the LF denominator is defined only for flow. Old
+checkpoints are never aliased into this plan identity.
 
 Two things this plan is explicit about, because both are easy to overstate:
 
@@ -71,9 +72,8 @@ CODE_SOURCES = (
     "model/comparison_model/MoGERNN/layers/gnn.py",
     "model/comparison_model/family_utils.py",
     "layers/DCRNNCell.py", "layers/gnn.py",
-    "layers/lifecycle_moge.py", "layers/protected_residual.py",
-    "layers/source_grin.py", "layers/source_timefilter.py",
-    "layers/source_tokenlearner.py", "layers/source_tsmixer.py",
+    "layers/lifecycle_moge.py",
+    "layers/source_grin.py",
     "layers/structural_node_encoder.py", "scripts/train_v4.py",
     "scripts/v4_launcher.py", "scripts/build_v4_readiness.py",
 )
@@ -180,7 +180,7 @@ def build_plan(include_commit=True):
                              "execution_action": "train"})
 
     plan = {
-        "schema_version": 3,
+        "schema_version": 4,
         "kind": "v4_five_dataset_plan",
         "execution": {
             "total_result_slots": len(runs),
@@ -189,8 +189,8 @@ def build_plan(include_commit=True):
             "gpu_jobs_to_execute": len(runs),
             "reuse_forbidden": True,
         },
-        "status": "canonical_reproduction",
-        "purpose": "five-dataset three-seed v4 reproduction",
+        "status": "final_lf_sup_reproduction",
+        "purpose": "five-dataset three-seed final LF_SUP/SUP experiment",
         "protocol": STRATEGY,
         "datasets": list(DATASETS),
         "models": list(MODELS),
@@ -219,6 +219,30 @@ def build_plan(include_commit=True):
                                   "phase; a user stop keeps last.pt and stays "
                                   "RESUMABLE"),
             "hyper_parameters_frozen": True,
+            "selected_model_policy": {
+                "ALFNet_flow": {
+                    "datasets": ["PEMS03", "PEMS04", "PEMS08"],
+                    "support_set": "distinct_multiscale_v1",
+                    "forecast_safe_relative_weight": 0.05,
+                    "name": "LF_SUP",
+                },
+                "ALFNet_speed": {
+                    "datasets": ["METRLA", "PEMSBAY"],
+                    "support_set": "distinct_multiscale_v1",
+                    "forecast_safe_relative_weight": 0.0,
+                    "name": "SUP",
+                    "reason": "the selected LF objective is flow-only",
+                },
+                "MoGERNN": "unchanged registered baseline under the common protocol",
+                "selection_dataset": "PEMS08",
+                "selection_seed": 32,
+                "selection_split": "validation",
+                "test_used_for_selection": False,
+                "selected_checkpoint_sha256": (
+                    "76d3d268d247e1602b6f46a1c4d37c46281df0f103f3f158321cd51e5a813a9b"),
+                "candidate_plan_sha256": (
+                    "8f8a48a949f442a2ee7fd8df3f0502077219325f75272648c4d085e7abe8b0cd"),
+            },
             "changes_from_completed_946d": (
                 "slide_step=1 is now a fail-closed protocol constant; run_seed "
                 "controls named sub-streams including model initialisation, the "
@@ -226,7 +250,21 @@ def build_plan(include_commit=True):
                 "and workers; duplicate "
                 "validation forward and derived WorstGroup reporting were removed"),
         },
-        "output_root": "outputs_v4/reproduction",
+        "output_root": "outputs_v4/final_lf_sup",
+        "problem_definition": {
+            "name": "topology-known signal-inductive lifecycle forecasting",
+            "static_topology_known": True,
+            "full_node_axis_known": True,
+            "dynamic_signal_scope": {
+                "train": "K", "validation": "K union V", "test": "K union T"},
+            "node_pools": "K, V and T are disjoint as required by phase",
+            "scaler_scope": "training time and K nodes only",
+            "fairness": (
+                "both models receive the same base_visible_input, availability "
+                "masks, time marks and adjacency; ALFNet alone consumes its "
+                "declared method-specific lifecycle role/age/mask context"),
+            "strict_node_unseen_claim": False,
+        },
         "endpoints": {
             "validation": {
                 "cells": 33,

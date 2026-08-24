@@ -237,7 +237,8 @@ def test_the_cpu_preflight_passes_for_every_combination(preflight, dataset, mode
     train_report, validation_report = epoch["train"], epoch["validation"]
 
     assert report["dataset"] == dataset and report["model"] == model
-    assert report["parameter_count"] == (1_037_529 if model == "ALFNet"
+    alfnet_count = 1_112_937 if dataset in ("METRLA", "PEMSBAY") else 1_037_529
+    assert report["parameter_count"] == (alfnet_count if model == "ALFNet"
                                          else 226_270)
     assert train_report["batches"] == 1 and train_report["skipped"] == 0
     assert validation_report["batches"] == 1

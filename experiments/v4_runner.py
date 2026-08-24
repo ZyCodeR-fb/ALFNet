@@ -519,5 +519,5 @@ def validate(session, epoch=0, max_batches=None, loss_name="mse",
 
 
 def early_stopping_metric(validation_report):
-    """The only candidate this runner offers. It never reads a test split."""
+    """The only checkpoint score this runner offers; it never reads test."""
     return validation_report["life_avg_mae"]

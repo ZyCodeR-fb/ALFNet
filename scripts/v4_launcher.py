@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""The v4 development-base launcher: parallel, GPU-bound, resumable, honest.
+"""The final v4 launcher: parallel, GPU-bound, resumable, and fail-closed.
 
 Written in Python rather than shell because the four things that actually
 matter here are all things shell does badly: an atomic per-run lock, a bounded
 worker pool with a phase barrier, forwarding a signal to a process *group* so no
 orphaned trainer survives the launcher, and a failure that propagates instead of
-being swallowed by `|| true`. `run_v4_development_base.sh` is the documented
-entry point and execs this.
+  being swallowed by `|| true`. `run_v4_five_dataset.sh` is the documented
+  entry point and execs this.
 
 Four properties, each of which the first launcher lacked:
 
@@ -14,7 +14,7 @@ Four properties, each of which the first launcher lacked:
   `DEVICES`. More jobs than devices is refused unless `ALLOW_GPU_SHARING=1` says
   so deliberately, because two trainers sharing a card is a memory decision
   somebody should make on purpose.
-* **a health barrier.** The four seed-32 runs go first and must all reach
+* **a health barrier.** The ten seed-32 runs go first and must all reach
   COMPLETE before any seed-42/52 run starts. A problem specific to one dataset
   or model surfaces after roughly one run each rather than after every PEMS08
   seed has finished. Their *numbers* decide nothing -- the queue does not branch

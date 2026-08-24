@@ -302,7 +302,7 @@ def test_a_real_v4_eval_forward_on_each_dataset(dataset, phase):
 def test_the_parameter_set_is_exactly_what_it_was(p8_context):
     """forward_v4 is wiring. It may not add, rename or resize a parameter."""
     model = _build_model("PEMSBAY", build_runtime_context("PEMSBAY", "train"))
-    assert sum(p.numel() for p in model.parameters()) == 1_037_529
+    assert sum(p.numel() for p in model.parameters()) == 1_112_937
     p8 = _build_model("PEMS08", p8_context)
     assert not [name for name, _ in p8.named_parameters() if "v4" in name]
     # The adjacency cache is a plain attribute, so nothing about it can be

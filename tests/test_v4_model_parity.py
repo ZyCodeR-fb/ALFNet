@@ -514,7 +514,7 @@ def test_neither_parameter_set_changed(context):
     alfnet = _alfnet("PEMS08", context)
     assert sum(p.numel() for p in alfnet.parameters()) == 1_037_529
     assert sum(p.numel() for p in _alfnet(
-        "PEMSBAY", build_runtime_context("PEMSBAY", "train")).parameters()) == 1_037_529
+        "PEMSBAY", build_runtime_context("PEMSBAY", "train")).parameters()) == 1_112_937
 
     for dataset in sorted(MOGERNN_CONFIGS):
         bound = _mogernn(dataset, build_runtime_context(dataset, "train"))

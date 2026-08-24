@@ -50,7 +50,13 @@ def safe_relative_elements(prediction, target, scaler, floor):
     if not torch.isfinite(torch.tensor(floor)) or floor <= 0:
         raise ValueError("safe-relative floor must be finite and positive")
     mean, std = float(scaler["mean"]), float(scaler["std"])
+    # Invalid targets are excluded by the runner's validity mask, but leaving
+    # NaN/Inf in this element-wise graph can still poison backward through an
+    # unselected element (zero upstream gradient multiplied by a NaN local
+    # derivative).  Sanitising only invalid values preserves every evaluated
+    # cell while making the mask a real optimisation boundary.
+    safe_target = torch.nan_to_num(target, nan=0.0, posinf=0.0, neginf=0.0)
     predicted = prediction * std + mean
-    actual = target * std + mean
+    actual = safe_target * std + mean
     denominator = actual.abs().clamp_min(floor)
     return (predicted - actual).abs() / denominator

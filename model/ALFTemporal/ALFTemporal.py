@@ -89,8 +89,13 @@ class Model(nn.Module):
         # "features": the branch stops decoding its own forecast and emits one
         # condition vector per node instead. "prediction" is the original
         # two-expert behaviour, kept for the fallback variant.
-        self.emit = str(model_cfg.get("emit", "prediction"))
-        self.use_timefilter = bool(model_cfg.get("use_timefilter", True))
+        self.emit = str(model_cfg.get("emit", "features"))
+        if self.emit != "features":
+            raise ValueError("the final ALFTemporal branch emits features only")
+        retired = [name for name in ("use_timefilter", "mixer", "spatial_tokenizer")
+                   if name in model_cfg and model_cfg[name] not in (False, "crossformer", "kdtree")]
+        if retired:
+            raise ValueError(f"retired ALFTemporal options are not supported: {retired}")
         self.expert_input_dim = int(configs.raw_enc_in) + (
             LIFECYCLE_CHANNELS if self.lifecycle_input else 0
         )
@@ -123,9 +128,8 @@ class Model(nn.Module):
                 f"spa_patchsize={model_cfg['spa_patchsize']} cannot hold this "
                 f"dataset's KD-tree partition: {self.full_num_nodes} nodes split "
                 f"into {spa_patchnum} parts of up to {largest}. Set "
-                f"spa_patchsize >= {largest} (the convention in these configs is "
-                f"largest + 1, so that every part is padded with at least one "
-                f"neighbour, as METR-LA's 7 -> 8)."
+                f"spa_patchsize >= {largest} (the final configs use the exact "
+                f"largest resolved part; only smaller parts are padded)."
             )
 
         tem_patchsize = int(model_cfg["tem_patchsize"])
@@ -159,20 +163,6 @@ class Model(nn.Module):
                 model_cfg.get("crossformer_router_factor", 4)
             ),
             crossformer_dropout=float(model_cfg.get("crossformer_dropout", 0.1)),
-            timefilter_n_heads=int(model_cfg.get("timefilter_n_heads", 4)),
-            timefilter_layers=int(model_cfg.get("timefilter_layers", 1)),
-            timefilter_d_ff=int(model_cfg.get("timefilter_d_ff", 0) or 0),
-            timefilter_top_p=float(model_cfg.get("timefilter_top_p", 0.5)),
-            timefilter_alpha=float(model_cfg.get("timefilter_alpha", 0.1)),
-            timefilter_dropout=float(model_cfg.get("timefilter_dropout", 0.1)),
-            timefilter_residual_scale=float(
-                model_cfg.get("timefilter_residual_scale", 0.10)
-            ),
-            use_timefilter=self.use_timefilter,
-            emit=self.emit,
-            mixer=str(model_cfg.get("mixer", "crossformer")),
-            spatial_tokenizer=str(model_cfg.get("spatial_tokenizer", "kdtree")),
-            token_bottleneck=int(model_cfg.get("token_bottleneck", 64)),
         )
         self.feature_dim = self.backbone.feature_dim
 

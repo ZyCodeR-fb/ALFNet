@@ -5,9 +5,7 @@ from layers.DCRNNCell import DCRNNCell
 from layers.gnn import calculate_random_walk_matrix
 from layers.lifecycle_moge import (
     DISTINCT_MULTISCALE_SUPPORT_SET,
-    LEGACY_SUPPORT_SET,
     LIFECYCLE_STATE_CHANNELS,
-    SUPPORT_NAMES,
     LifecycleRoutedGraphConv,
     build_lifecycle_supports,
     distinct_support_names,
@@ -139,16 +137,12 @@ class Model(nn.Module):
 
         assert_config_agrees_with_context(configs, runtime_context, "ALFGraph")
         recipe = (getattr(configs, "model_family_cfg", {}) or {}).get("recipe", {})
-        support_set = str(recipe.get("moge_support_set", LEGACY_SUPPORT_SET))
-        if support_set == DISTINCT_MULTISCALE_SUPPORT_SET:
-            resolved_support_names = distinct_support_names(
-                runtime_context.adjacency, support_set)
-        elif support_set == LEGACY_SUPPORT_SET:
-            resolved_support_names = SUPPORT_NAMES
-        else:
-            # Let the common resolver produce the canonical error text.
-            resolved_support_names = distinct_support_names(
-                runtime_context.adjacency, support_set)
+        support_set = str(recipe.get("moge_support_set", ""))
+        if support_set != DISTINCT_MULTISCALE_SUPPORT_SET:
+            raise ValueError(
+                "the final ALFGraph requires moge_support_set="
+                f"{DISTINCT_MULTISCALE_SUPPORT_SET!r}, got {support_set!r}")
+        resolved_support_names = distinct_support_names(runtime_context.adjacency)
         model = cls(configs, resolved_support_names=resolved_support_names)
         identity = runtime_context.static_asset_identity()
         model.runtime_context = runtime_context
@@ -178,16 +172,14 @@ class Model(nn.Module):
             raise ValueError(f"unsupported ALFGraph graph_conv: {self.graph_conv}")
         self.routed = self.graph_conv == "lifecycle_moge"
         self.moge_support_set = str(
-            recipe.get("moge_support_set", LEGACY_SUPPORT_SET)
+            recipe.get("moge_support_set", "")
         )
         if (self.moge_support_set == DISTINCT_MULTISCALE_SUPPORT_SET
                 and resolved_support_names is None):
             raise ValueError(
                 "distinct_multiscale_v1 must be resolved from a "
                 "RuntimeDataContext before ALFGraph construction")
-        self.resolved_support_names = tuple(
-            resolved_support_names or SUPPORT_NAMES
-        )
+        self.resolved_support_names = tuple(resolved_support_names or ())
         self.state_dim = LIFECYCLE_STATE_CHANNELS
         if self.raw_enc_in + self.state_dim != backbone_input:
             raise ValueError(
@@ -296,7 +288,6 @@ class Model(nn.Module):
                 adjacency,
                 forward_support,
                 backward_support,
-                support_set=self.moge_support_set,
                 selected_names=self.resolved_support_names,
             )
             if supports.shape[0] != len(self.resolved_support_names):

@@ -34,6 +34,10 @@ ROOT = Path(__file__).resolve().parents[1]
 DATASETS = ("PEMS03", "PEMS04", "PEMS08", "METRLA", "PEMSBAY")
 MODELS = ("ALFNet", "MoGERNN")
 COMBINATIONS = [(dataset, model) for dataset in DATASETS for model in MODELS]
+ALFNET_PARAMETERS = {
+    "PEMS03": 1_037_529, "PEMS04": 1_037_529, "PEMS08": 1_037_529,
+    "METRLA": 1_112_937, "PEMSBAY": 1_112_937,
+}
 
 # Everything a config may differ on *between datasets*. Anything else differing
 # is retuning, and retuning per dataset is what makes a transfer result
@@ -41,6 +45,8 @@ COMBINATIONS = [(dataset, model) for dataset in DATASETS for model in MODELS]
 DATASET_SPECIFIC = {
     "dloader_name", "data_path", "unknown_nodes_path",
     "input_features", "target_features", "config",
+    # flow uses LF_SUP while speed uses SUP; the plan freezes both names.
+    "model_variant",
     # geometry frozen by the manifest, not a hyper-parameter
     "spa_patchsize",
 }
@@ -286,7 +292,7 @@ def test_no_config_needs_a_runtime_patch(dataset, model):
     assert session.args.lifecycle_training_strategy == STRATEGY
     assert session.model.static_asset_hash == \
            build_runtime_context(dataset, "train").static_asset_hash()
-    expected = 1_037_529 if model == "ALFNet" else 226_270
+    expected = ALFNET_PARAMETERS[dataset] if model == "ALFNet" else 226_270
     assert sum(p.numel() for p in session.model.parameters()) == expected
 
 

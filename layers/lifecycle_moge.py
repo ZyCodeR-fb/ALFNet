@@ -40,23 +40,11 @@ from torch import nn
 # Availability one-hot (4) + state_age (1) + observation mask (1).
 LIFECYCLE_STATE_CHANNELS = 6
 SQRT_HALF = 0.7071067811865476
-# Five labels, but NOT five distinct operators. `weighted_mean` and
-# `forward_diffusion` are the same intended formula -- A row-normalised by its
-# degree -- and differ only by float roundoff or the 1e-6 clamp on a vanishing
-# row. A symmetric adjacency additionally collapses forward and backward. So a
-# per-expert usage split reported across duplicated labels has no mechanistic
-# meaning. De-duplicating is a v4 model change; see docs/stage2_0_design.md.
-LEGACY_SUPPORT_SET = "legacy5"
 DISTINCT_MULTISCALE_SUPPORT_SET = "distinct_multiscale_v1"
-SUPPORT_NAMES = (
-    "identity", "mean", "weighted_mean", "forward_diffusion",
-    "backward_diffusion",
-)
 MULTISCALE_SUPPORT_NAMES = (
     "identity", "binary_mean", "forward_1", "backward_1",
     "forward_2", "backward_2",
 )
-SUPPORT_SETS = (LEGACY_SUPPORT_SET, DISTINCT_MULTISCALE_SUPPORT_SET)
 
 
 def cv_squared(x):
@@ -70,39 +58,26 @@ def cv_squared(x):
     return x.float().var() / (x.float().mean() ** 2 + eps)
 
 
-def _candidate_supports(adjacency, forward_support, backward_support, support_set):
-    """Return the ordered candidate dictionary for one declared support set."""
+def _candidate_supports(adjacency, forward_support, backward_support):
+    """Return the final ordered directed multi-scale support candidates."""
     weights = torch.nan_to_num(adjacency, nan=0.0)
     binary = (weights > 0).to(weights.dtype)
     identity = torch.eye(weights.shape[0], device=weights.device, dtype=weights.dtype)
     mean_support = binary / binary.sum(dim=1, keepdim=True).clamp_min(1.0)
     forward = forward_support.to(device=weights.device, dtype=weights.dtype)
     backward = backward_support.to(device=weights.device, dtype=weights.dtype)
-    if support_set == LEGACY_SUPPORT_SET:
-        weighted = weights / weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
-        return {
-            "identity": identity,
-            "mean": mean_support,
-            "weighted_mean": weighted,
-            "forward_diffusion": forward,
-            "backward_diffusion": backward,
-        }
-    if support_set == DISTINCT_MULTISCALE_SUPPORT_SET:
-        return {
-            "identity": identity,
-            "binary_mean": mean_support,
-            "forward_1": forward,
-            "backward_1": backward,
-            "forward_2": forward @ forward,
-            "backward_2": backward @ backward,
-        }
-    raise ValueError(
-        f"unsupported moge_support_set {support_set!r}; expected one of {SUPPORT_SETS}")
+    return {
+        "identity": identity,
+        "binary_mean": mean_support,
+        "forward_1": forward,
+        "backward_1": backward,
+        "forward_2": forward @ forward,
+        "backward_2": backward @ backward,
+    }
 
 
 def distinct_support_names(
     adjacency,
-    support_set=DISTINCT_MULTISCALE_SUPPORT_SET,
     atol=1e-9,
     rtol=1e-7,
 ):
@@ -118,7 +93,7 @@ def distinct_support_names(
     forward = weights / weights.sum(dim=1, keepdim=True).clamp_min(1e-12)
     transposed = weights.T
     backward = transposed / transposed.sum(dim=1, keepdim=True).clamp_min(1e-12)
-    candidates = _candidate_supports(weights, forward, backward, support_set)
+    candidates = _candidate_supports(weights, forward, backward)
     kept_names, kept = [], []
     for name, candidate in candidates.items():
         if not any(torch.allclose(candidate, prior, atol=atol, rtol=rtol)
@@ -132,22 +107,20 @@ def build_lifecycle_supports(
     adjacency,
     forward_support,
     backward_support,
-    support_set=LEGACY_SUPPORT_SET,
     selected_names=None,
 ):
-    """Stack the five propagation supports into one ``[num_experts, node, node]``.
+    """Stack the resolved supports into ``[num_experts, node, node]``.
 
     Stacking lets the whole mixture run as two batched einsums per call. The
     graph core is a 24-step recursion over 12 convolutions, so collapsing 5
     separate kernel launches per call into 1 matters more than the identity
     expert's redundant multiply by ``eye``.
     """
-    candidates = _candidate_supports(
-        adjacency, forward_support, backward_support, support_set)
+    candidates = _candidate_supports(adjacency, forward_support, backward_support)
     names = tuple(candidates) if selected_names is None else tuple(selected_names)
     unknown = [name for name in names if name not in candidates]
     if unknown:
-        raise ValueError(f"unknown support names for {support_set}: {unknown}")
+        raise ValueError(f"unknown final support names: {unknown}")
     return torch.stack([candidates[name] for name in names], dim=0)
 
 
@@ -438,7 +411,7 @@ class LifecycleRoutedGraphConv(nn.Module):
         self,
         in_channels,
         out_channels,
-        num_experts=len(SUPPORT_NAMES),
+        num_experts=len(MULTISCALE_SUPPORT_NAMES),
         state_dim=LIFECYCLE_STATE_CHANNELS,
         k=2,
         noisy_gating=True,

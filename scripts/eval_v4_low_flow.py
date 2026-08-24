@@ -2,9 +2,8 @@
 """Evaluate frozen PEMS flow checkpoints by low-flow bin.
 
 Validation is the default and the only split allowed for model selection.
-``--split test`` is retrospective diagnosis on an already-open supportive test
-set and requires an explicit acknowledgement.  The output is no-clobber and
-never changes the 33-cell headline table.
+``--split test`` is a post-freeze mechanism diagnosis and requires an explicit
+acknowledgement. The output is no-clobber and never changes the 33-cell table.
 """
 
 import argparse
@@ -35,47 +34,17 @@ from utils.model_output import unpack_model_output
 
 
 OUTPUT_NAMES = {"validation": "v4_low_flow_validation.json",
-                "test": "v4_low_flow_test_retrospective.json"}
-
-
-def _load_retrospective_archive(path):
-    """Read a self-consistent archived result plan without pretending code froze."""
-    from scripts.build_v4_five_dataset_plan import plan_hash
-
-    path = Path(path)
-    if "configs/paper/archive" not in path.resolve().as_posix():
-        raise ValueError("retrospective plan must live under configs/paper/archive")
-    plan = json.loads(path.read_text("utf-8"))
-    if plan.get("plan_sha256") != plan_hash(plan):
-        raise ValueError("archived plan hash does not verify")
-    return plan
-
-
-def _assert_retrospective_identity(checkpoint, run, session, plan):
-    """Old schema identity, before the named seed contract existed."""
-    expected = expected_identity(run, session, plan)
-    legacy_fields = tuple(key for key in expected if key != "seed_contract")
-    differing = {key: (expected[key], checkpoint.get(key)) for key in legacy_fields
-                 if checkpoint.get(key) != expected[key]}
-    if differing:
-        raise ValueError(f"{run.name} legacy checkpoint identity differs: {differing}")
-    declared_sha = run.entry.get("checkpoint_sha256")
-    actual_sha = sha256_file(run.directory / "best.pt")
-    if declared_sha and actual_sha != declared_sha:
-        raise ValueError(f"{run.name} checkpoint SHA differs from archived plan")
+                "test": "v4_low_flow_test.json"}
 
 
 @torch.no_grad()
-def evaluate(run, plan, split="validation", device="cuda:0", retrospective=False):
+def evaluate(run, plan, split="validation", device="cuda:0"):
     if run.dataset not in ("PEMS03", "PEMS04", "PEMS08"):
         raise ValueError("low-flow evaluation accepts flow datasets only")
     checkpoint_path = run.directory / "best.pt"
     checkpoint = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
     session = build_v4_session(run.config, device=device, run_seed=run.seed)
-    if retrospective:
-        _assert_retrospective_identity(checkpoint, run, session, plan)
-    else:
-        assert_identity(checkpoint, expected_identity(run, session, plan), run.name)
+    assert_identity(checkpoint, expected_identity(run, session, plan), run.name)
     session.model.load_state_dict(checkpoint["model_state"])
     session.model.to(device).eval()
 
@@ -109,14 +78,12 @@ def evaluate(run, plan, split="validation", device="cuda:0", retrospective=False
         "seed": run.seed, "run_seed_used": session.run_seed,
         "evaluation_seed_contract": session.seed_contract,
         "checkpoint_seed_contract": checkpoint.get("seed_contract"),
-        "legacy_checkpoint_fixed_init_seed": 1234 if retrospective else None,
-        "retrospective_archive": bool(retrospective),
         "plan_sha256": plan["plan_sha256"],
         "checkpoint_sha256": sha256_file(checkpoint_path),
         "best_epoch": epoch,
         "teacher_forcing_positions": 0,
         "selection_use": ("validation_diagnostic_only" if split == "validation"
-                          else "forbidden_retrospective_test"),
+                          else "post_freeze_test_diagnostic_only"),
     })
     return report
 
@@ -130,20 +97,16 @@ def main(argv=None):
                         default="validation")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--output-root", default=None)
-    parser.add_argument("--allow-retrospective-test", action="store_true")
-    parser.add_argument("--retrospective-archive", action="store_true",
-                        help="diagnose an immutable pre-seed-contract result plan")
+    parser.add_argument("--allow-test-diagnostic", action="store_true")
     args = parser.parse_args(argv)
-    if args.split == "test" and not args.allow_retrospective_test:
-        raise SystemExit("--split test requires --allow-retrospective-test")
-    plan = (_load_retrospective_archive(args.plan)
-            if args.retrospective_archive else load_plan(args.plan))
+    if args.split == "test" and not args.allow_test_diagnostic:
+        raise SystemExit("--split test requires --allow-test-diagnostic")
+    plan = load_plan(args.plan)
     runs, _ = resolve_runs(plan, args.output_root)
     matches = [run for run in runs if run.name == args.run]
     if len(matches) != 1:
         raise SystemExit(f"expected one run named {args.run!r}, got {len(matches)}")
-    report = evaluate(matches[0], plan, args.split, args.device,
-                      retrospective=args.retrospective_archive)
+    report = evaluate(matches[0], plan, args.split, args.device)
     path = matches[0].directory / OUTPUT_NAMES[args.split]
     atomic_write_json(path, report)
     print(f"wrote {path}")

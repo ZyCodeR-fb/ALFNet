@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The thirty pre-registered five-dataset runs.
+# The thirty pre-registered final LF_SUP/SUP runs.
 #
 #   JOBS=1 DEVICES=0 bash scripts/run_v4_five_dataset.sh
 #   JOBS=3 DEVICES=0,0,0 ALLOW_GPU_SHARING=1 bash scripts/run_v4_five_dataset.sh

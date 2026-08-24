@@ -2,9 +2,6 @@ import torch
 import torch.nn as nn
 from einops import rearrange, repeat
 
-from layers.source_timefilter import TimeFilterPatchMixer
-from layers.source_tokenlearner import NodeTokenizer
-from layers.source_tsmixer import TSMixerBlock
 from layers.structural_node_encoder import StructuralNodeEncoder
 
 
@@ -130,55 +127,17 @@ class WindowAttBlock(nn.Module):
         mlp_ratio=4.0,
         crossformer_router_factor=4,
         crossformer_dropout=0.1,
-        timefilter_n_heads=4,
-        timefilter_layers=1,
-        timefilter_d_ff=0,
-        timefilter_top_p=0.5,
-        timefilter_alpha=0.1,
-        timefilter_dropout=0.1,
-        timefilter_residual_scale=0.10,
-        use_timefilter=True,
-        mixer="crossformer",
-        time_steps=1,
     ):
         super().__init__()
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.num, self.size = num, size
-        self.use_timefilter = bool(use_timefilter)
-        self.mixer_kind = str(mixer)
-        if self.mixer_kind not in {"crossformer", "tsmixer"}:
-            raise ValueError(f"unsupported patch mixer: {mixer}")
-        self.tsmixer = None if self.mixer_kind != "tsmixer" else TSMixerBlock(
-            time_steps=int(time_steps),
-            num_tokens=int(num) * int(size),
-            hidden_dim=hidden_size,
-            ff_dim=int(hidden_size * mlp_ratio),
-            dropout=float(crossformer_dropout),
-        )
-        self.tsa = None if self.mixer_kind != "crossformer" else CrossformerTwoStageAttentionLayer(
+        self.tsa = CrossformerTwoStageAttentionLayer(
             seg_num=num,
             factor=int(crossformer_router_factor),
             d_model=hidden_size,
             n_heads=num_heads,
             d_ff=mlp_hidden_dim,
             dropout=float(crossformer_dropout),
-        )
-        # Measured at B=64: 30.8 ms of the block's 44.7 ms for 23.6% of its
-        # parameters, and its top-p mask is built by index assignment into a
-        # zeros tensor, so the router is trained only by the auxiliary balance
-        # loss and never by forecast error. Switchable so the ablation is one
-        # YAML key rather than a code edit.
-        self.timefilter_patch_mixer = None if not self.use_timefilter else TimeFilterPatchMixer(
-            hidden_dim=hidden_size,
-            patch_num=num,
-            patch_size=size,
-            n_heads=timefilter_n_heads,
-            n_blocks=timefilter_layers,
-            d_ff=None if int(timefilter_d_ff) <= 0 else int(timefilter_d_ff),
-            top_p=timefilter_top_p,
-            alpha=timefilter_alpha,
-            dropout=timefilter_dropout,
-            residual_scale=timefilter_residual_scale,
         )
 
     def forward(self, x):
@@ -195,27 +154,19 @@ class WindowAttBlock(nn.Module):
             self.size,
             hidden_dim,
         )
-        if self.mixer_kind == "tsmixer":
-            # [B, T, tokens, D]: time mixing runs on the real T axis.
-            x = self.tsmixer(
-                x.reshape(batch, time_steps, self.num * self.size, hidden_dim)
-            ).reshape(batch, time_steps, self.num, self.size, hidden_dim)
-        else:
-            tsa_in = x.permute(0, 1, 3, 2, 4).reshape(
-                batch * time_steps,
-                self.size,
-                self.num,
-                hidden_dim,
-            )
-            x = self.tsa(tsa_in).reshape(
-                batch,
-                time_steps,
-                self.size,
-                self.num,
-                hidden_dim,
-            ).permute(0, 1, 3, 2, 4).contiguous()
-        if self.timefilter_patch_mixer is not None:
-            x = self.timefilter_patch_mixer(x)
+        tsa_in = x.permute(0, 1, 3, 2, 4).reshape(
+            batch * time_steps,
+            self.size,
+            self.num,
+            hidden_dim,
+        )
+        x = self.tsa(tsa_in).reshape(
+            batch,
+            time_steps,
+            self.size,
+            self.num,
+            hidden_dim,
+        ).permute(0, 1, 3, 2, 4).contiguous()
         return x.reshape(batch, time_steps, token_count, hidden_dim)
 
 
@@ -247,23 +198,8 @@ class PatchSTG(nn.Module):
         input_channels=3,
         crossformer_router_factor=4,
         crossformer_dropout=0.1,
-        timefilter_n_heads=4,
-        timefilter_layers=1,
-        timefilter_d_ff=0,
-        timefilter_top_p=0.5,
-        timefilter_alpha=0.1,
-        timefilter_dropout=0.1,
-        timefilter_residual_scale=0.10,
-        use_timefilter=True,
-        emit="prediction",
-        mixer="crossformer",
-        spatial_tokenizer="kdtree",
-        token_bottleneck=64,
     ):
         super(PatchSTG, self).__init__()
-        if emit not in {"prediction", "features"}:
-            raise ValueError(f"unsupported PatchSTG emit mode: {emit}")
-        self.emit = emit
         self.node_num = node_num
         self.ori_parts_idx, self.reo_parts_idx = ori_parts_idx, reo_parts_idx
         self.reo_all_idx = reo_all_idx
@@ -295,17 +231,6 @@ class PatchSTG(nn.Module):
         self.day_in_week_emb = nn.Parameter(torch.empty(dow, dow_dims))
         nn.init.xavier_uniform_(self.day_in_week_emb)
 
-        # A: content-adaptive tokens replace the fixed coordinate blocks. The
-        # KD-tree cannot react to traffic state, to which sensors are missing,
-        # or to a lifecycle event; TokenLearner derives the groups from the
-        # features and TokenFuser maps them back to every node, which node-level
-        # forecasting needs.
-        self.spatial_tokenizer = str(spatial_tokenizer)
-        if self.spatial_tokenizer not in {"kdtree", "tokenlearner"}:
-            raise ValueError(f"unsupported spatial tokenizer: {spatial_tokenizer}")
-        self.tokenizer = None if self.spatial_tokenizer != "tokenlearner" else NodeTokenizer(
-            dims, spa_patchnum * spa_patchsize, bottleneck_dim=int(token_bottleneck)
-        )
         self.spa_encoder = nn.ModuleList([
             WindowAttBlock(
                 dims,
@@ -315,65 +240,28 @@ class PatchSTG(nn.Module):
                 mlp_ratio=1,
                 crossformer_router_factor=crossformer_router_factor,
                 crossformer_dropout=crossformer_dropout,
-                timefilter_n_heads=timefilter_n_heads,
-                timefilter_layers=timefilter_layers,
-                timefilter_d_ff=timefilter_d_ff,
-                timefilter_top_p=timefilter_top_p,
-                timefilter_alpha=timefilter_alpha,
-                timefilter_dropout=timefilter_dropout,
-                timefilter_residual_scale=timefilter_residual_scale,
-                use_timefilter=use_timefilter,
-                mixer=mixer,
-                time_steps=tem_patchnum,
             )
             for _ in range(layers)
         ])
-        # In "features" mode the branch never decodes its own forecast, so the
-        # regression head and the whole downstream fusion gate disappear.
-        self.regression_conv = None if emit == "features" else nn.Conv2d(
-            in_channels=tem_patchnum * dims,
-            out_channels=tem_patchsize * tem_patchnum,
-            kernel_size=(1, 1),
-            bias=True,
-        )
         self.feature_dim = tem_patchnum * dims
 
     def forward(self, x, te):
         embedded_x = self.embedding(x, te)
-        if self.tokenizer is not None:
-            tokens = self.tokenizer.tokenize(embedded_x)
-            for block in self.spa_encoder:
-                tokens = block(tokens)
-            # Every node gets a value back; nothing is dropped, unlike pooling
-            # methods that discard nodes outright.
-            original = self.tokenizer.fuse(tokens, embedded_x)
-        else:
-            reordered = embedded_x[:, :, self.reo_all_idx, :]
-            for block in self.spa_encoder:
-                reordered = block(reordered)
-            original = torch.zeros(
-                reordered.shape[0],
-                reordered.shape[1],
-                self.node_num,
-                reordered.shape[-1],
-                device=x.device,
-                dtype=reordered.dtype,
-            )
-            original[:, :, self.ori_parts_idx, :] = (
-                reordered[:, :, self.reo_parts_idx, :]
-            )
-        if self.emit == "features":
-            # [B, node, tem_patchnum * dims] -- one condition vector per node.
-            return original.permute(0, 2, 1, 3).reshape(
-                original.shape[0], original.shape[2], -1
-            )
-        return self.regression_conv(
-            original.transpose(2, 3).reshape(
-                original.shape[0],
-                -1,
-                original.shape[-2],
-                1,
-            )
+        reordered = embedded_x[:, :, self.reo_all_idx, :]
+        for block in self.spa_encoder:
+            reordered = block(reordered)
+        original = torch.zeros(
+            reordered.shape[0],
+            reordered.shape[1],
+            self.node_num,
+            reordered.shape[-1],
+            device=x.device,
+            dtype=reordered.dtype,
+        )
+        original[:, :, self.ori_parts_idx, :] = reordered[:, :, self.reo_parts_idx, :]
+        # [B, node, tem_patchnum * dims] -- one condition vector per node.
+        return original.permute(0, 2, 1, 3).reshape(
+            original.shape[0], original.shape[2], -1
         )
 
     def embedding(self, x, te):
