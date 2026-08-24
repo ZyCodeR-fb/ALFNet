@@ -15,7 +15,6 @@ what defines the experiment:
   * every parsed scalar argument that is not a runtime or path field;
   * the nested `model_family_cfg`, resolved -- including the expert YAMLs it
     points at, which is where `moge_router_mode` and the graph capacity live;
-  * the protocol versions;
   * the data, adjacency and coordinate fingerprints.
 
 Excluded, deliberately: `output_root`, `run_id`, `device`, `num_workers`,
@@ -36,18 +35,7 @@ RUNTIME_FIELDS = frozenset({
     "output_root", "run_id", "device", "num_workers", "exp_id",
     "best_checkpoint_path", "best_prediction_path", "best_fig_path",
     "best_metrics_path", "log_dir", "run_output_dir", "profile_dir",
-    "lcbt_manifest_root", "ples_manifest_root", "paths_are_run_scoped",
-    "wandb", "wandb_project", "wandb_entity", "verbose", "mode",
-    "pretrained_model_path", "train_init_checkpoint_path",
-    "lcbt_overwrite_manifest", "ples_overwrite_manifest",
-    "num_params", "loaded_checkpoint_metadata", "allow_legacy_checkpoint",
-    # Which *mode* a configuration is being executed in. `train` and
-    # `test_async` are two runs of the same experiment, and the evaluation pass
-    # has to be able to load the checkpoint the training pass produced -- so a
-    # flag that flips between them cannot be part of the configuration's
-    # identity. Everything that defines the model, the data and the protocol is
-    # unaffected and still enters the hash.
-    "test_for_async_lifecycle", "train_for_async_lifecycle",
+    "mode", "train_for_async_lifecycle",
     # See CONFIG_PATH_FIELD.
     "config", "legacy_canonical_config_hash",
 })
@@ -56,7 +44,7 @@ RUNTIME_FIELDS = frozenset({
 # the identity on purpose: every value *inside* that file already enters the
 # hash through `scalars`, `model_family_cfg` and `nested_expert_configs`, so the
 # path contributes nothing but the spelling. Including it meant
-# `-c configs/ALFNet/gs.yaml` and `-c A:/projects/MoGERNN/configs/ALFNet/gs.yaml`
+# Machine-specific absolute config paths must canonicalise to the same identity.
 # were different experiments, and a paper-facing config could not be given a new
 # filename without changing the identity of an unchanged model. Recorded beside
 # the hash as provenance instead.
@@ -65,8 +53,7 @@ CONFIG_PATH_FIELD = "config"
 # Anything the trainer writes back onto `args` while running. Listed by prefix
 # because the set grows; a stray runtime field silently changing the hash is the
 # failure this guards against.
-RUNTIME_PREFIXES = ("best_val", "validation_", "training_protocol_hash",
-                    "lce_protocol_hash", "ples_protocol_hash", "last_routing",
+RUNTIME_PREFIXES = ("best_val", "validation_", "last_routing",
                     "best_routing", "canonical_config", "_")
 
 
@@ -136,11 +123,7 @@ def build_canonical_config(args, data_fingerprints=None, root=".",
         "nested_expert_configs": _resolve_nested_configs(
             getattr(args, "model_family_cfg", {}) or {}, root=root
         ),
-        "protocol_versions": {
-            "lcbt": int(getattr(args, "lcbt_protocol_version", 0) or 0),
-            "lce": int(getattr(args, "lce_protocol_version", 0) or 0),
-            "ples": int(getattr(args, "ples_protocol_version", 0) or 0),
-        },
+        "protocol": str(getattr(args, "lifecycle_training_strategy", "")),
         "data_fingerprints": _jsonable(data_fingerprints or {}),
     }
 

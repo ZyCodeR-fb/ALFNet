@@ -1,1 +1,0 @@
-from .STGCN import Model

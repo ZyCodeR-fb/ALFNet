@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Aggregate a plan's test results. Never before the test audit passes.
 
-Per dataset: 36 cells, three seeds, mean and sample std with ddof=1. Across
+Per dataset: 33 cells, three seeds, mean and sample std with ddof=1. Across
 datasets: only dimensionless quantities. Three datasets are veh/5min and two are
 mph, so a pooled absolute error would carry no unit -- and PEMS03/PEMS04 are
 labelled confirmatory while the other three are supportive, which is a
@@ -85,7 +85,7 @@ def main(argv=None):
     left = summary["models"][0]
     for dataset, entry in summary["datasets"].items():
         print(f"  {dataset:8s} [{summary['exposure'][dataset]:12s}] "
-              f"{left} better in {entry['cells_better'][left]}/36")
+              f"{left} better in {entry['cells_better'][left]}/33")
     return 0
 
 

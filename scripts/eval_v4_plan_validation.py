@@ -35,7 +35,7 @@ from experiments.v4_validation_collector import (  # noqa: E402
     cell_count,
     collect_validation_table,
 )
-from scripts.build_v4_development_plan import sha256_file  # noqa: E402
+from scripts.v4_utils import sha256_file  # noqa: E402
 from scripts.train_v4 import COMPLETE_MARKER  # noqa: E402
 
 EVAL_SCHEMA = 1
@@ -153,8 +153,8 @@ def evaluate_run(run, plan, device="cuda:0", max_batches=None):
     session.model.to(device)
     table = collect_validation_table(session, epoch=int(checkpoint["best_epoch"]),
                                      max_batches=max_batches)
-    if cell_count(table) != 36:
-        raise PlanEvalRefused(f"{run.name}: {cell_count(table)} cells, expected 36")
+    if cell_count(table) != 33:
+        raise PlanEvalRefused(f"{run.name}: {cell_count(table)} cells, expected 33")
 
     stored_path = directory / "development_validation_table.json"
     differences, worst = [], 0.0

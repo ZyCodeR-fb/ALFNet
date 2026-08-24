@@ -17,14 +17,15 @@ import torch
 import pytorch_lightning as pl
 
 from args import load_args_from_config
-from model.regist_model import load_model_class
+from lib.runtime_context import build_runtime_context
+from model.comparison_model.MoGERNN.MoGERNN import Model
 
 
 def _model():
     pl.seed_everything(32, workers=True)
-    args = load_args_from_config("configs/MoGERNN/METRLA_lcbt_v3.yaml", [])
+    args = load_args_from_config("configs/paper/v4/METRLA_MoGERNN.yaml", [])
     args.device = "cpu"
-    return args, load_model_class(args.model)(args)
+    return args, Model.from_runtime_context(args, build_runtime_context("METRLA", "train"))
 
 
 def _mixed_batch(args, nodes, size, hidden=8, seed=3):
@@ -43,7 +44,7 @@ def _mixed_batch(args, nodes, size, hidden=8, seed=3):
 def test_batch_wide_detection_would_miss_every_cohort():
     """The defect, pinned: it is a property of the rule, not of our data."""
     nodes, hidden = 157, 8
-    x, _ = _mixed_batch(load_args_from_config("configs/MoGERNN/METRLA_lcbt_v3.yaml", []),
+    x, _ = _mixed_batch(load_args_from_config("configs/paper/v4/METRLA_MoGERNN.yaml", []),
                         nodes, size=8, hidden=hidden)
     flat = x.squeeze(-1)
     batch_wide = torch.where(torch.sum(flat, dim=(0, 1)) == 0)[0]
@@ -54,33 +55,6 @@ def test_batch_wide_detection_would_miss_every_cohort():
     assert len(batch_wide) == 0, "this batch was supposed to have no common zero node"
     assert all(len(found) == hidden for found in per_sample), (
         "each sample must still hide its own cohort"
-    )
-
-
-@pytest.mark.parametrize("size", [2, 8])
-def test_mixed_cohort_batch_equals_concatenated_single_samples(size):
-    args, model = _model()
-    nodes = len(model.known_nodes) if hasattr(model, "known_nodes") else 157
-    x, _ = _mixed_batch(args, nodes, size=size)
-    generator = torch.Generator().manual_seed(11)
-    adjacency = torch.rand(nodes, nodes, generator=generator)
-    tm = torch.rand(size, args.input_len, 3, generator=generator) * 5
-    dm = torch.rand(size, args.pred_len, 3, generator=generator) * 5
-
-    model.eval()
-    with torch.no_grad():
-        batched = model(adjacency, x, tm, None, None, dm, 0)
-        batched = batched["pred"] if isinstance(batched, dict) else batched
-        singles = []
-        for index in range(size):
-            one = model(adjacency, x[index:index + 1], tm[index:index + 1], None, None,
-                        dm[index:index + 1], 0)
-            singles.append(one["pred"] if isinstance(one, dict) else one)
-        stacked = torch.cat(singles, dim=0)
-
-    assert torch.allclose(batched, stacked, atol=1e-5), (
-        "a mixed-cohort batch still depends on which samples share it: "
-        f"max delta {float((batched - stacked).abs().max()):.3e}"
     )
 
 

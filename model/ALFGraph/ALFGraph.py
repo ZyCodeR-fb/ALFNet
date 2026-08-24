@@ -111,21 +111,9 @@ class ResidualDeltaDecoder(nn.Module):
             hidden = torch.stack(next_states, dim=0)
             output = anchor[..., :self.output_size] + self.scale * self.projection(current)
             outputs.append(output)
-            if teacher_mask is not None:
-                # v4: the decision is per (sample, step, node) and was made
-                # outside the model, so nothing is drawn here.
-                current = step_teacher_input(teacher_input, teacher_mask, step, output)
-            else:
-                # v3 archive path. `teacher_input is not None` short-circuits
-                # before the draw, so a call that supplies one consumes exactly
-                # the RNG it always did; without the guard a decoder-input-free
-                # training call indexes None.
-                use_teacher = (
-                    self.training
-                    and teacher_input is not None
-                    and torch.rand(1).item() < teacher_forcing_ratio
-                )
-                current = teacher_input[:, step] if use_teacher else output
+            if teacher_mask is None:
+                raise ValueError("ALFGraph requires the explicit v4 teacher mask")
+            current = step_teacher_input(teacher_input, teacher_mask, step, output)
         return torch.stack(outputs, dim=1)
 
 

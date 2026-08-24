@@ -194,13 +194,6 @@ def test_role_ids_are_the_frozen_order():
     assert (ROLE_AAS, ROLE_NAS, ROLE_VS, ROLE_FS) == (0, 1, 2, 3)
 
 
-def test_v3_and_v4_agree_on_the_role_order():
-    from data_provider import graph_data_loader as v3
-
-    assert (v3.ROLE_AAS, v3.ROLE_NAS, v3.ROLE_VS, v3.ROLE_FS) == (
-        ROLE_AAS, ROLE_NAS, ROLE_VS, ROLE_FS)
-
-
 def test_alfnet_reads_roles_in_the_same_order():
     import inspect
 
@@ -368,19 +361,6 @@ def test_the_three_target_masks_are_distinct_objects_and_meanings(datasets):
     # loss is the strictest: cohort and phase scope on top of availability
     assert int(loss.sum()) <= int(target.sum())
     assert not torch.equal(decoder, loss)
-
-
-# --- v3 is untouched ----------------------------------------------------------
-
-
-def test_the_v3_loader_still_returns_its_ten_tensor_tuple():
-    import inspect
-
-    from data_provider import graph_data_loader
-
-    source = inspect.getsource(graph_data_loader.LifecycleCoveragePEMS.__getitem__)
-    assert "return" in source
-    assert not hasattr(graph_data_loader.LifecycleCoveragePEMS, "base_visible_input")
 
 
 # --- the other three datasets --------------------------------------------------

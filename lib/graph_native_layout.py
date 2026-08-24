@@ -143,6 +143,21 @@ def layout_signature(adjacency, recur_times):
 KDTREE_ALGORITHM = "kdtree_on_verified_wgs84"
 
 
+def _kd_tree(locations, times, axis):
+    """Deterministic KD partition used when verified coordinates exist."""
+    sorted_idx = np.argsort(locations[axis])
+    part1 = np.sort(sorted_idx[:locations.shape[1] // 2])
+    part2 = np.sort(sorted_idx[locations.shape[1] // 2:])
+    if times == 1:
+        return [part1, part2]
+    parts = []
+    for part in _kd_tree(locations[:, part1], times - 1, axis ^ 1):
+        parts.append(part1[part])
+    for part in _kd_tree(locations[:, part2], times - 1, axis ^ 1):
+        parts.append(part2[part])
+    return parts
+
+
 def resolve_layout(adjacency, positions, recur_times):
     """The single answer to "how is this dataset partitioned into patches?".
 
@@ -160,8 +175,6 @@ def resolve_layout(adjacency, positions, recur_times):
         parts = layout_parts(adjacency, int(recur_times))
         algorithm = LAYOUT_ALGORITHM
     else:
-        from model.ALFTemporal.ALFTemporal import _kd_tree
-
         parts = _kd_tree(np.asarray(positions).T, int(recur_times), 0)
         algorithm = KDTREE_ALGORITHM
     ordered = [[int(node) for node in part] for part in parts]

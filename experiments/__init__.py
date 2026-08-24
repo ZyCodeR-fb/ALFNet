@@ -1,2 +1,1 @@
-from .train import train_model
-from .ples_evaluation import async_lifecycle_inference
+"""v4 experiment package; entry points are imported explicitly."""

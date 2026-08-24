@@ -44,11 +44,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts.build_v4_development_plan import (  # noqa: E402
-    assert_plan_still_holds,
-    load_plan,
-    sha256_file,
-)
+from scripts.v4_utils import sha256_file  # noqa: E402
 from scripts.train_v4 import (  # noqa: E402
     COMPLETE_MARKER,
     FAILED_MARKER,
@@ -69,10 +65,9 @@ class LauncherRefused(RuntimeError):
 
 
 def resolve_plan_and_root(plan_path=None):
-    """Load a frozen plan and the output root it names. Never guesses either."""
+    """Load the active reproduction plan and the output root it names."""
     if plan_path is None:
-        plan = assert_plan_still_holds(load_plan())
-        return plan, ROOT / "outputs_v4/development_base" / plan["plan_sha256"]
+        plan_path = ROOT / "configs/paper/v4_five_dataset_plan.json"
     from scripts import build_v4_five_dataset_plan as five
     from scripts.build_v4_readiness import ReadinessRefused, assert_ready
 
@@ -245,18 +240,16 @@ def current_epoch(run):
 def build_command(run, output_root, plan_path=None, extra=()):
     """The trainer command, carrying the plan this launcher actually loaded.
 
-    Hardcoding `--development_plan` here is what made the five-dataset launcher
-    enumerate METR-LA correctly and then hand each run to the two-dataset plan,
-    which rejected the config before CUDA. The plan path travels with the
-    command, so the queue, the failure record and any resume all name the same
-    plan.
+    The verified plan path travels with the command, so the queue, failure
+    record and any resume all name the same experiment.
     """
     command = [sys.executable, str(ROOT / "scripts/train_v4.py"),
                "--config", str(run.config.relative_to(ROOT)),
                "--device", run.device, "--seed", str(run.seed),
                "--output_root", str(output_root)]
-    command += (["--plan", str(Path(plan_path))] if plan_path
-                else ["--development_plan"])
+    if not plan_path:
+        raise LauncherRefused("the canonical launcher requires an explicit plan")
+    command += ["--plan", str(Path(plan_path))]
     command.extend(extra)
     return command
 

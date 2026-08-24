@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from experiments.v4_validation_collector import cell_count  # noqa: E402
-from scripts.build_v4_development_plan import sha256_file  # noqa: E402
+from scripts.v4_utils import sha256_file  # noqa: E402
 from scripts.eval_v4_plan_validation import (  # noqa: E402
     EVAL_NAME, EVAL_SCHEMA, PARTIAL_NAME, TOLERANCE, load_plan, resolve_runs,
 )
@@ -109,8 +109,8 @@ def audit_run(run, plan, findings, notes, design):
                             f"{record.get('max_abs_cell_difference')} > {TOLERANCE}")
         if record.get("scaler", {}).get("refit") is not False:
             findings.append(f"{where}: validation did not use the checkpoint scaler")
-        if cell_count(record.get("recomputed", {"main": {}, "phase": {}})) != 36:
-            findings.append(f"{where}: validation table is not 36 cells")
+        if cell_count(record.get("recomputed", {"main": {}, "phase": {}})) != 33:
+            findings.append(f"{where}: validation table is not 33 cells")
         _finite(record.get("recomputed"), f"{where}.table", findings)
         design.setdefault((run.dataset, run.seed), {})[run.model] = {
             row: record["recomputed"][section][row]["valid_target_count"]

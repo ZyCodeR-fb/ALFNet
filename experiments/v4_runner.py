@@ -1,9 +1,6 @@
 """One v4 train/validation runner, shared by ALFNet and MoGERNN.
 
-Deliberately a new file rather than another branch inside `shared_step`. The v3
-step unpacks a ten-tensor tuple positionally and carries eight optional
-objective knobs; threading a second protocol through it would put v3 and v4 one
-`if` apart on every line, and the two are supposed to be separable.
+This runner contains only the active v4 protocol and objective.
 
 The construction order matters and is enforced by `build_v4_session`:
 
@@ -11,9 +8,7 @@ The construction order matters and is enforced by `build_v4_session`:
     exposure) -> train dataset, which fits the scaler -> validation dataset on
     *that* scaler -> loaders -> model, from the train context's static assets
 
-The v3 order builds the model first and lets the loader resolve its own graph
-later, which is how a model and its data ended up describing different node
-sets. Here the data decides, and the model is built to fit it.
+The data resolves the graph first, and the model is built to fit it.
 
 No test loader is constructed, and `build_v4_session` refuses `phase="test"`.
 The confirmation splits are spent once; nothing in a training runner has any
@@ -30,7 +25,7 @@ from torch.utils.data import DataLoader, Sampler
 from args import load_args_from_config
 from data_provider.lifecycle_roles import ROLE_CHANNEL_COUNT
 from data_provider.v4_lifecycle_loader import V4LifecycleDataset
-from experiments.inductive_epoch import _element_loss, _role_balanced_loss
+from experiments.v4_losses import element_loss, role_balanced_loss
 from lib.lcbt_v4 import (
     SHUFFLE_POLICY,
     STRATEGY,
@@ -188,11 +183,14 @@ def build_v4_session(config_path, device="cpu", run_seed=None, batch_size=None,
     #      the same numbers today and silently stop doing so the moment the
     #      validation window changed.
     train_dataset = V4LifecycleDataset(
-        train_context, payload_path, seed=run_seed, epoch=0,
-        validation_seed=validation_seed)
+        train_context, payload_path, input_len=args.input_len,
+        pred_len=args.pred_len, slide_step=args.slide_step, freq=args.freq,
+        seed=run_seed, epoch=0, validation_seed=validation_seed)
     validation_dataset = V4LifecycleDataset(
-        validation_context, payload_path, seed=run_seed, epoch=0,
-        validation_seed=validation_seed, scaler=train_dataset.scaler)
+        validation_context, payload_path, input_len=args.input_len,
+        pred_len=args.pred_len, slide_step=args.slide_step, freq=args.freq,
+        seed=run_seed, epoch=0, validation_seed=validation_seed,
+        scaler=train_dataset.scaler)
     if validation_dataset.scaler is not train_dataset.scaler:
         raise RunnerRefused("validation did not receive the training scaler")
 
@@ -237,7 +235,7 @@ def base_loss(prediction, batch, valid, loss_name="mse"):
     """The one common objective, identical for both models."""
     if not bool(valid.any()):
         return None
-    return _element_loss(prediction, batch["target"], loss_name)[valid].mean()
+    return element_loss(prediction, batch["target"], loss_name)[valid].mean()
 
 
 def _alfnet_role_mix(prediction, batch, valid, meta, loss_name):
@@ -250,8 +248,8 @@ def _alfnet_role_mix(prediction, batch, valid, meta, loss_name):
     if meta.get("forecast_loss_mode") != "role_balanced_mix":
         return None, None
     last_role = batch["lifecycle_context"][:, -1, :, :ROLE_CHANNEL_COUNT]
-    role_loss = _role_balanced_loss(prediction, batch["target"], valid, last_role,
-                                    loss_name)
+    role_loss = role_balanced_loss(prediction, batch["target"], valid, last_role,
+                                   loss_name)
     if role_loss is None:
         return None, None
     return role_loss, float(meta.get("forecast_role_balanced_beta", 0.1))
@@ -358,10 +356,21 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
 
 
 @torch.no_grad()
-def validate(session, epoch=0, max_batches=None, loss_name="mse"):
-    """One validation pass, in the original scale, with no teacher forcing."""
+def validate(session, epoch=0, max_batches=None, loss_name="mse",
+             return_cell_table=False):
+    """One validation pass, optionally returning the 33-cell table.
+
+    The former training path ran this loop once for early stopping and a second
+    time whenever the best epoch changed.  A collector can now share the exact
+    predictions from this pass, so checkpoint selection and the diagnostic
+    table cannot drift and validation costs one forward pass per epoch.
+    """
     session.model.eval()
     scaler = session.scaler
+    collector = None
+    if return_cell_table:
+        from experiments.v4_validation_collector import ValidationCellCollector
+        collector = ValidationCellCollector(session.validation_context, scaler)
     per_scenario = {name: {"absolute": 0.0, "squared": 0.0, "count": 0}
                     for name in SCENARIOS}
     overall = {"absolute": 0.0, "squared": 0.0, "count": 0}
@@ -375,6 +384,8 @@ def validate(session, epoch=0, max_batches=None, loss_name="mse"):
             raise RunnerRefused("validation produced a non-empty teacher mask")
         prediction, _ = unpack_model_output(
             _forward(session, batch, session.validation_context, epoch, None))
+        if collector is not None:
+            collector.update(batch, prediction)
         valid = valid_positions(batch, prediction)
         if not bool(valid.any()):
             skipped += 1
@@ -419,6 +430,8 @@ def validate(session, epoch=0, max_batches=None, loss_name="mse"):
     report["life_avg_mae"] = sum(present) / len(present)
     report["scenarios_present"] = len(present)
     report["teacher_forcing_ratio"] = 0.0
+    if return_cell_table:
+        return report, collector.table()
     return report
 
 

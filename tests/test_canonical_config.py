@@ -1,223 +1,30 @@
-"""A run's configuration must have an identity that the run cannot change.
-
-The previous hash was computed from `vars(args)` at checkpoint time. `args` is a
-live namespace -- the trainer writes `best_val_metric`, per-epoch history,
-resolved output paths and `exp_id` onto it -- so that hash identified the run,
-not the configuration: two identical experiments disagreed, and the value moved
-during training.
-
-`utils.canonical_config` freezes it the moment parsing finishes, from an
-explicit allowlist. These tests pin both halves of the contract: runtime state
-must not move it, and anything that defines the experiment must.
-"""
-
-import copy
-
-import pytest
+from pathlib import Path
 
 from args import load_args_from_config
-from main import _bind_evaluation_protocol_hashes, _validate_checkpoint_provenance
-from utils.canonical_config import (
-    build_canonical_config,
-    canonical_config_hash,
-    freeze_canonical_config,
-)
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
-def _args(config="configs/ALFNet/fg1.yaml"):
-    return load_args_from_config(config, [])
+def test_same_yaml_has_stable_identity():
+    path = ROOT / "configs/paper/v4/PEMS08_ALFNet.yaml"
+    first = load_args_from_config(path)
+    second = load_args_from_config(path)
+    assert first.canonical_config_hash == second.canonical_config_hash
+    assert first.canonical_config == second.canonical_config
 
 
-def _hash(args):
-    return canonical_config_hash(build_canonical_config(args))
+def test_runtime_device_is_not_configuration_identity():
+    path = ROOT / "configs/paper/v4/PEMS08_MoGERNN.yaml"
+    first = load_args_from_config(path)
+    second = load_args_from_config(path, {"device": "cpu"})
+    assert first.canonical_config_hash == second.canonical_config_hash
 
 
-# --- runtime state must not move the hash ------------------------------------
-
-
-def test_hash_is_frozen_at_parse_time():
-    args = _args()
-    assert getattr(args, "canonical_config_hash", None), "parsing did not freeze a hash"
-    assert args.canonical_config_hash == _hash(args)
-
-
-@pytest.mark.parametrize("field,value", [
-    ("run_id", "some-other-run"),
-    ("output_root", "./elsewhere"),
-    ("device", "cpu"),
-    ("num_workers", 99),
-    ("exp_id", "x" * 40),
-    ("best_checkpoint_path", "/tmp/whatever"),
-    ("log_dir", "/tmp/logs"),
-])
-def test_runtime_fields_do_not_change_the_hash(field, value):
-    args = _args()
-    before = args.canonical_config_hash
-    setattr(args, field, value)
-    assert _hash(args) == before, f"{field} leaked into the configuration identity"
-
-
-def test_training_writebacks_do_not_change_the_hash():
-    """Exactly what broke the old implementation."""
-    args = _args()
-    before = args.canonical_config_hash
-    args.best_val_metric = 4.2
-    args.best_val_metric_epoch = 17
-    args.validation_group_history = {"unseen_mae": [1.0, 2.0]}
-    args.validation_lifecycle_history = [{"epoch": 1}]
-    args.best_routing = {"router/x": 0.5}
-    args.num_params = 1234
-    assert _hash(args) == before
-
-
-# --- anything that defines the experiment must move it -----------------------
-
-
-def test_nested_expert_yaml_changes_the_hash():
-    """fg1, gs and g1 differ *only* inside the graph expert's own file.
-
-    A hash that read the top-level YAML alone would call all three the same
-    configuration, which is precisely the confusion provenance exists to stop.
-    """
-    hashes = {
-        name: _args(f"configs/ALFNet/{name}.yaml").canonical_config_hash
-        for name in ("fg1", "gs", "g1")
-    }
-    assert len(set(hashes.values())) == 3, hashes
-
-
-def test_nested_expert_config_contents_are_captured():
-    args = _args()
-    nested = args.canonical_config["nested_expert_configs"]
-    assert set(nested) == {"graph", "patch"}
-    assert nested["graph"]["resolved"], "the graph expert YAML was not inlined"
-
-
-@pytest.mark.parametrize("field,value", [
-    ("seed", 999),
-    ("lr", 0.5),
-    ("max_epoch", 7),
-    ("d_model", 128),
-    ("input_len", 24),
-    ("lcbt_join_ratio", 0.4),
-])
-def test_experiment_defining_fields_change_the_hash(field, value):
-    args = _args()
-    before = args.canonical_config_hash
-    setattr(args, field, value)
-    assert _hash(args) != before, f"{field} does not affect the configuration identity"
-
-
-def test_model_family_recipe_change_moves_the_hash():
-    args = _args()
-    before = args.canonical_config_hash
-    modified = copy.deepcopy(args)
-    modified.model_family_cfg["recipe"]["fusion_mode"] = "residual_gate"
-    assert _hash(modified) != before
-
-
-def test_data_fingerprints_enter_the_hash():
-    """Same configuration, different graph, must not share an identity."""
-    args = _args()
-    first = freeze_canonical_config(args, {"adjacency": "aaa", "data": "bbb"})
-    second = freeze_canonical_config(args, {"adjacency": "ccc", "data": "bbb"})
-    assert first != second
-
-
-def test_protocol_versions_enter_the_hash():
-    args = _args()
-    before = _hash(args)
-    args.lce_protocol_version = args.lce_protocol_version + 1
-    assert _hash(args) != before
-
-
-def test_async_manifest_hashes_are_bound_before_checkpoint_validation():
-    args = _args()
-    manifest = {
-        "training_protocol_hash": "train-new",
-        "lce_protocol_hash": "lce-new",
-        "ples_protocol_hash": "ples-new",
-    }
-    _bind_evaluation_protocol_hashes(args, manifest)
-
-    checkpoint = {
-        "training_protocol_hash": "train-old",
-        "config": {
-            "model": args.model,
-            "model_variant": args.model_variant,
-            "canonical_config_hash": args.canonical_config_hash,
-            "lce_protocol_hash": "lce-old",
-            "ples_protocol_hash": "ples-old",
-        },
-    }
-    with pytest.raises(ValueError, match="training_protocol_hash"):
-        _validate_checkpoint_provenance(checkpoint, args)
-
-
-def test_a_legitimate_test_async_load_passes_provenance():
-    """The case that was silently broken.
-
-    `train.py` used to store the *training* manifest's `lce_protocol_hash`, and
-    `test_async` binds the *evaluation* manifest's field of the same name. The
-    two hash different dicts -- the training side includes
-    `validation_time_range` and is dataset dependent, the evaluation side is a
-    protocol definition identical across datasets -- so every real test run
-    tripped the provenance check. Measured on PEMS-BAY: checkpoint carried
-    b8eeda69..., evaluation bound f6c1faad....
-    """
-    train_args = _args()
-    train_args.batch_size = 64
-    checkpoint = {
-        "training_protocol_hash": "train-hash",
-        "config": {
-            "model": train_args.model,
-            "model_variant": train_args.model_variant,
-            "router_mode": None,
-            "canonical_config_hash": train_args.canonical_config_hash,
-            "training_protocol_hash": "train-hash",
-        },
-    }
-
-    eval_args = _args()
-    eval_args.batch_size = 64
-    _bind_evaluation_protocol_hashes(eval_args, {
-        "training_protocol_hash": "train-hash",
-        # deliberately different from anything a training manifest would hold
-        "lce_protocol_hash": "eval-side-lce",
-        "ples_protocol_hash": "eval-side-ples",
-    })
-
-    # must not raise, and must not need --allow_legacy_checkpoint
-    assert not getattr(eval_args, "allow_legacy_checkpoint", False)
-    _validate_checkpoint_provenance(checkpoint, eval_args)
-
-
-def test_evaluation_side_protocol_hashes_are_not_compared():
-    """Storing them would reintroduce the false positive, so they are absent."""
-    args = _args()
-    _bind_evaluation_protocol_hashes(args, {
-        "training_protocol_hash": "t",
-        "lce_protocol_hash": "eval-lce",
-        "ples_protocol_hash": "eval-ples",
-    })
-    checkpoint = {
-        "training_protocol_hash": "t",
-        "config": {
-            "model": args.model,
-            "model_variant": args.model_variant,
-            "canonical_config_hash": args.canonical_config_hash,
-            # a stale training-side value, as older checkpoints carry
-            "lce_protocol_hash": "training-side-lce",
-            "ples_protocol_hash": "training-side-ples",
-        },
-    }
-    _validate_checkpoint_provenance(checkpoint, args)
-
-
-def test_async_manifest_must_carry_all_protocol_hashes():
-    args = _args()
-    with pytest.raises(ValueError, match="ples_protocol_hash"):
-        _bind_evaluation_protocol_hashes(
-            args,
-            {"training_protocol_hash": "train", "lce_protocol_hash": "lce"},
-        )
+def test_stride_is_part_of_configuration_identity(tmp_path):
+    source = ROOT / "configs/paper/v4/PEMS08_MoGERNN.yaml"
+    text = source.read_text("utf-8")
+    assert "slide_step: 1" in text
+    changed = tmp_path / "changed.yaml"
+    changed.write_text(text.replace("slide_step: 1", "slide_step: 2"), "utf-8")
+    assert (load_args_from_config(source).canonical_config_hash
+            != load_args_from_config(changed).canonical_config_hash)

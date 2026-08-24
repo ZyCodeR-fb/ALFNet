@@ -180,20 +180,9 @@ class Decoder(nn.Module):
             h = torch.stack(hs, dim=0)
             output = self.fc(next_h)
             outputs[t] = output
-            if teacher_mask is not None:
-                # v4: the decision is per (sample, step, node) and was made
-                # outside the model, so nothing is drawn here. The source's one
-                # `torch.rand` per step was a single boolean that fed *every*
-                # node its future or none of them.
-                input_at_t = step_teacher_input(tearcher_input, teacher_mask, t, output)
-            else:
-                # v3 archive path, expression unchanged so the RNG stream and
-                # every historical run reproduce exactly.
-                use_teacher_forcing = True if (torch.rand(1).item() < teacher_forcing_ratio and self.training) else False
-                if use_teacher_forcing:
-                    input_at_t = tearcher_input[:, t]
-                else:
-                    input_at_t = outputs[t]
+            if teacher_mask is None:
+                raise ValueError("MoGERNN requires the explicit v4 teacher mask")
+            input_at_t = step_teacher_input(tearcher_input, teacher_mask, t, output)
         outputs = torch.stack(outputs, dim=1)  # type: ignore
         return outputs
 
@@ -224,8 +213,7 @@ class Model(nn.Module):
         the static asset hash, the node count, the node order, the dataset and
         the target channel -- and verifies the config does not contradict them.
         The architecture is untouched: same experts, same gating, same encoder,
-        decoder, hidden size, layer count and initialisation. `Model(configs)`
-        stays as the v3 archive path and is not extended.
+        decoder, hidden size, layer count and initialisation.
         """
         if runtime_context is None:
             raise ValueError(
@@ -257,9 +245,8 @@ class Model(nn.Module):
         field is not even requested -- `read_common` is called without it, so
         asking would be a code change and not an accident.
 
-        `epoch` is accepted for interface symmetry and is deliberately unused:
-        the v3 path derived a teacher-forcing ratio from it, and under v4 the
-        schedule arrives as an explicit mask instead.
+        `epoch` is accepted for interface symmetry and is deliberately unused;
+        the schedule arrives as an explicit mask.
         """
         common = read_common(batch, runtime_context, self.static_asset_hash,
                              self.raw_enc_in, "MoGERNN", self._v4_adjacency_cache,
@@ -283,19 +270,3 @@ class Model(nn.Module):
                 f"[{x_enc.shape[0]}, {self.out_len}, {common['num_nodes']}, "
                 f"{self.raw_enc_in}]")
         return {"pred": prediction}
-
-    def forward(self, adj, x_enc, x_t_mark=None, pos_mark=None, *args):
-        x_dec = args[0]
-        # 输入的adj应该转一下
-        A_q = calculate_random_walk_matrix(adj)
-        A_h = calculate_random_walk_matrix(adj.T)
-        x_enc = self.data_pre(
-            adj,
-            x_enc[..., :self.raw_enc_in],
-            x_t_mark,
-            pos_mark,
-        )
-        epoch = args[-1]
-        teacher_forcing_ratio = 1 - (epoch / 40)
-        dec_out = self.seq2seq(x_enc, x_dec, A_q, A_h, teacher_forcing_ratio)
-        return dec_out

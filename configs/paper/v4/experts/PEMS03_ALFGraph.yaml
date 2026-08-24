@@ -20,7 +20,9 @@ dataset:
   input_len: 12
   pred_len: 12
   look_back: 0
-  slide_step: 12
+  # v4 enumerates every valid 5-minute origin; this is the effective
+  # stride used by the completed five-dataset experiment.
+  slide_step: 1
   input_features: q
   target_features: q
   freq: min
@@ -45,7 +47,6 @@ lifecycle:
   lifecycle_observation_mask_feature: true
   lifecycle_age_mode: state_duration
   lifecycle_training_strategy: lcbt_v4
-  lcbt_protocol_seed: 2026
   lcbt_validation_seed: 12026
   # The v4 time split. args.py refuses any other value under this strategy.
   lcbt_train_end_ratio: 0.60

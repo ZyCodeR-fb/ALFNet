@@ -1,4 +1,4 @@
-"""The 36 validation-only development cells, on the frozen aggregation.
+"""The 33 v4 lifecycle cells (five main rows plus six phase rows).
 
 What this is, stated where nobody can miss it: **a development diagnostic on the
 validation split**. Its structure is isomorphic to the main and phase tables the
@@ -8,17 +8,14 @@ mistake for a result. Every payload it writes carries
 `development_validation_only: true`, and the schema refuses the words `final`,
 `confirmation` and `test`.
 
-Nothing here re-derives an aggregation. The row metrics, the calendar-share
-combination, the k-balanced mean, LifeAvg and WorstGroup are imported from
-`data_provider.ples_protocol` and called unmodified, because a second
-implementation of a protocol definition is how `plot_counterfactual_shockwave`
-drifted three separate ways from the frozen one.
+Nothing here re-derives an aggregation. The row metrics, calendar-share
+combination, k-balanced mean and LifeAvg are imported from the canonical
+`data_provider.v4_metrics` module.
 
 Two mappings connect the v4 loader to that aggregation:
 
 * the four LCBT scenarios are the four main groups, with `zero_history` as
-  `Unseen`. LifeAvg is their equal-weight mean and WorstGroup their max, both by
-  the frozen functions;
+  `Unseen`. LifeAvg is their equal-weight mean;
 * `tau` is the episode's evidence length `k`. Unseen and Steady carry no
   evidence trajectory, so all their rows share one bucket and the k-balanced
   mean collapses to the calendar-balanced one -- which is what it should be,
@@ -33,20 +30,19 @@ import numpy as np
 import torch
 
 from data_provider.calendar_strata import calendar_stratum
-from data_provider.ples_protocol import (
+from data_provider.v4_metrics import (
+    BASE_GROUPS,
     MAIN_TABLE_ROWS,
     PHASE_ORDER,
-    _calendar_balanced_metrics_v2,
-    _mean_metrics_v2,
-    _tau_balanced_metrics_v2,
-    _worst_group,
+    calendar_balanced_metrics,
+    mean_metrics,
+    tau_balanced_metrics,
 )
 
 SCHEMA_VERSION = 1
 METRICS = ("MAE", "RMSE", "MAPE")
 SCENARIO_TO_GROUP = {"zero_history": "Unseen", "steady": "Steady",
                      "join": "Join", "fault": "Fault"}
-BASE_GROUPS = ("Unseen", "Steady", "Join", "Fault")
 # The frozen `_phase_id`: -1 for the two static anchors, then the join track
 # 0/1/2 and the fault track 3/4/5. One mapping, taken from the protocol.
 PHASE_ID_TO_NAME = {0: "Cold", 1: "Warm", 2: "Ready",
@@ -80,7 +76,7 @@ class ValidationCellCollector:
     """Accumulate error sums per (group, k, calendar regime) row.
 
     One row per (group, evidence length, regime, origin): the same granularity
-    the frozen aggregation expects, so `_tau_balanced_metrics_v2` can be handed
+    the v4 aggregation expects, so `tau_balanced_metrics` can be handed
     them unchanged.
     """
 
@@ -159,18 +155,17 @@ class ValidationCellCollector:
         return cell
 
     def table(self):
-        """The 36 cells: six main rows and six phase rows, three metrics each."""
+        """The 33 cells: five main rows and six phase rows, three metrics each."""
         base = {}
         for name in BASE_GROUPS:
-            base[name] = _tau_balanced_metrics_v2(self.rows["main"][name], "treated")
+            base[name] = tau_balanced_metrics(self.rows["main"][name], "treated")
             if base[name] is None:
                 raise CollectorRefused(f"main row {name} has no valid cells")
         derived = dict(base)
-        derived["LifeAvg"] = _mean_metrics_v2([base[name] for name in BASE_GROUPS])
-        derived["WorstGroup"] = _worst_group(base)
+        derived["LifeAvg"] = mean_metrics([base[name] for name in BASE_GROUPS])
 
         main = {name: self._cell("main", name, derived[name]) for name in BASE_GROUPS}
-        for name in ("LifeAvg", "WorstGroup"):
+        for name in ("LifeAvg",):
             # Derived rows have no rows of their own; their counts are the union
             # of the four they summarise, recorded so a reader can see what they
             # were computed from.
@@ -191,7 +186,7 @@ class ValidationCellCollector:
 
         phase = {name: self._cell(
             "phase", name,
-            _tau_balanced_metrics_v2(self.rows["phase"][name], "treated"))
+            tau_balanced_metrics(self.rows["phase"][name], "treated"))
             for name in PHASE_ORDER}
 
         table = {
@@ -201,11 +196,10 @@ class ValidationCellCollector:
             "note": ("A development diagnostic on the validation split. Same "
                      "shape as the reported tables on purpose; not a result."),
             "aggregation": {
-                "row_metrics": "sum/count per cell (ples_protocol._row_metrics_v2)",
+                "row_metrics": "sum/count per cell (v4_metrics.row_metrics)",
                 "within_k": "mean inside calendar stratum, then 5/7-2/7 weighted",
                 "across_k": "equal-weight mean over evidence lengths",
                 "LifeAvg": "mean(Unseen, Steady, Join, Fault)",
-                "WorstGroup": "max(Unseen, Steady, Join, Fault)",
                 "mape_denominator": f"clamp(|target|, min={MAPE_FLOOR})",
                 "scale": "original units (normalised * std + mean)",
             },
@@ -245,7 +239,7 @@ def cell_count(table):
 
 @torch.no_grad()
 def collect_validation_table(session, epoch=0, max_batches=None):
-    """Run the validation loader once and return the 36-cell table."""
+    """Run the validation loader once and return the 33-cell table."""
     from experiments.v4_runner import to_device  # local: avoids a cycle
     from lib.lcbt_v4 import build_v4_teacher_forcing_mask
     from utils.model_output import unpack_model_output

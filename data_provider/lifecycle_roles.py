@@ -1,7 +1,7 @@
 """The one definition of the lifecycle role order.
 
 ALFNet indexes its per-role scale vectors positionally as ("aas", "nas", "vs",
-"fs") (`model/ALFNet/ALFNet.py`), and the v3 loader emits ids in that order. A
+"fs") (`model/ALFNet/ALFNet.py`), and the loader emits ids in that order. A
 second loader that picked its own order -- unseen=0, steady=1, join=2 -- would
 silently feed Unseen where the model reads AAS and Join where it reads VS, with
 no shape error anywhere. That happened, which is why this module exists.

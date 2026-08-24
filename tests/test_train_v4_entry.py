@@ -81,7 +81,10 @@ def test_only_the_generated_v4_configs_are_accepted():
         f"{dataset}_{model}.yaml" for dataset in DATASETS
         for model in ("ALFNet", "MoGERNN")}
     with pytest.raises(RunnerRefused, match="is not one of the .* v4 configs"):
-        _preflight(ROOT / "configs/ALFNet/gs_p8.yaml", save=False)
+        _preflight(
+            ROOT / "configs/paper/v4/experts/PEMS08_ALFTemporal.yaml",
+            save=False,
+        )
 
 
 def test_the_entry_point_exposes_no_capacity_or_split_override():

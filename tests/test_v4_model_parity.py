@@ -33,9 +33,6 @@ ALFNET_CONFIGS = {"PEMS08": "configs/paper/v4/PEMS08_ALFNet.yaml",
                   "PEMSBAY": "configs/paper/v4/PEMSBAY_ALFNet.yaml"}
 MOGERNN_CONFIGS = {"PEMS08": "configs/paper/v4/PEMS08_MoGERNN.yaml",
                    "PEMSBAY": "configs/paper/v4/PEMSBAY_MoGERNN.yaml"}
-# The v3 archive entry point takes only v3 configs, and is exercised as such.
-V3_CONFIGS = {"ALFNet": "configs/ALFNet/gs_p8.yaml",
-              "MoGERNN": "configs/MoGERNN/PEMS08_lcbt_v3.yaml"}
 PAYLOADS = {"PEMS08": "data_v4/PEMS08/raw_data.pkl",
             "PEMSBAY": "data_v4/PEMS-BAY/raw_data.pkl"}
 
@@ -243,7 +240,7 @@ def test_a_wrong_target_channel_is_refused_by_both(context, who):
 
 
 @pytest.mark.parametrize("who", sorted(BUILDERS))
-def test_the_v3_path_and_a_missing_context_are_refused_by_both(context, batch, who):
+def test_a_missing_context_is_refused_by_both(context, batch, who):
     import model.ALFNet.ALFNet as alfnet
     import model.comparison_model.MoGERNN.MoGERNN as mogernn
 
@@ -252,14 +249,6 @@ def test_the_v3_path_and_a_missing_context_are_refused_by_both(context, batch, w
     with pytest.raises(ValueError, match="requires a RuntimeDataContext"):
         module.Model.from_runtime_context(
             load_args_from_config(config["PEMS08"], []), None)
-
-    # The archive constructor takes a v3 config; a v4 one is refused there.
-    args = load_args_from_config(V3_CONFIGS[who], [])
-    args.device = "cpu"
-    archive = module.Model(args).eval()
-    with pytest.raises(ValueError, match="built through from_runtime_context"):
-        archive.forward_v4(batch, context)
-
 
 # --- the masked teacher forcing contract --------------------------------------
 
@@ -527,18 +516,9 @@ def test_neither_parameter_set_changed(context):
     assert sum(p.numel() for p in _alfnet(
         "PEMSBAY", build_runtime_context("PEMSBAY", "train")).parameters()) == 1_037_529
 
-    import model.comparison_model.MoGERNN.MoGERNN as mogernn
-
     for dataset in sorted(MOGERNN_CONFIGS):
-        args = load_args_from_config(MOGERNN_CONFIGS[dataset], [])
-        args.device = "cpu"
-        torch.manual_seed(1234)
-        archive = mogernn.Model(args)
         bound = _mogernn(dataset, build_runtime_context(dataset, "train"))
-        # The v4 entry point binds metadata and builds the identical network.
         assert sum(p.numel() for p in bound.parameters()) == 226_270
-        assert {name: tuple(p.shape) for name, p in bound.named_parameters()} == \
-               {name: tuple(p.shape) for name, p in archive.named_parameters()}
         assert not [key for key in bound.state_dict() if "v4" in key or "context" in key]
 
 

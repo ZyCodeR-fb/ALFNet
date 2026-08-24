@@ -5,7 +5,7 @@ The gate that decides whether the confirmation splits may be opened lives in
 `eval_v4_plan_test.assert_may_open`, before any target is read. This runs after,
 and checks that what was written is what the plan asked for: every slot present,
 scored at its own seed, with the checkpoint's scaler, no teacher forcing, the
-right exposure hash, and 36 cells.
+right exposure hash, and 33 cells.
 """
 
 import argparse
@@ -57,8 +57,8 @@ def audit(plan_path, output_root=None):
             findings.append(f"{where}: teacher forcing was not zero")
         if record.get("plan_sha256") != plan["plan_sha256"]:
             findings.append(f"{where}: produced under another plan")
-        if cell_count(record.get("cells", {"main": {}, "phase": {}})) != 36:
-            findings.append(f"{where}: not 36 cells")
+        if cell_count(record.get("cells", {"main": {}, "phase": {}})) != 33:
+            findings.append(f"{where}: not 33 cells")
         expected = plan["data"][run.dataset]["test_exposure"]["status"]
         if record.get("exposure_status") != expected:
             findings.append(f"{where}: exposure status {record.get('exposure_status')!r} "

@@ -44,7 +44,7 @@ from experiments.v4_validation_collector import (  # noqa: E402
 )
 from lib.lcbt_v4 import build_v4_teacher_forcing_mask  # noqa: E402
 from lib.runtime_context import build_runtime_context  # noqa: E402
-from scripts.build_v4_development_plan import sha256_file  # noqa: E402
+from scripts.v4_utils import sha256_file  # noqa: E402
 from scripts.eval_v4_plan_validation import (  # noqa: E402
     EVAL_NAME as VALIDATION_EVAL_NAME, IDENTITY_FIELDS, TOLERANCE,
     assert_identity, load_plan, resolve_runs,
@@ -81,10 +81,6 @@ def assert_may_open(plan, runs, root):
     """The eight gates. Nothing below reads a test target until these pass."""
     from scripts.build_v4_readiness import ReadinessRefused, assert_ready
     from scripts.collect_v4_plan_validation import SUMMARY_NAME
-    from scripts.v4_reuse_audit import audit_reusable
-    from scripts.build_v4_development_plan import (assert_plan_still_holds,
-                                                   load_plan as load_development)
-
     problems = []
     try:                                             # 1, 2
         assert_ready(plan)
@@ -95,11 +91,7 @@ def assert_may_open(plan, runs, root):
 
     reused = [run for run in runs if run.execution_action == "reuse"]
     if reused:                                       # 4
-        development = assert_plan_still_holds(load_development())
-        records = audit_reusable(development, plan["data"], plan["configs"])
-        bad = [r["run"] for r in records if r["execution_action"] != "reuse"]
-        if bad:
-            problems.append(f"reuse audit failed for {bad}")
+        problems.append("the canonical reproduction forbids reused checkpoints")
 
     incomplete = [run.name for run in runs                     # 5
                   if not (run.directory / COMPLETE_MARKER).exists()]
@@ -171,14 +163,19 @@ def open_test_access(plan, root):
 
 @torch.no_grad()
 def _test_table(session, context, checkpoint, epoch):
-    """The 36 cells on the test split, with the checkpoint's scaler."""
+    """The 33 cells on the test split, with the checkpoint's scaler."""
     from data_provider.v4_lifecycle_loader import V4LifecycleDataset
     from torch.utils.data import DataLoader
     from utils.model_output import unpack_model_output
 
     scaler = dict(checkpoint["scaler"])
     dataset = V4LifecycleDataset(context, ROOT / session.args.data_path,
-                                 seed=session.run_seed, epoch=0, scaler=scaler)
+                                 input_len=session.args.input_len,
+                                 pred_len=session.args.pred_len,
+                                 slide_step=session.args.slide_step,
+                                 freq=session.args.freq,
+                                 seed=session.run_seed, epoch=0, scaler=scaler,
+                                 validation_seed=session.args.lcbt_validation_seed)
     if dataset.scaler is not scaler:
         raise TestAccessRefused("the test dataset refitted a scaler")
     loader = DataLoader(dataset, batch_size=session.train_loader.batch_size,
@@ -223,7 +220,7 @@ def evaluate_run(run, plan, device="cuda:0"):
     session.model.load_state_dict(checkpoint["model_state"])
     session.model.to(device)
     table = _test_table(session, context, checkpoint, int(checkpoint["best_epoch"]))
-    if cell_count(table) != 36:
+    if cell_count(table) != 33:
         raise TestAccessRefused(f"{run.name}: {cell_count(table)} cells")
 
     record = {

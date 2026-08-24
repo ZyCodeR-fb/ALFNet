@@ -1,4 +1,4 @@
-"""The eight v4 development-base configs, and what must be identical in them.
+"""The ten outer v4 reproduction configs and their nested ALF experts.
 
 A confirmation dataset proves nothing if the two models were given different
 data, and the v3 tree shows how easily that happens without a check: every
@@ -166,33 +166,10 @@ def test_the_config_declares_the_manifests_target_and_paths(manifests, dataset,
 
 
 @pytest.mark.parametrize("dataset, model", COMBINATIONS)
-def test_the_effective_batch_size_is_the_one_v3_actually_ran(dataset, model):
-    """64 for both, from the launcher that ran v3, not from a dead YAML default.
-
-    `configs/paper/final_runs.json` is frozen at `batch_size: 64` and passes it
-    on every run, so the 16 in the v3 ALFNet YAMLs never took effect. The run it
-    produced records the truth: `efficiency.batch_size = 64` with
-    `train_samples_per_epoch = 8905` over `optimizer_steps_per_epoch = 140`
-    (8905 / 64 -> 140). Generating v4 from the YAML default gave ALFNet a batch
-    size no v3 experiment used, and four times the optimiser steps per epoch.
-
-    This is provenance, not tuning: no v4 result was consulted, and neither
-    learning rate moved with it.
-    """
+def test_the_frozen_batch_size_and_learning_rate_are_explicit(dataset, model):
     args = _args(dataset, model)
     assert args.batch_size == 64, f"{dataset}/{model} batch_size={args.batch_size}"
     assert args.lr == (5e-05 if model == "ALFNet" else 0.001)
-
-    frozen = json.loads((ROOT / "configs/paper/final_runs.json").read_text("utf-8"))
-    assert frozen["batch_size"] == 64
-    assert all(run["batch_size"] == 64 for run in frozen["runs"])
-
-    summary = ROOT / "outputs/ALFNet/alfnet-pems08-s32/checkpoints/training_summary.json"
-    if summary.exists():
-        efficiency = json.loads(summary.read_text("utf-8"))["efficiency"]
-        assert efficiency["batch_size"] == 64
-        assert efficiency["train_samples_per_epoch"] == 8905
-        assert efficiency["optimizer_steps_per_epoch"] == 140
 
 
 @pytest.mark.parametrize("dataset", DATASETS)
@@ -229,12 +206,12 @@ def test_the_two_models_differ_only_where_they_are_allowed_to(dataset):
     """Every shared field, compared field by field, with the diff reported."""
     alfnet, mogernn = _args(dataset, "ALFNet"), _args(dataset, "MoGERNN")
     shared = ("dloader_name", "data_path", "unknown_nodes_path", "input_features",
-              "target_features", "input_len", "pred_len", "freq", "seed",
+              "target_features", "input_len", "pred_len", "slide_step", "freq", "seed",
               "stop_based", "loss", "lifecycle_training_strategy",
               "lcbt_train_end_ratio", "lcbt_val_end_ratio", "lcbt_test_start_ratio",
               "lcbt_scaler_end_ratio", "lcbt_zero_history_ratio",
               "lcbt_steady_ratio", "lcbt_join_ratio", "lcbt_fault_ratio",
-              "lcbt_protocol_seed", "lcbt_validation_seed", "max_epoch", "patience",
+              "lcbt_validation_seed", "max_epoch", "patience",
               "raw_enc_in", "c_out")
     differing = {name: (getattr(alfnet, name), getattr(mogernn, name))
                  for name in shared
@@ -311,17 +288,6 @@ def test_no_config_needs_a_runtime_patch(dataset, model):
            build_runtime_context(dataset, "train").static_asset_hash()
     expected = 1_037_529 if model == "ALFNet" else 226_270
     assert sum(p.numel() for p in session.model.parameters()) == expected
-
-
-@pytest.mark.parametrize("config", [
-    "configs/ALFNet/gs_p8.yaml", "configs/MoGERNN/PEMS08_lcbt_v3.yaml",
-    "configs/ALFNet/gs_bay.yaml",
-])
-def test_a_v3_config_is_refused_by_the_v4_runner(config):
-    from experiments.v4_runner import RunnerRefused
-
-    with pytest.raises(RunnerRefused, match="lcbt_v3"):
-        build_v4_session(ROOT / config)
 
 
 @pytest.mark.parametrize("dataset, wrong", [("PEMS08", "v"), ("PEMS03", "v"),

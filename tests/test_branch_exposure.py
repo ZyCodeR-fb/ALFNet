@@ -210,28 +210,17 @@ def test_both_branches_receive_the_same_full_n_imputed_tensor(p8_context, p8_bat
         p8_batch["base_visible_input"].dtype).data_ptr()
 
 
-def test_the_v4_path_never_scatters_k_nodes_into_n(monkeypatch, p8_context, p8_batch):
-    """The K->N scatter must be unreachable, not merely unused."""
+def test_the_active_path_has_no_k_to_n_scatter(p8_context, p8_batch):
     import model.ALFTemporal.ALFTemporal as alftemporal
 
-    def boom(*args, **kwargs):
-        raise AssertionError("the v4 path scattered K nodes into N")
-
-    monkeypatch.setattr(alftemporal.Model, "_scatter_to_full_nodes", boom)
+    assert not hasattr(alftemporal.Model, "_scatter_to_full_nodes")
     for name in ("load_project_adjacency", "load_project_positions"):
-        if hasattr(alftemporal, name):
-            monkeypatch.setattr(alftemporal, name, boom)
+        assert not hasattr(alftemporal, name)
 
     model = _build_model("PEMS08", p8_context).eval()
     with torch.no_grad():
         output = model.forward_v4(p8_batch, p8_context)
     assert output["pred"].shape[2] == p8_context.num_nodes
-
-    # ... and the archive path still owns it, so this was a real bypass.
-    with pytest.raises(AssertionError, match="scattered"):
-        model.patch_expert._scatter_to_full_nodes(
-            torch.zeros(1, 12, 3, model.patch_expert.expert_input_dim), [0, 1, 2])
-
 
 # --- fail closed on anything that is not this run's full-N batch ---------------
 
@@ -276,7 +265,7 @@ def test_a_context_on_another_node_order_is_refused(p8_context, p8_batch,
         p8_model.forward_v4(p8_batch, permuted)
 
 
-def test_the_v3_tuple_and_a_missing_context_are_both_refused(p8_batch, p8_model):
+def test_a_missing_context_and_legacy_tuple_are_refused(p8_batch, p8_model):
     with pytest.raises(ValueError, match="requires a RuntimeDataContext"):
         p8_model.forward_v4(p8_batch, None)
     with pytest.raises(ValueError, match="ten-tuple"):

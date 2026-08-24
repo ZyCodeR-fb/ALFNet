@@ -2,8 +2,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from lib.graph_native_layout import layout_parts
-from lib.utils import load_project_adjacency, load_project_positions
 from model.comparison_model.family_utils import build_patchstg_cfg
 from .patchstg import PatchSTG as PatchSTGBackbone
 
@@ -50,60 +48,13 @@ def _reorder_data(parts_idx, adj, patch_size):
     return ori_parts_idx, reo_parts_idx, reo_all_idx
 
 
-def _kd_tree(locations, times, axis):
-    sorted_idx = np.argsort(locations[axis])
-    part1 = np.sort(sorted_idx[:locations.shape[1] // 2])
-    part2 = np.sort(sorted_idx[locations.shape[1] // 2:])
-    if times == 1:
-        return [part1, part2]
-    parts = []
-    for part in _kd_tree(locations[:, part1], times - 1, axis ^ 1):
-        parts.append(part1[part])
-    for part in _kd_tree(locations[:, part2], times - 1, axis ^ 1):
-        parts.append(part2[part])
-    return parts
-
-
-def _build_spatial_layout(
-    positions,
-    adj,
-    recur_times,
-    spa_patchsize,
-):
-    """Partition nodes into patches, from coordinates when they exist.
-
-    ``positions`` may be None. PEMS03, PEMS04 and PEMS08 ship no coordinates,
-    and the spectral vectors the old converter substituted are degenerate on
-    disconnected graphs and not basis-stable, so a KD-tree over them partitions
-    by an arbitrary basis. In that case the partition comes from the graph
-    itself. The output contract is unchanged -- a list of parts, padded but
-    never split by `_reorder_data` -- so nothing downstream moves.
-    """
-    if positions is None:
-        parts_idx = layout_parts(adj, int(recur_times))
-    else:
-        parts_idx = _kd_tree(positions.T, int(recur_times), 0)
-    ori_parts_idx, reo_parts_idx, reo_all_idx = _reorder_data(
-        parts_idx,
-        adj,
-        int(spa_patchsize),
-    )
-    return (
-        ori_parts_idx.tolist(),
-        reo_parts_idx.tolist(),
-        reo_all_idx.tolist(),
-        len(parts_idx),
-    )
-
-
 class Model(nn.Module):
 
     @classmethod
     def from_runtime_context(cls, configs, runtime_context):
         """The v4 entry point. Explicit, and it resolves nothing from a path.
 
-        `Model(configs)` stays as the v3 archive path and is not extended. This
-        one takes every graph fact from the context: node count and order, the
+        This takes every graph fact from the context: node count and order, the
         adjacency, coordinates or their absence, and the already-resolved layout
         membership. In particular it does not decide for itself whether to build
         a KD-tree or a graph-native layout -- that decision lives in
@@ -123,9 +74,10 @@ class Model(nn.Module):
 
     def __init__(self, configs, runtime_context=None):
         super().__init__()
+        if runtime_context is None:
+            raise ValueError("construct ALFTemporal through from_runtime_context")
         self.runtime_context = runtime_context
-        self.static_asset_hash = (None if runtime_context is None
-                                  else runtime_context.static_asset_hash())
+        self.static_asset_hash = runtime_context.static_asset_hash()
         self.cfg = build_patchstg_cfg(configs, runtime_context=runtime_context)
         model_cfg = self.cfg["model"]
         self.full_num_nodes = int(self.cfg["node_num"])
@@ -143,36 +95,17 @@ class Model(nn.Module):
             LIFECYCLE_CHANNELS if self.lifecycle_input else 0
         )
 
-        if runtime_context is None:
-            # v3 archive path, unchanged and not extended.
-            full_adj = load_project_adjacency(
-                {"data_path": configs.data_path}
-            ).cpu().numpy()
-            # None when the dataset ships no trustworthy coordinates; the layout
-            # then comes from the graph rather than from invented positions.
-            positions = load_project_positions({"data_path": configs.data_path})
-            ori_parts_idx, reo_parts_idx, reo_all_idx, spa_patchnum = (
-                _build_spatial_layout(
-                    positions,
-                    full_adj,
-                    int(model_cfg["recur_times"]),
-                    int(model_cfg["spa_patchsize"]),
-                )
-            )
-        else:
-            full_adj = runtime_context.adjacency.cpu().numpy()
-            positions = runtime_context.positions
-            self._assert_context_assets(runtime_context, full_adj, model_cfg)
-            # The membership is consumed, never recomputed. Recomputing it here
-            # is what let the manifest and the model disagree about PEMS-BAY.
-            parts_idx = [np.asarray(part, dtype=np.int64)
-                         for part in runtime_context.layout_parts]
-            ori_parts_idx, reo_parts_idx, reo_all_idx = _reorder_data(
-                parts_idx, full_adj, int(model_cfg["spa_patchsize"]))
-            ori_parts_idx = ori_parts_idx.tolist()
-            reo_parts_idx = reo_parts_idx.tolist()
-            reo_all_idx = reo_all_idx.tolist()
-            spa_patchnum = len(parts_idx)
+        full_adj = runtime_context.adjacency.cpu().numpy()
+        positions = runtime_context.positions
+        self._assert_context_assets(runtime_context, full_adj, model_cfg)
+        parts_idx = [np.asarray(part, dtype=np.int64)
+                     for part in runtime_context.layout_parts]
+        ori_parts_idx, reo_parts_idx, reo_all_idx = _reorder_data(
+            parts_idx, full_adj, int(model_cfg["spa_patchsize"]))
+        ori_parts_idx = ori_parts_idx.tolist()
+        reo_parts_idx = reo_parts_idx.tolist()
+        reo_all_idx = reo_all_idx.tolist()
+        spa_patchnum = len(parts_idx)
         self.ori_parts_idx = ori_parts_idx
         self.reo_parts_idx = reo_parts_idx
         self.reo_all_idx = reo_all_idx
@@ -185,10 +118,7 @@ class Model(nn.Module):
         # the message can name the value to put in the YAML.
         expected_tokens = int(spa_patchnum) * int(model_cfg["spa_patchsize"])
         if len(reo_all_idx) != expected_tokens:
-            parts = (layout_parts(full_adj, int(model_cfg["recur_times"]))
-                     if positions is None
-                     else _kd_tree(positions.T, int(model_cfg["recur_times"]), 0))
-            largest = max(len(part) for part in parts)
+            largest = max(len(part) for part in parts_idx)
             raise ValueError(
                 f"spa_patchsize={model_cfg['spa_patchsize']} cannot hold this "
                 f"dataset's KD-tree partition: {self.full_num_nodes} nodes split "
@@ -263,13 +193,6 @@ class Model(nn.Module):
                 "graph_native_component_bfs", "kdtree_on_verified_wgs84"):
             raise ValueError(f"unknown layout algorithm {identity['layout_algorithm']}")
 
-    def _resolve_current_node_ids(self, current_num_nodes):
-        if current_num_nodes == len(self.known_nodes):
-            return self.known_nodes
-        if current_num_nodes == self.full_num_nodes:
-            return list(range(self.full_num_nodes))
-        return list(range(current_num_nodes))
-
     def _build_temporal_features(self, x_enc, x_t_mark):
         if x_t_mark is None or x_t_mark.shape[-1] < 3:
             raise ValueError(
@@ -286,21 +209,13 @@ class Model(nn.Module):
     def forward_v4(self, x_enc, x_t_mark):
         """The v4 path: full N in, full N out, and no scatter anywhere.
 
-        Deliberately a second entry point rather than a branch inside `forward`.
-        The scatter is what made this expert's Unseen nodes a column of zeros
-        while the graph expert saw a shared imputed representation, so v4 must
-        be unable to reach it -- a test monkeypatches `_scatter_to_full_nodes`
-        to raise and requires this to keep working. `forward` and the scatter
-        stay for the v3 archive and are not extended.
+        The retired K-to-N scatter is absent: the full static node axis is the
+        only accepted representation.
 
         A node axis that is not the context's N is refused rather than padded.
         Zero-padding a short axis is exactly the defect being removed, and it
         would be invisible: the shapes downstream would all be right.
         """
-        if self.runtime_context is None:
-            raise ValueError(
-                "ALFTemporal.forward_v4 requires a model built through "
-                "from_runtime_context; the archive path has no context to check")
         if x_enc.dim() != 4:
             raise ValueError(
                 f"ALFTemporal v4 expects [batch, time, node, channel], got "
@@ -318,44 +233,3 @@ class Model(nn.Module):
         full_te = self._build_temporal_features(full_x, x_t_mark)
         out = self.backbone(full_x, full_te).contiguous()
         return {"features": out} if self.emit == "features" else {"pred": out}
-
-    def _scatter_to_full_nodes(self, x_enc, current_node_ids):
-        if x_enc.shape[-1] < self.expert_input_dim:
-            raise ValueError(
-                f"ALFTemporal expects at least {self.expert_input_dim} input channels "
-                f"(raw + lifecycle context), got {x_enc.shape[-1]}"
-            )
-        if x_enc.shape[2] == self.full_num_nodes:
-            return x_enc[..., :self.expert_input_dim]
-        full_x = torch.zeros(
-            x_enc.shape[0],
-            x_enc.shape[1],
-            self.full_num_nodes,
-            self.expert_input_dim,
-            device=x_enc.device,
-            dtype=x_enc.dtype,
-        )
-        full_x[..., current_node_ids, :] = x_enc[..., :self.expert_input_dim]
-        return full_x
-
-    def forward(
-        self,
-        adj,
-        x_enc,
-        x_t_mark=None,
-        pos_mark=None,
-        x_dec=None,
-        dec_t_mark=None,
-        epoch=0,
-    ):
-        current_node_ids = self._resolve_current_node_ids(x_enc.shape[2])
-        full_x = self._scatter_to_full_nodes(x_enc, current_node_ids)
-        full_te = self._build_temporal_features(full_x, x_t_mark)
-        out = self.backbone(full_x, full_te).contiguous()
-        if self.emit == "features":
-            if x_enc.shape[2] != self.full_num_nodes:
-                out = out[:, current_node_ids, :]
-            return {"features": out}
-        if x_enc.shape[2] != self.full_num_nodes:
-            out = out[..., current_node_ids, :]
-        return {"pred": out}

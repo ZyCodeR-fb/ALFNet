@@ -21,7 +21,6 @@ from layers.evidence_router import (
 from layers.source_grin import GRINInputImputer
 from lib.lcbt_v4 import assert_v4_strategy
 from lib.teacher_forcing import masked_teacher_forcing
-from lib.utils import load_project_adjacency, resolve_known_unknown_nodes
 from lib.v4_batch import read_common, resolve_adjacency
 from utils.model_output import unpack_model_output
 
@@ -188,17 +187,12 @@ def _build_expert(spec, device, expert_name, runtime_context=None):
     expert_args.model = spec["model"]
     module = importlib.import_module(f"model.{_expert_module_name(spec['model'])}")
     if runtime_context is None:
-        # v3 archive path, unchanged.
-        return module.Model(expert_args).float(), expert_args
-    # v4: the nested expert must take the *same* context. A default of None on
-    # build_patchstg_cfg means a dropped context silently reverts to resolving
-    # the graph from data_path, so the absence of an explicit entry point is an
-    # error rather than a reason to fall back.
+        raise ValueError("ALFNet requires the active v4 RuntimeDataContext")
     entry = getattr(module.Model, "from_runtime_context", None)
     if entry is None:
         raise ValueError(
             f"ALFNet v4 requires {spec['model']}.Model.from_runtime_context; "
-            "refusing to construct it through the archive path")
+            "refusing a private asset-resolution fallback")
     return entry(expert_args, runtime_context).float(), expert_args
 
 
@@ -224,15 +218,9 @@ class Model(nn.Module):
             and configs.lifecycle_observation_mask_feature
         ):
             raise ValueError("ALFNet requires availability, state-age, and observation-mask inputs")
-        # v3 archive runs under v3; a model bound to a RuntimeDataContext runs
-        # under v4. Neither may borrow the other's name -- the two protocols
-        # differ on the split and the node scope, and a checkpoint that recorded
-        # the wrong one could not be placed in either table.
         if runtime_context is None:
-            if configs.lifecycle_training_strategy != "lcbt_v3":
-                raise ValueError("ALFNet streamlined mainline requires lifecycle_training_strategy=lcbt_v3")
-        else:
-            assert_v4_strategy(configs, "ALFNet")
+            raise ValueError("construct ALFNet through from_runtime_context")
+        assert_v4_strategy(configs, "ALFNet")
 
         family = getattr(configs, "model_family_cfg", {}) or {}
         experts = family.get("experts", {})
@@ -441,7 +429,7 @@ class Model(nn.Module):
             raise ValueError(
                 f"distillation was removed; recipe still sets {retired_distillation}. "
                 "The deliverable is single-stage and end-to-end -- train the "
-                "residual jointly (see configs/ALFNet/jr.yaml) instead."
+                "residual jointly instead."
             )
 
         self.fault_residual_scale = float(recipe.get("fault_residual_scale", 0.0))
@@ -494,44 +482,25 @@ class Model(nn.Module):
             recipe.get("temporal_refiner_role_scale", {}),
         )
 
-        if runtime_context is not None:
-            # v4: node count and the known set are facts about the run, taken
-            # from the context. The archive path below reads them off disk only
-            # to learn the same two numbers.
-            self.runtime_context = runtime_context
-            self.static_asset_hash = runtime_context.static_asset_hash()
-            self._v4_adjacency_cache = {}
-            self.full_num_nodes = runtime_context.num_nodes
-            self.known_nodes = [int(node) for node in runtime_context.known_nodes]
-            for name, expert in (("graph", self.graph_expert),
-                                 ("patch", self.patch_expert)):
-                bound = getattr(expert, "static_asset_hash", None)
-                if bound != self.static_asset_hash:
-                    raise ValueError(
-                        f"ALFNet {name} expert bound to static assets {bound!r}, "
-                        f"outer has {self.static_asset_hash!r}; the two would be "
-                        "reading different graphs")
-                nodes = getattr(expert, "full_num_nodes", None) or getattr(
-                    expert, "context_full_num_nodes", None)
-                if nodes is not None and int(nodes) != self.full_num_nodes:
-                    raise ValueError(
-                        f"ALFNet {name} expert has {nodes} nodes, outer has "
-                        f"{self.full_num_nodes}")
-            return
-        self.runtime_context = None
-        self.static_asset_hash = None
+        self.runtime_context = runtime_context
+        self.static_asset_hash = runtime_context.static_asset_hash()
         self._v4_adjacency_cache = {}
-        full_adj = load_project_adjacency({"data_path": configs.data_path})
-        self.full_num_nodes = int(full_adj.shape[0])
-        self.known_nodes, _ = resolve_known_unknown_nodes(
-            {
-                "data_path": configs.data_path,
-                "unknown_nodes_path": configs.unknown_nodes_path,
-                "unknown_nodes_list": configs.unknown_nodes_list,
-                "unknown_nodes_num": configs.unknown_nodes_num,
-                "seed": configs.seed,
-            }
-        )
+        self.full_num_nodes = runtime_context.num_nodes
+        self.known_nodes = [int(node) for node in runtime_context.known_nodes]
+        for name, expert in (("graph", self.graph_expert),
+                             ("patch", self.patch_expert)):
+            bound = getattr(expert, "static_asset_hash", None)
+            if bound != self.static_asset_hash:
+                raise ValueError(
+                    f"ALFNet {name} expert bound to static assets {bound!r}, "
+                    f"outer has {self.static_asset_hash!r}; the two would be "
+                    "reading different graphs")
+            nodes = getattr(expert, "full_num_nodes", None) or getattr(
+                expert, "context_full_num_nodes", None)
+            if nodes is not None and int(nodes) != self.full_num_nodes:
+                raise ValueError(
+                    f"ALFNet {name} expert has {nodes} nodes, outer has "
+                    f"{self.full_num_nodes}")
 
     def get_optimizer_param_groups(self, base_lr):
         graph_params = list(self.graph_expert.parameters()) + list(

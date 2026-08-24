@@ -23,23 +23,13 @@ PHASES = ("train", "validation", "test")
 
 
 @pytest.fixture
-def no_private_resolution(monkeypatch):
-    """Every path-based resolver raises; the counter proves it stayed at zero."""
-    import lib.utils as utils
+def no_private_resolution():
     import model.comparison_model.family_utils as family
 
-    calls = {"n": 0}
-
-    def boom(*args, **kwargs):
-        calls["n"] += 1
-        raise AssertionError("v4 resolved a graph asset from data_path")
-
-    for module, name in ((utils, "load_project_adjacency"),
-                         (utils, "load_project_positions"),
-                         (family, "infer_project_num_nodes"),
-                         (family, "resolve_known_unknown_nodes")):
-        monkeypatch.setattr(module, name, boom)
-    return calls
+    for name in ("load_project_adjacency", "load_project_positions",
+                 "infer_project_num_nodes", "resolve_known_unknown_nodes"):
+        assert not hasattr(family, name)
+    return {"n": 0}
 
 
 def _build(dataset, phase="train", context=None):
@@ -180,20 +170,3 @@ def test_two_constructions_agree_parameter_for_parameter(no_private_resolution):
     for name in a:
         assert a[name].shape == b[name].shape, name
         assert torch.equal(a[name], b[name]), name
-
-
-# --- the old forward still runs ----------------------------------------------
-
-
-def test_legacy_forward_still_runs_after_the_injection(no_private_resolution):
-    """Not a fairness result. The K->N scatter is still here on purpose; this
-    only shows the constructor change did not break the existing path."""
-    context = build_runtime_context("PEMS08", "train")
-    model = _build("PEMS08", context=context).eval()
-    known = len(model.known_nodes)
-    generator = torch.Generator().manual_seed(3)
-    x_enc = torch.randn(2, 12, known, model.expert_input_dim, generator=generator)
-    marks = torch.rand(2, 12, 3, generator=generator) * 5
-    with torch.no_grad():
-        out = model(context.adjacency, x_enc, marks)
-    assert isinstance(out, dict) and out

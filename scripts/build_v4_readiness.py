@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scripts import build_v4_five_dataset_plan as five  # noqa: E402
-from scripts.build_v4_development_plan import sha256_file  # noqa: E402
+from scripts.v4_utils import sha256_file  # noqa: E402
 
 ATTESTATION_PATH = ROOT / "configs/paper/v4_five_dataset_readiness.json"
 SCHEMA_VERSION = 1
@@ -62,14 +62,6 @@ def attestation_hash(record):
 def build(plan=None, preflight=None):
     plan = plan or five.load_plan()
     five.assert_plan_still_holds(plan)
-    from scripts.build_v4_development_plan import (assert_plan_still_holds,
-                                                   load_plan as load_development)
-    from scripts.v4_reuse_audit import audit_reusable
-
-    development = assert_plan_still_holds(load_development())
-    reuse = audit_reusable(development, plan["data"], plan["configs"])
-    reuse_ok = all(r["execution_action"] == "reuse" for r in reuse)
-
     data = {}
     for dataset, entry in plan["data"].items():
         data[dataset] = {
@@ -95,22 +87,13 @@ def build(plan=None, preflight=None):
         "data": data,
         "configs": configs,
         "cpu_preflight": preflight or {},
-        "reuse_audit": {
-            "source_plan_sha256": development["plan_sha256"],
-            "runs_audited": len(reuse),
-            "runs_compatible": sum(1 for r in reuse
-                                   if r["execution_action"] == "reuse"),
-            "all_compatible": reuse_ok,
-            "records": reuse,
-        },
+        "reuse_policy": {"allowed": False, "runs_reused": 0},
         "readiness": {
             "data_ready": True,
             "graph_ready": True,
-            # Both are earned, not declared: exposure by the ten CPU preflights,
-            # training by those plus a clean reuse audit.
+            # Both are earned, not declared, by the ten CPU preflights.
             "exposure_ready": bool(preflight and preflight.get("all_passed")),
-            "training_ready": bool(preflight and preflight.get("all_passed")
-                                   and reuse_ok),
+            "training_ready": bool(preflight and preflight.get("all_passed")),
         },
         "manifest_readiness_note": (
             "the per-dataset manifests keep the readiness flags they were "
@@ -148,8 +131,6 @@ def assert_ready(plan, path=None):
     not_ready = [name for name, value in record["readiness"].items() if not value]
     if not_ready:
         raise ReadinessRefused(f"the attestation reports {not_ready} false")
-    if not record["reuse_audit"]["all_compatible"]:
-        raise ReadinessRefused("the reuse audit did not pass for every run")
     drifted = []
     for dataset, entry in record["data"].items():
         registered = plan["data"][dataset]
@@ -178,8 +159,7 @@ def main(argv=None):
         print(f"attestation {record['attestation_sha256'][:16]} permits plan "
               f"{record['plan_sha256'][:16]}")
         print(f"  readiness: {record['readiness']}")
-        print(f"  reuse:     {record['reuse_audit']['runs_compatible']}/"
-              f"{record['reuse_audit']['runs_audited']} compatible")
+        print("  reuse:     forbidden (clean 30-run reproduction)")
         print(f"  preflight: {record['cpu_preflight'].get('combinations')} "
               f"combinations, all_passed="
               f"{record['cpu_preflight'].get('all_passed')}")

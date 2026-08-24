@@ -6,13 +6,10 @@ what changes is which nodes' *dynamic signal* the phase may read -- K for
 training, K union V for validation, K union T for test. Nodes outside that scope
 are still present, still propagate, and simply contribute no measurement.
 
-Deliberately a separate class rather than a mode flag inside the v3 dataset. The
-v3 path returns a ten-tensor tuple that a dozen call sites unpack positionally,
-and threading a second node axis through it would put the two protocols one
-`if` apart everywhere. v4 returns a named dict; nothing else reads it yet.
+The loader returns a named dict; positional legacy batches are unsupported.
 
 Nothing here guesses. The dataset is constructed from a RuntimeDataContext or
-not at all -- there is no sniffing of shapes or filenames, and no fallback to v3
+not at all -- there is no sniffing of shapes or filenames and no fallback
 when a v4 build fails, because a silent downgrade is how an experiment ends up
 reporting the wrong protocol.
 """
@@ -22,7 +19,7 @@ import torch
 from torch.utils.data import Dataset
 
 from data_provider.calendar_strata import calendar_stratum
-from data_provider.lcbt_protocol import build_lcbt_schedule
+from data_provider.v4_schedule import build_lcbt_schedule
 from lib.runtime_context import ContextRefused
 from data_provider.lifecycle_roles import (
     ROLE_AAS, ROLE_CHANNEL_COUNT, ROLE_FS, ROLE_NAS, ROLE_VS,
@@ -37,13 +34,18 @@ class V4LifecycleDataset(Dataset):
 
     def __init__(self, context, payload_path, input_len=12, pred_len=12,
                  seed=32, epoch=0, split_fractions=SPLIT_FRACTIONS, scaler=None,
-                 freq="min", validation_seed=12026):
+                 freq="min", validation_seed=12026, slide_step=1):
         if context is None:
             raise ContextRefused(
                 "v4 requires a RuntimeDataContext; it is not inferred from the "
                 "payload and never falls back to the v3 loader")
         self.context = context
         self.input_len, self.pred_len = int(input_len), int(pred_len)
+        self.slide_step = int(slide_step)
+        if self.input_len <= 0 or self.pred_len <= 0:
+            raise ContextRefused("input_len and pred_len must be positive")
+        if self.slide_step <= 0:
+            raise ContextRefused("slide_step must be a positive integer")
         self.num_nodes = context.num_nodes
         payload = load_v4_payload(payload_path)
 
@@ -117,7 +119,7 @@ class V4LifecycleDataset(Dataset):
         span = self.input_len + self.pred_len
         scope = self.context.signal_scope
         origins = []
-        for origin in range(start, end - span + 1):
+        for origin in range(start, end - span + 1, self.slide_step):
             window = self.natural[origin:origin + span][:, scope]
             # A window is usable if the in-scope nodes carry any measurement at
             # all. Out-of-scope columns are not consulted, so their values and
@@ -199,8 +201,30 @@ class V4LifecycleDataset(Dataset):
         return natural_input & scope[None, :] & lifecycle, scope, roles, age
 
     def __getitem__(self, index):
+        return self._sample_from_entry(index, self.schedule[index])
+
+    def counterfactual(self, index):
+        """Matched control for a Join or Fault schedule entry.
+
+        The origin, cohort, calendar regime and target are identical. Join is
+        compared with zero-history on the same held-out cohort; Fault with
+        steady operation on the same known cohort. This is an evaluator-only
+        construction and never changes the training schedule.
+        """
+        treated = self.schedule[index]
+        scenario = str(treated["scenario"])
+        controls = {"join": "zero_history", "fault": "steady"}
+        if scenario not in controls:
+            raise ContextRefused(
+                f"PLES needs a join or fault entry, got {scenario!r}")
+        control = dict(treated)
+        control["scenario"] = controls[scenario]
+        control["phase_id"] = -1
+        control["evidence_steps"] = 0
+        return self._sample_from_entry(index, control)
+
+    def _sample_from_entry(self, index, entry):
         origin = int(self.origins[index])
-        entry = self.schedule[index]
         end = origin + self.input_len
         stop = end + self.pred_len
 
@@ -271,6 +295,7 @@ class V4LifecycleDataset(Dataset):
                 torch.from_numpy(available.astype(np.float32)).unsqueeze(-1),
             ], dim=-1),
             "origin": origin,
+            "sample_index": int(index),
             "phase_id": entry["phase_id"],
             "scenario": entry["scenario"],
             "evidence_steps": int(entry["evidence_steps"]),

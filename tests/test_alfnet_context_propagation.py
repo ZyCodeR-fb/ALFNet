@@ -21,35 +21,16 @@ PHASES = ("train", "validation", "test")
 
 
 @pytest.fixture
-def no_private_resolution(monkeypatch):
-    """Patches the definitions *and* the already-imported aliases.
-
-    ALFNet imports `load_project_adjacency` and `resolve_known_unknown_nodes`
-    into its own namespace, so patching only `lib.utils` would leave the real
-    functions reachable and the test would pass while proving nothing.
-    """
-    import lib.utils as utils
+def no_private_resolution():
     import model.ALFNet.ALFNet as alfnet
     import model.ALFTemporal.ALFTemporal as alftemporal
     import model.comparison_model.family_utils as family
 
-    calls = {"n": 0}
-
-    def boom(*args, **kwargs):
-        calls["n"] += 1
-        raise AssertionError("v4 resolved a graph asset from a path")
-
-    targets = [
-        (utils, "load_project_adjacency"), (utils, "load_project_positions"),
-        (family, "infer_project_num_nodes"), (family, "resolve_known_unknown_nodes"),
-        (family, "load_project_adjacency"), (family, "load_project_positions"),
-        (alfnet, "load_project_adjacency"), (alfnet, "resolve_known_unknown_nodes"),
-        (alftemporal, "load_project_adjacency"), (alftemporal, "load_project_positions"),
-    ]
-    for module, name in targets:
-        if hasattr(module, name):
-            monkeypatch.setattr(module, name, boom)
-    return calls
+    for module in (alfnet, alftemporal, family):
+        for name in ("load_project_adjacency", "load_project_positions",
+                     "infer_project_num_nodes", "resolve_known_unknown_nodes"):
+            assert not hasattr(module, name)
+    return {"n": 0}
 
 
 def _build(dataset, phase="train", context=None, **overrides):
@@ -102,7 +83,7 @@ def test_a_dropped_context_is_an_error_not_a_fallback(monkeypatch):
     monkeypatch.setattr(
         alfnet, "_build_expert",
         lambda spec, device, name, runtime_context=None: original(spec, device, name, None))
-    with pytest.raises(ValueError, match="static assets"):
+    with pytest.raises(ValueError, match="RuntimeDataContext"):
         _build("PEMS08")
 
 
@@ -188,22 +169,3 @@ def test_construction_is_deterministic_and_the_parameter_set_is_unchanged(
         assert a[name].shape == b[name].shape and torch.equal(a[name], b[name]), name
     # The count CLAUDE.md records for ALFNet after the strict-inductive fix.
     assert sum(p.numel() for p in _build("PEMSBAY").parameters()) == 1_037_529
-
-
-def test_the_legacy_forward_still_runs(no_private_resolution):
-    """Not a fairness result -- the K->N scatter is still in place on purpose."""
-    context = build_runtime_context("PEMS08", "train")
-    model = _build("PEMS08", context=context).eval()
-    known = len(model.known_nodes)
-    generator = torch.Generator().manual_seed(5)
-    args = load_args_from_config(CONFIGS["PEMS08"], [])
-    adjacency = torch.rand(known, known, generator=generator)
-    x_enc = torch.zeros(2, args.input_len, known, args.enc_in)
-    x_enc[..., 0] = torch.randn(2, args.input_len, known, generator=generator)
-    x_enc[..., 2] = 1.0
-    x_enc[..., args.enc_in - 1] = 1.0
-    marks = torch.rand(2, args.input_len, 3, generator=generator) * 5
-    horizon = torch.rand(2, args.pred_len, 3, generator=generator) * 5
-    with torch.no_grad():
-        out = model(adjacency, x_enc, marks, None, None, horizon, 0)
-    assert out["pred"].shape[2] == known

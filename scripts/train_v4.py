@@ -62,11 +62,7 @@ from lib.lcbt_v4 import (  # noqa: E402
     TEACHER_FORCING_POLICY,
     teacher_forcing_ratio,
 )
-from scripts.build_v4_development_plan import (  # noqa: E402
-    assert_plan_still_holds,
-    load_plan,
-    sha256_file as _plan_sha256_file,
-)
+from scripts.v4_utils import sha256_file as _plan_sha256_file  # noqa: E402
 
 CHECKPOINT_SCHEMA = 1
 RUN_STATE_SCHEMA = 1
@@ -362,7 +358,7 @@ def assert_not_clobbering(run_directory, resume, restart_incomplete=False):
 
 
 def _table_from_best(session, run_directory, best_epoch):
-    """Recompute the 36 cells from the stored best weights, then restore.
+    """Recompute the 33 cells from stored best weights after a resume.
 
     Used only on resume. The weights in memory are the *last* epoch's, not the
     selected one, so the table has to come from best.pt or it would describe a
@@ -405,40 +401,28 @@ def build_scheduler(session, optimizer):
 
 
 def load_plan_authority(plan_path=None):
-    """Load and verify whichever plan was asked for. Never a default fallback.
-
-    Dispatch is on the plan's own `kind`, not on a config name or a directory:
-    guessing which plan a config belongs to is how a five-dataset launcher ended
-    up having its METR-LA runs judged against the two-dataset development plan,
-    which rejected them before CUDA was ever touched.
-
-    A five-dataset plan additionally has to present a valid readiness
-    attestation, and it is checked here -- before a session, a run directory, a
-    model or a CUDA context exists.
-    """
+    """Load the one active v4 reproduction plan and its running permit."""
     if plan_path is None:
-        # The historical development entry point, and only that.
-        return assert_plan_still_holds(load_plan())
+        plan_path = ROOT / "configs/paper/v4_five_dataset_plan.json"
     plan_path = Path(plan_path)
     if not plan_path.exists():
         raise RunnerRefused(f"{plan_path} does not exist")
+    active = (ROOT / "configs/paper/v4_five_dataset_plan.json").resolve()
+    if plan_path.resolve() != active:
+        raise RunnerRefused(
+            f"{plan_path} is not the active reproduction plan {active}; "
+            "archived result plans are evidence, not training authorities")
     kind = json.loads(plan_path.read_text("utf-8")).get("kind")
-    if kind == "v4_five_dataset_plan":
-        from scripts import build_v4_five_dataset_plan as five
-        from scripts.build_v4_readiness import ReadinessRefused, assert_ready
-
-        plan = five.assert_plan_still_holds(five.load_plan(plan_path))
-        try:
-            assert_ready(plan)
-        except ReadinessRefused as error:
-            raise RunnerRefused(f"{plan_path}: {error}") from error
-        return plan
-    if kind is None and plan_path.resolve() == (
-            ROOT / "configs/paper/v4_development_plan.json").resolve():
-        return assert_plan_still_holds(load_plan())
-    raise RunnerRefused(
-        f"{plan_path} declares kind={kind!r}; this entry point knows the "
-        "development plan and v4_five_dataset_plan")
+    if kind != "v4_five_dataset_plan":
+        raise RunnerRefused(f"{plan_path} declares unsupported kind={kind!r}")
+    from scripts import build_v4_five_dataset_plan as five
+    from scripts.build_v4_readiness import ReadinessRefused, assert_ready
+    plan = five.assert_plan_still_holds(five.load_plan(plan_path))
+    try:
+        assert_ready(plan)
+    except ReadinessRefused as error:
+        raise RunnerRefused(f"{plan_path}: {error}") from error
+    return plan
 
 
 def resolve_plan(config_path, plan=None):
@@ -456,7 +440,7 @@ def resolve_plan(config_path, plan=None):
         raise RunnerRefused(
             f"{relative} is not one of the {len(registered)} configs registered "
             f"by plan {plan['plan_sha256'][:16]} "
-            f"({plan.get('kind', 'v4_development_plan')}): {sorted(registered)}")
+            f"({plan.get('kind')}): {sorted(registered)}")
     return plan, registered[relative]
 
 
@@ -524,9 +508,14 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
         train_report = train_one_epoch(session, optimizer, epoch,
                                        max_batches=max_train_batches,
                                        loss_name=session.args.loss)
-        validation_report = validate(session, epoch=epoch,
-                                     max_batches=max_validation_batches,
-                                     loss_name=session.args.loss)
+        validation_result = validate(
+            session, epoch=epoch, max_batches=max_validation_batches,
+            loss_name=session.args.loss,
+            return_cell_table=collect_development_table)
+        if collect_development_table:
+            validation_report, candidate_table = validation_result
+        else:
+            validation_report, candidate_table = validation_result, None
         candidate = early_stopping_metric(validation_report)
         history.append({"epoch": epoch, "train": train_report,
                         "validation": validation_report})
@@ -546,10 +535,9 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
         if improved:
             best = {"epoch": epoch, "life_avg_mae": candidate}
             if collect_development_table:
-                # The 36 development cells belong to the *selected* epoch, so
-                # they are recomputed whenever the selection moves and never
-                # carried over from a worse one.
-                best_table = collect_validation_table(session, epoch=epoch)
+                # The table and early-stopping score come from the same model
+                # forward.  Do not run validation a second time at a best point.
+                best_table = candidate_table
             if save:
                 atomic_save(
                     checkpoint_payload(session, config_path, config_sha, epoch,
@@ -584,9 +572,9 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
         report["plan_sha256"] = plan["plan_sha256"]
         report["plan_status"] = plan["status"]
     if collect_development_table:
-        if best_table is None or cell_count(best_table) != 36:
+        if best_table is None or cell_count(best_table) != 33:
             raise RunnerRefused(
-                "the development table is missing or is not 36 cells; refusing "
+                "the development table is missing or is not 33 cells; refusing "
                 "to report a shrunken table")
         report["development_validation_table"] = best_table
     if save:
@@ -619,13 +607,8 @@ def main(argv=None):
                         help="one train batch, one validation batch, no checkpoint")
     parser.add_argument("--max_train_batches", type=int, default=None)
     parser.add_argument("--max_validation_batches", type=int, default=None)
-    plan_source = parser.add_mutually_exclusive_group()
-    plan_source.add_argument(
-        "--development_plan", action="store_true",
-        help=("run under the historical two-dataset development plan; kept for "
-              "that entry point only"))
-    plan_source.add_argument(
-        "--plan", default=None,
+    parser.add_argument(
+        "--plan", default="configs/paper/v4_five_dataset_plan.json",
         help=("path to the frozen plan this run belongs to, e.g. "
               "configs/paper/v4_five_dataset_plan.json"))
     arguments = parser.parse_args(argv)
@@ -639,17 +622,13 @@ def main(argv=None):
                           ("dataset", "model", "parameter_count", "best_epoch")},
                          indent=1))
         return 0
-    # Whichever plan was named, loaded and verified once, here. `--plan` and
-    # `--development_plan` are mutually exclusive, so there is no order in which
-    # one can silently win over the other.
-    under_a_plan = bool(arguments.development_plan or arguments.plan)
-    plan = load_plan_authority(arguments.plan) if under_a_plan else None
+    plan = load_plan_authority(arguments.plan)
     report = train(arguments.config, arguments.output_root, device=arguments.device,
                    seed=arguments.seed, resume=arguments.resume,
                    max_train_batches=arguments.max_train_batches,
                    max_validation_batches=arguments.max_validation_batches,
                    plan=plan, restart_incomplete=arguments.restart_incomplete,
-                   collect_development_table=under_a_plan)
+                   collect_development_table=True)
     print(json.dumps({key: value for key, value in report.items()
                       if key not in ("history", "development_validation_table")},
                      indent=1))

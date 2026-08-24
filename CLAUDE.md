@@ -1,689 +1,147 @@
-# CLAUDE.md
+# ALFNet v4 repository contract
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This repository has one active experiment: ALFNet versus MoGERNN on five
+traffic datasets under the v4 full-node-axis lifecycle protocol. Do not add a
+v3 compatibility path, silently infer a missing configuration value, or use a
+test result to tune the model.
 
----
+## Preserved result and active reproduction
 
-## ACTIVE ROADMAP — minimal-change v4
+The completed experiment is immutable evidence:
 
-Work has moved to a **minimal-change v4** scope, frozen in
-`docs/v4_minimal_change_freeze.md`: four datasets (PEMS03, PEMS04, PEMS08,
-PEMS-BAY), dataset-native targets (flow for the three PeMS sets, speed for
-PEMS-BAY), and no architecture rewrite. METR-LA stays as a retrospective record.
+- plan: `configs/paper/archive/v4_result_946d/plan.json`
+- plan id: `946d0b450bb10e3e0e5bc5ee066694bce13b3bdcc29c1c5e5a7e0702b2f4d0c8`
+- outputs: `outputs_v4/five_dataset/946d0b450bb10e3e0e5bc5ee066694bce13b3bdcc29c1c5e5a7e0702b2f4d0c8`
+- seeds: 32, 42, 52
+- archived table shape: 36 cells, including the derived WorstGroup row
 
-Paused because they change no metric: D2-B content-addressed publication, the
-independent collector oracle, and regenerating v3 diagnostics. Existing Stage 1
-code stays; it is not extended further.
+Those files are not rewritten. The active reproduction plan is
+`configs/paper/v4_five_dataset_plan.json`. It is a clean 30-run plan; old
+checkpoints are never relabelled as runs of the new plan. The reproduction
+removes WorstGroup from runtime reporting, so its table has 33 cells.
 
----
+## Data and prediction targets
 
-## ACTIVE STATUS — read this before trusting anything below
+| dataset | N | target | channel | unit | static layout | `spa_patchsize` | largest resolved part |
+|---|---:|---|---:|---|---|---:|---:|
+| PEMS03 | 358 | flow (`q`) | 0 | veh/5min | component-aware graph BFS | 12 | 12 |
+| PEMS04 | 307 | flow (`q`) | 0 | veh/5min | component-aware graph BFS | 11 | 10 |
+| PEMS08 | 170 | flow (`q`) | 0 | veh/5min | component-aware graph BFS | 7 | 6 |
+| METR-LA | 207 | speed (`v`) | 2 | mph | KD-tree on verified WGS84 | 8 | 7 |
+| PEMS-BAY | 325 | speed (`v`) | 2 | mph | KD-tree on verified WGS84 | 12 | 11 |
 
-Much of this file documents **v3**, which is now a *historical, topology-known, post-hoc retrospective*.
-It is kept because the runs and their numbers are real and must stay traceable, **not** because it
-describes the current experiment. Where a later section contradicts this banner, this banner wins.
+Channel is an array index, not the number of variables. Flow and speed are
+different tasks and their absolute errors must never be averaged together.
 
-| claim found below | actual status |
-|---|---|
-| "the final experiment" / `final_18` | **v3 retrospective/exploratory.** Not the paper's confirmatory experiment. |
-| PEMS08 is the "confirmation set" | **False now.** Its test split has been read. It is development/exploratory. |
-| METR-LA, PEMS-BAY, PEMS08 identities | **All three are development/exploratory.** All three test splits have been read. |
-| "the frozen model `gs`" | v3's frozen model. **Not** a v4 candidate — it carries the duplicated operator. |
-| 50/10/40 split, LCE v3, PLES v3, LCBT v3.2 | v3 protocols. v4 moves to 60/20/20 with strict node-unseen. |
-| "no need for LCE/PLES v4" | **Superseded.** v4 changes graph scope, split and target policy. |
-| three-seed paired results | **post-hoc descriptive diagnostics only** — no p-value, no significance, no confirmatory claim. |
+`spa_patchsize` is a padding capacity, not a temporal patch count. The uniform
+correctness rule is `spa_patchsize >= largest resolved part`. Forcing every
+dataset to either `max` or `max+1` would change four of the five frozen ALFNet
+computations; therefore the measured capacities above are retained. PEMS03's
+12 is valid and is not changed to 13 merely for cosmetic uniformity.
 
-**The v4 confirmation datasets are PEMS03 and PEMS04**, and they have taken no part in any selection.
-Both must be reported together; picking the better one after the fact is outcome-dependent selection.
+The temporal encoder uses `tem_patchsize=12`, `tem_patchnum=1`: one 12-step
+history token per spatial part.
 
-**PEMS03/PEMS04 data is NOT fixed.** `data/PEMS03/raw_data.pkl` (SHA256 `2f5c6182…`) still carries
-2016-07-01…2016-09-29 instead of 2018-09-01…2018-11-30, and `data/PEMS04/raw_data.pkl`
-(SHA256 `b8741a79…`) still carries 2016-07-01…2016-08-28 instead of 2018-01-01…2018-02-28. Both still
-use converter-derived spectral `pos_stamp` in place of coordinates. The *original* `.npz`/`.csv` signal
-and edge files show no numeric corruption — the fault is in the derived `raw_data.pkl` metadata. Repair
-is **Stage 2-C**, after the Stage 2-0 specification is agreed. See `docs/stage2_0_design.md`.
+Only `data_v4/<dataset>/{raw_data.pkl,unknown_nodes.npy}` is consumed at
+runtime. `data/<dataset>/original/` is immutable source evidence and must not be
+deleted. Dataset manifests under `configs/paper/v4_data_manifests/` bind source,
+payload, target, graph, layout and node identities by hash.
 
-**Strict node-unseen means more than "no node-indexed parameter."** It also requires the training
-computation graph, the training schedule and every structural asset to be isolated from held-out nodes.
-v3 does not satisfy this, which is why v3 results are *topology-known* and cannot support a
-strict-node-unseen claim.
+## Protocol
 
-Nothing in v3 is deleted or rewritten. Old numbers, old protocol hashes and old artefacts stay exactly
-as they are; only their status is corrected.
+- Time split: 60% train, 20% validation, 20% test.
+- Input and horizon: 12 steps each (one hour at five-minute cadence).
+- Sliding-window stride: **1**. YAML is authoritative and the loader consumes
+  `slide_step`; it is not hard-coded.
+- Full static node axis and topology are visible in every phase.
+- Dynamic signal scope: train K; validation K union V; test K union T.
+- K, V and T are disjoint where required; the scaler fits train time on K only.
+- Four equally sampled scenarios: zero-history, steady, join and fault.
+- Join/Fault evidence length k is balanced over 1..12.
+- Run seed (32/42/52) controls the node split, schedule, shuffle and teacher
+  forcing. Validation schedule seed is fixed at 12026.
+- Model parameter initialization is fixed at seed 1234 for controlled model
+  comparison. `lcbt_protocol_seed` does not exist: it was unused in v4.
+- Teacher forcing is sample-level, training-only and mask constrained; it is
+  exactly zero on validation/test.
+- Checkpoint selection is validation LifeAvg MAE with strict `<`; ties keep the
+  earlier epoch. The 33-cell table and selection score share one validation
+  forward pass.
+- The test split is never used for model selection.
 
----
+## Reported table
 
-## What this repo actually is now
+Main rows: Unseen, Steady, Join, Fault and LifeAvg. Phase rows: Cold, Warm,
+Ready, Onset, Decay and Outage. Each has MAE, RMSE and MAPE: 11 x 3 = 33 cells.
 
-It started as the official MoGERNN implementation (see `README.md`, TR-C 2025). It has since become the
-development repo for **ALFNet**, a lifecycle-aware traffic predictor evaluated against MoGERNN and a dozen
-other baselines under three frozen protocols. MoGERNN is now the headline baseline, not the subject.
+WorstGroup was `max(Unseen, Steady, Join, Fault)`, so it was not an independent
+measurement and is no longer computed by active code. The archived 36-cell
+JSON remains untouched for auditability.
 
-## Research objective
+MAPE uses `abs(error) / clamp(abs(target), 1e-6)`. It is unstable at low flow;
+interpret it beside MAE/RMSE and the target-scale distribution, never alone.
 
-Real sensing networks are not a fixed node set under stable observation conditions. A sensor joins,
-accumulates history, runs steadily, degrades and goes dark; at any instant a node may have zero history,
-partial history, or history polluted by a long gap. ALFNet targets that regime with **two anchors and two
-trajectories** — static `Unseen` and `Steady`; a join trajectory `Cold → Warm → Ready`; a fault trajectory
-`Onset → Decay → Outage`.
+## Model architecture
 
-The design intent: **graph propagation carries the low-evidence and no-history nodes, and a light
-spatio-temporal conditioner corrects the graph representation once a node has enough of its own history.**
+Both models receive the exact same full-N `base_visible_input`, availability
+masks, time marks and adjacency. A shared GRIN-style imputer produces one
+`filled` tensor before ALFNet branches; ALFGraph and ALFTemporal both consume
+that same tensor.
 
-Hard constraints on the deliverable model:
+ALFNet adds only method-specific lifecycle context (role one-hot, state age and
+observation mask). ALFGraph applies lifecycle-conditioned graph propagation.
+ALFTemporal applies the resolved static spatial layout plus the one-token
+12-step temporal encoder. Their features are fused by FiLM and passed through
+the graph refiner. The frozen parameter count is 1,037,529.
 
-* trained **from random initialisation, single-stage, end-to-end**;
-* no teacher, no distillation, no frozen anchor, no fg1-initialised weights, no multi-stage schedule.
+The router exposes five labels but fewer numerically distinct propagation
+operators:
 
-36/36 cells beating MoGERNN is an engineering target, never a reason to change a protocol or drop a
-dataset. **Three datasets, three identities** — this is the single fact most often got wrong, so it is
-stated here and again under "Current state":
+- directed weighted METR-LA/PEMS-BAY: 4 effective supports because weighted
+  mean and forward diffusion are the same row-normalised operator;
+- binary/symmetric PEMS03/PEMS04/PEMS08: 3 effective supports because weighted
+  mean equals forward diffusion and forward equals backward.
 
-| dataset | identity |
-|---|---|
-| METR-LA | development set. Inspected repeatedly, including its test split. Stays in the paper regardless of the result. |
-| PEMS-BAY | **second development set.** It was used to compare `gs` against `g1`, so its validation split has informed a design choice. It is *not* a zero-tuning confirmation set. |
-| PEMS08 | **the confirmation set.** It has taken no part in any selection, and that is its only value. |
+Do not claim five independent propagation mechanisms and do not change the
+operators merely to make the labels distinct; that would be a model change and
+would require retraining.
 
-PEMS08's result — good or bad — is never grounds for changing the model, the protocols, the grouping, the
-weighting, the checkpoint rule or a hyper-parameter. It is reported as measured.
+MoGERNN is the sole headline baseline and has 226,270 parameters. It receives
+the common inputs but not ALFNet's lifecycle context.
 
-## Environment and commands
+## Mechanism diagnostics
 
-Three environment names are in play; only two of them are ever activated.
+`scripts/eval_v4_mechanisms.py` is evaluator-only:
 
-| where | env | use |
-|---|---|---|
-| Linux training server | **`ReaCH`** | all training, smoke, evaluation and tests run here |
-| Windows local | **`COMG`** | development and reading only — never run training or a GPU smoke here |
-| `environment.yml` | `moge` | the declared name; matches neither working env |
+- k-study reports Join and Fault absolute errors for every k=1..12;
+- PLES pairs Join with Unseen and Fault with Steady at the same origin/cohort;
+- Outage is Fault minus Steady at k=12;
+- every contrast is reported with treated and control absolute errors;
+- it is descriptive, non-causal and forbidden for checkpoint/model selection.
 
-On the server:
+## Reproduction commands
 
-```bash
-conda activate ReaCH
-python -m pytest tests -q --no-header                      # full suite (~2-7 min)
-python -m pytest tests/test_input_contract.py -q
-python -m pytest "tests/test_abcd_switches.py::test_combined_switches_stay_finite" -q
-```
-
-Long training and the formal `test_async` run in `tmux`, never in a foreground session that a dropped SSH
-connection would kill.
-
-`references/` holds vendored third-party source and is **not** collected by pytest — never add it.
-
-**Tests must be self-contained.** No test may depend on a checkpoint or result directory outside the
-working tree. Seven teacher tests used to load a checkpoint from `run_v5/` and broke the moment that
-gitignored tree was cleaned up; build fixtures in `tmp_path`, or assert absence behaviourally.
-
-Training and evaluation both go through `main.py`:
-
-```bash
-# the whole frozen experiment: 2 models x 3 datasets x 3 seeds, resumable
-bash scripts/run_final_18.sh                    # --dry-run to see the plan first
-# one run
-python main.py -c configs/ALFNet/alfnet.yaml --batch_size 64 --output_root ./outputs --run_id alfnet-metrla-s32
-# frozen-protocol test; repeat the *exact* training flags or exp_id will not resolve the checkpoint
-python main.py -c configs/ALFNet/alfnet.yaml --batch_size 64 --mode test_async \
-  --output_root ./outputs --run_id alfnet-metrla-s32
-```
-
-`--batch_size` is part of the configuration identity, and the validation loader ignores it anyway (it is
-hard-coded to 256 in `data_provider/data_factory.py`). Reproduce a run's training flags exactly or the
-canonical hash will not match.
-
-Post-hoc analysis and diagnostics:
+Activate `ReaCH` first.
 
 ```bash
-# formal comparison: three seeds, hierarchical, Holm inside frozen families
-python scripts/multiseed_paired_inference.py --dataset METRLA --output-dir <dir>
-# single-seed diagnostic only -- it asserts both runs share a seed and says so in its output
-python scripts/paired_model_bootstrap.py --model_a <predictions/lifecycle-v3-*/> \
-  --model_b <...> --output_dir ./outputs/reports/a_vs_b
-# recomputes every published cell from ples_paired_rows.csv and diffs the frozen tables
-python scripts/verify_collector_recompute.py --output-dir ./outputs/reports/final
-python scripts/collect_lifecycle_results.py <result roots> --output-dir <dir>   # expects seeds 32/42/52
-python scripts/build_ablation_configs.py                                       # regenerates combination YAMLs
-python scripts/build_router_configs.py                                # regenerates gs/g1/gm + both twins
-python scripts/router_report.py outputs/ALFNet/<run_id>    # per-layer, per-phase, per-k routing
-python scripts/validation_curve.py outputs/ALFNet/<run_id> # per-epoch groups + Join k1->k12 slope
-python scripts/checkpoint_load_smoke.py         # every finished run loads; reads no test data
-python scripts/film_probe.py --run <run> --config <cfg>    # FiLM magnitude by evidence bucket
+python scripts/build_v4_configs.py --check
+python scripts/build_v4_five_dataset_plan.py --check
+bash scripts/run_v4_five_dataset.sh --dry-run
+JOBS=1 DEVICES=0 bash scripts/tmux_v4_five_dataset.sh start
+bash scripts/tmux_v4_five_dataset.sh status
 ```
 
-## Artefact layout
-
-`--output_root` derives every path (`args.apply_output_root`): `outputs/<model>/<run_id>/{checkpoints,
-predictions,manifests,logs,reports,figures,profiles}`. When it is set, `train.py` and the evaluator skip
-appending `exp_id` again — the run folder already identifies the run, and `exp_id` is ~176 characters.
-Without it the legacy flat layout (`check_points/`, `predictions/`, …) applies.
-
-`utils/run_logger.py` tees stdout **and** stderr into `<run>/logs/{train,test_async}_<timestamp>.log`,
-installed by `main.py` before anything prints. This matters beyond convenience: the per-epoch lifecycle
-group numbers exist *only* on stdout — `training_summary.json` keeps the aggregated
-`validation_group_volatility` and discards the curve it came from — so without the log the single most
-useful diagnostic is unrecoverable once the terminal closes. It tees rather than redirects, so a tmux
-session still shows progress, and the timestamped name stops a later `test_async` run from truncating the
-training log that explains it.
-
-Everything result-shaped is gitignored. Git carries only source, YAML, scripts and tests. Old scattered
-result directories (`run_v5/`, `_smoke/`, `outputs/`) stay on disk but must never re-enter the index.
-
-## The three frozen protocols
-
-Defined in `data_provider/lcbt_protocol.py` (training) and `data_provider/ples_protocol.py`
-(**LCE v3** main/phase/trajectory tables, **PLES v3** paired event study). They are frozen; do not change
-grouping, weighting or aggregation to move a metric.
-
-**Naming.** `lifecycle_training_strategy: lcbt_v3` is the *config identifier* only. The formal name is
-**Lifecycle Coverage-Balanced Training v3.2**, and the internal protocol number is
-`LCBT_PROTOCOL_VERSION = 5` (`data_provider/lcbt_protocol.py`). All three differ on purpose; do not
-"fix" one to match the others.
-
-**The three protocols version independently.** LCBT is at v3.2 / version 5; **LCE and PLES are both still
-version 3 and their hashes are unchanged**. Only the part whose semantics actually moved was bumped —
-there is no requirement, and no benefit, in keeping the numbers tidy.
-
-* Time split: train 0–50%, validation 50–60%, test 60–100%. The scaler is fitted on the training window
-  and training-known nodes only. `validation_unseen` and `test_unseen` are **disjoint** subsets of the
-  master unseen set (METR-LA: 20 and 30 nodes).
-* Four training groups at 25% each: `zero_history, steady, join, fault`. Join/Fault cover evidence
-  length `k = 1..L` uniformly with `L = 12`; `k1 = Cold/Onset`, `k2..11 = Warm/Decay`, `k12 = Ready/Outage`.
-  The draw also balances calendar stratum, the 2.5/5/10% cohorts, clustered vs scattered, and degree strata.
-* Six evaluation phases: `Cold/Warm/Ready` (join) and `Onset/Decay/Outage` (fault). Main rows:
-  `Unseen, Steady, Join, Fault, LifeAvg, WorstGroup`. Each row reports MAPE/MAE/RMSE → 36 main+phase cells.
-* `M_effective = M_natural & M_lifecycle`. The base forecast loss applies only on `target_cohort_mask`.
-  The six phase labels are evaluation metadata and are never fed to the model.
-* Join/Fault evidence lengths come from a **two-dimensional quota** (calendar regime × k). Each regime gets
-  `n_r // L` of every k plus a run of extras taken from a cursor carried across regimes, so both margins
-  are exact: within a regime and globally, `max - min <= 1`. Measured on the reference schedules —
-  METR-LA 356–357 per k, PEMS-BAY 542–543, validation replay exactly 89 and 137. The v3.1 code allocated
-  inside each (scenario, regime) cell independently and `_allocate_counts` breaks ties by index, so every
-  cell gave its remainder to the smallest k: simulated over twenty realistic cells the counts ran
-  monotonically 377 at k=1 down to 357 at k=12.
-* A `training_protocol_hash` is written into every manifest and checkpoint summary. Changing anything that
-  enters `_manifest_payload` changes it and invalidates cross-run comparability — the loader refuses a
-  mismatched manifest unless `--lcbt_overwrite_manifest`. **Every one of these hashes is scoped to a
-  single dataset.** A METR-LA hash says nothing about PEMS-BAY or PEMS08 and must never be reused as an
-  expected value for them; the only cross-check that means anything is that *both models on the same
-  dataset* agree. Current values:
-
-  | | training (LCBT v3.2) | LCE v3 | PLES v3 |
-  |---|---|---|---|
-  | METR-LA | `59c9ad67f2dc9c51…` | `659e3583c978a68a…` | `d6c09455e7273d55…` |
-  | PEMS-BAY | `caa7dbd3507843c0…` | `b8eeda69790e97ea…` | `68401afbae31d851…` |
-  | PEMS08 | `bacf59d82497594e…` | — | — |
-
-  All three training hashes were read off a server 1-epoch smoke, both models per dataset, and each pair
-  agreed. PEMS08's LCE and PLES hashes are recorded when its first evaluation writes them.
-
-  The LCE and PLES hashes are unchanged from v3.1; only the training hash moved.
-  `known_training_protocol_hashes` in `configs/paper/final_runs.json` is the machine-readable copy the
-  audit compares against, and it is the one to trust if the two ever disagree.
-* Training re-draws windows every epoch (`_build_schedule(..., epoch=epoch)`); **validation uses a fixed
-  schedule** (`epoch=0`). This is why offline caching of training targets does not pay.
-* PLES resampling unit is the **overlap-connected origin block** (`overlap_blocks`), not the calendar day —
-  adjacent origins share trajectory data. `trajectory_span = pre + input_len + post + pred_len`; it travels
-  in the manifest and in `ples_effects_summary.json`, and readers refuse to fall back to per-origin draws.
-  Pre-event windows are an implementation consistency check, not a reported effect.
-
-**Checkpoint selection** is `stop_based: val_lifecycle`: `val_lifecycle_mae` is the equal-weight mean of
-Unseen/Steady/Join/Fault, with worst-group MAE as the tie-break. It is part of the frozen protocol — do
-not change it, and never change grouping, weighting, aggregation or checkpoint rules on the basis of a
-test result.
-
-## Porting to a second dataset
-
-The loaders are dataset-generic: boundaries, hashes, node counts, unseen strata and cohort sizes are all
-derived from the payload (`lcbt_protocol.py`), and `PEMSBAY` is already a valid `--dloader_name`. So a
-second dataset is a config job, and its configs must be *twins* — identical outside the `dataset:` block,
-because a confirmation dataset proves nothing if capacity or learning rates were retuned for it.
-`tests/test_pemsbay_configs.py` enforces that.
-
-The mainline twins, per the three-layer structure (entry point → graph expert → temporal expert), plus the
-MoGERNN baseline. `gs_bay` / `gs_p8` are the ones the 18-run matrix uses; the `fg1_*` entry points remain
-only as router ablations:
-
-| | METR-LA | PEMS-BAY | PEMS08 |
-|---|---|---|---|
-| ALFNet | `configs/ALFNet/gs.yaml` (= `alfnet.yaml`) | `configs/ALFNet/gs_bay.yaml` | `configs/ALFNet/gs_p8.yaml` |
-| ALFGraph | `METRLA_alfgraph_soft.yaml` | `PEMSBAY_alfgraph_soft.yaml` | `PEMS08_alfgraph_soft.yaml` |
-| ALFTemporal | `METRLA_cond1.yaml` | `PEMSBAY_cond1.yaml` | `PEMS08_cond1.yaml` |
-| MoGERNN | `METRLA_lcbt_v3.yaml` | `PEMSBAY_lcbt_v3.yaml` | `PEMS08_lcbt_v3.yaml` |
-
-One value is genuinely dataset-dependent and is **geometry, not tuning**: ALFTemporal's `spa_patchsize`.
-`_reorder_data` pads a KD-tree part up to the patch size but never splits one, so the patch must hold the
-largest part. At `recur_times: 5` METR-LA's 207 nodes give parts of 6–7 and PEMS-BAY's 325 give 10–11; the
-convention is **largest part + 1** (so every part gets at least one augmented neighbour), which is 8 and 12
-respectively. ALFTemporal now raises at construction with the required value; before that it built fine and
-failed inside `WindowAttBlock`'s reshape.
-
-## Input contract (fairness rule)
-
-Every model receives the same 7-channel tensor: `[raw, role×4, age, obs_mask]` (built by
-`compose_effective_lifecycle_features`). The lifecycle channels are **ALFNet's method inputs**. Published
-baselines must reduce to their source-native inputs via
-`model.comparison_model.family_utils.source_native_input`, and their config builders must size themselves
-with `source_native_dim(args)` — not `args.enc_in`.
-
-`tests/test_input_contract.py` enforces this **behaviourally**: it poisons the non-raw channels and requires
-bit-identical output. A source read alone is insufficient — five baselines were consuming lifecycle channels
-purely through a config-derived `input_dim` with no visible slice anywhere. The test also resets the seed per
-call, because STFiT carries a VAE and a stochastic model otherwise looks like one that reads the channels.
-`experiments/ples_evaluation.py::MODEL_INPUT_CONTRACT` records the audited state and is written into the
-per-run result manifest.
-
-A baseline that is *given* the lifecycle channels is a different model and must be reported under a
-separate `+LC` name, never as the published baseline.
-
-## Strict inductive: no node may own a trainable parameter
-
-A held-out node is one the model never trained on, so it must not carry a parameter indexed by node id.
-Every PatchSTG-derived backbone did: `nn.Parameter(node_num, node_dims)`. Measured on the old `fg1` after
-five optimiser steps, **all 50 held-out rows took gradient** — with a *larger* mean magnitude than the
-known rows — and perturbing only those rows moved the known-node forecast by 1.056. The mechanism is
-`_scatter_to_full_nodes`: known nodes are scattered into a full-graph tensor, spatial attention mixes
-every node, and only the known ones are gathered back.
-
-`layers/structural_node_encoder.py` replaces the bank with one MLP shared by every node over seven frozen
-features — normalised coordinates, weighted in/out/total degree, log total degree, isolated flag. No node
-owns anything; the mapping generalises, the identity does not. Coordinates degrade to zero when a dataset
-ships none. Lifecycle features are deliberately absent: they are ALFNet's method inputs and must not reach
-a baseline.
-
-Adapted: **ALFTemporal, PatchSTG, STID, SLPF, GWNET, STBP**. Audited clean: MoGERNN, FCLSTM, HA,
-MCPST_FSL, STFiT, STGCN, STGODE. Two details worth keeping:
-
-* GWNET uses **two independent** encoders for the left and right factors of its adaptive adjacency. One
-  encoder reused on both sides gives `softmax(relu(E E^T))`, a symmetric operator — a different model.
-* `SLPF.rank_emb` is sized by node count but indexed by a *data-derived rank*
-  (`torch.argsort(local_values)`, recomputed per sample and timestep), so no node owns a row. It is the
-  only entry in `JUSTIFIED_NODE_SHAPED_PARAMETERS`; adding another requires writing down why.
-
-`StructuralNodeEncoder` carries a `structure_hash` over the raw adjacency, the positions **and** the
-derived features. Hashing only the features collided: they are coordinates plus degree summaries, so two
-graphs with the same coordinates and degree sequence but different edges produced the same digest.
-
-## MoGERNN's batch adapter
-
-The source detects unknown nodes with `sum(x_enc, dim=(0,1)) == 0` — a node is unknown only if it is zero
-across the **whole batch**. That is correct where one fixed sensor set is unobserved for the entire
-dataset, which is what MoGERNN was written for. LCBT hides a different cohort per sample, so the batch-wide
-intersection is usually empty: measured on METR-LA with disjoint cohorts, B=1 finds 8 unknown nodes and
-**B>=4 finds 0**. Training and validation therefore ran with the completion switched off while
-`test_async` (batch size 1) ran with it on.
-
-`DataPreparation` now applies the original rule per sample. At B=1 it is bit-identical to the reference,
-and a mixed batch equals the concatenation of its samples. This costs ~205 ms per `data_pre` call at B=64
-on CPU; a strictly-equivalent vectorisation is possible but must pass the B=1 and mixed-cohort equivalence
-tests before it replaces the loop.
-
-## Checkpoint provenance
-
-A checkpoint records `model`, `model_variant`, `router_mode`, `canonical_config_hash`, the three protocol
-hashes and `structural_fingerprints`, and the loader refuses a mismatch. This is not paranoia: `fg1`, `gs`
-and `g1` are byte-identical in structure and differ only in the router mode, so loading the wrong one was
-silent.
-
-`utils/canonical_config.py` freezes the config hash **when parsing finishes**, from an explicit allowlist.
-The previous implementation hashed `vars(args)` at checkpoint time, which is a live namespace the trainer
-writes `best_val_metric`, per-epoch history and resolved paths onto — so it identified the run, not the
-configuration. The hash inlines the nested expert YAMLs, which is what makes `fg1`/`gs`/`g1` distinct, and
-excludes `output_root`, `run_id`, `device`, `num_workers` and every runtime field.
-
-**Identity is content, never a path.** The `-c` path left the hash (schema 2): every value inside the YAML
-already enters through `scalars` / `model_family_cfg` / `nested_expert_configs`, so the path contributed
-only its spelling — `-c configs/ALFNet/gs.yaml` and the same file named absolutely were different
-experiments, and a paper-facing rename changed the identity of an unchanged model. The schema-1 hash is
-still computed as `args.legacy_canonical_config_hash` and accepted, with a printed note, so checkpoints
-written before the change still load.
-
-**Provenance must survive a machine move.** `structural_fingerprints` is schema 2, a record rather than
-one digest:
-
-* `raw` — exact SHA256 over the adjacency and coordinates *as loaded*. Those are file reads with a dtype
-  cast and no arithmetic, so they are bit-stable across machines. This is the only value compared for
-  equality, and it is what decides whether the graph is the same.
-* `features` — a quantised digest of the derived features plus shape, dtype, quantum and algorithm
-  version. **Never the deciding comparison**, and the reason is measured, not assumed: quantising reduces
-  churn but a grid still has boundaries, and one float32 ulp moved 9.65% of values into a different bucket
-  over 30 random graphs — all 30 digests differed. It is a record and a fast path, nothing more.
-
-Numerical agreement is checked directly against the checkpoint's stored `features` buffer at
-`atol=1e-6, rtol=0` (relative tolerance is meaningless on normalised values that sit near zero). A
-schema-1 digest is decomposed rather than trusted: recomputing it from this machine's adjacency and
-coordinates combined with the *checkpoint's own* feature buffer reproduces the recorded value if and only
-if the graph is byte-identical, after which the same tolerance applies. Nothing falls back to accepting an
-unverifiable checkpoint — a missing buffer, an absent field or drift beyond tolerance all raise.
-
-The bug this fixes was real and blocking: `build_structural_features` sums rows of the adjacency, a
-reduction's order depends on the BLAS build and thread count, and the r1 checkpoints trained on the server
-came out 1.31e-07 from the same graph here — so every server checkpoint was refused for evaluation.
-`scripts/checkpoint_load_smoke.py` runs the real loader over the finished runs and reads no test data.
-
-A checkpoint predating provenance entirely still needs `--allow_legacy_checkpoint`, and results from one
-are not comparable.
-
-## ALFNet structure
-
-`model/ALFNet/ALFNet.py` composes two experts built from their own YAML (`family.experts.{graph,patch}`):
-
-* `ALFGraph` — Residual-Delta DCRNN over a Lifecycle-MoGE routed graph conv (`layers/lifecycle_moge.py`),
-  `graph_conv=lifecycle_moge`, 5 propagation supports, top-k=1 sparse routing, decoder predicts a delta at
-  residual scale 0.3. **This is the prediction backbone** — the final forecast always comes from its
-  decoder. It exposes a detached `encoder_state` for downstream conditioning. Its internal GRIN is off, so
-  recovery happens once in the shared imputer. **Its router is broken at `moge_top_k: 1` — see below.**
-* `ALFTemporal` — a **light spatio-temporal conditioner**, not an independent forecaster. Simplified from
-  PatchSTG to one layer with TimeFilter off and `emit: features`, so it produces no forecast of its own.
-  With `tem_patchsize=12, tem_patchnum=1` the stride-12 embedding conv collapses the whole input window
-  into a single time token, so its attention is **spatial** despite the name. Its output FiLM-modulates
-  ALFGraph's encoder hidden state.
-* One `shared_input_imputer` (GRIN) feeds both.
-
-Behaviour is selected by `family.recipe` keys, all optional and all defaulting to the historical path:
-`fusion_mode` (`residual_gate` | `film`), `evidence_router`, `observed_nlinear`, `temporal_residual`
-(`none`|`tcn`|`dlinear`), `companion_loss_weight`, `freeze_anchor`. Patch-side switches live in the
-ALFTemporal YAML: `spatial_tokenizer`, `mixer`, `use_timefilter`, `emit`.
-
-`ProtectedTemporalResidual` (`layers/protected_residual.py`) is **shared**, not distillation-specific: the
-frozen ablations `rt/rd/rtg` and the end-to-end candidate `jr` all use it, and `companion_loss_weight` /
-`freeze_anchor` are theirs. Only the teacher was removed.
-
-### The top-1 router is not trained by the forecast loss
-
-`moge_router_mode` selects `noisy_topk` (default, historical), `soft`, or `st_top1`. The default is kept so
-existing runs reproduce, but at `moge_top_k: 1` it is **provably untrainable from the prediction
-objective**: `top_k_logits` is a single column, `nn.Softmax(1)` of one element is identically 1.0 with
-derivative 0, and the top-k indices carry no gradient. The only path to `w_gate` is the load-balance term —
-a uniformity prior that knows nothing about prediction error. Measured, not inferred:
-
-* forecast-only gradient on `w_gate`: **exactly 0.0** at k=1, non-zero at k=2 and k=3, and 0.0 for all 12
-  routers through the full ALFNet;
-* on the shipped `fg1-s32` checkpoint the injected training noise is **~586×** the learned logits, and
-  training-time routing agrees with eval-time routing **20.0%** of the time — chance for five experts;
-* `scripts/router_report.py` on the same checkpoint: `entropy_ratio` 1.0000 on every layer and phase, with
-  `top1_margin` between 2e-6 and 2.6e-4. The routing table looks specialised per phase and is a coin flip.
-* top-1 buys no compute either: all five supports are evaluated before the gates are applied (2.165 ms at
-  k=1 against 2.222 ms at k=5), so sparsity here costs differentiability for nothing.
-
-So `fg1`'s headline mechanism currently behaves as expert *dropout*, not as routing. Both candidate modes
-are deterministic — an ST-Gumbel variant was measured at 33% train/eval agreement and rejected for
-reproducing the defect in milder form. All three modes carry an identical parameter count, so the
-candidates are pure ablations. Both were run under the old protocol and neither achieved lifecycle
-specialisation: per-state entropy stayed at ~0.99 for `soft` and ~0.9996 for `st_top1`, whose hard argmax
-sat on margins of 2e-4 to 1.4e-2, so its 3:1 usage split was an argmax artefact rather than confident
-routing. Those runs are superseded; treat the router question as open, not as settled either way.
-
-Diagnostics: per-layer expert usage and entropy are collected at eval only and land in
-`training_summary.json` under `routing_diagnostics` as `router/<layer>/…`; the phase-by-k table comes from
-`scripts/router_report.py`, which reconstructs it from `w_gate` because the router's only input is the
-lifecycle state and LCBT makes that an exact function of (scenario, k).
-
-Two invariants worth knowing before editing:
-
-* **Optional modules are constructed inside `_isolated_rng`** with a fixed per-module offset. Built on the
-  shared stream they shift every later module's init — enabling one switch moved `graph_refiner.input_proj`
-  by up to 1.01 under the same seed, which silently turns an ablation into two unrelated models.
-* **Gates that protect a group must be hard zero, not learned.** A node with no own-history has nothing for
-  a temporal branch to read; `protection = clamp(e_self/floor, 0, 1)` keeps the Unseen path bit-identical to
-  the anchor, and tests assert `torch.equal`.
-
-Training-only knobs live on the CLI: `--lcbt_context_loss_weight`, `--lcbt_stratum_balanced_loss`,
-`--lcbt_tail_weight`, `--lcbt_worst_group_weight`. All are folded into the experiment signature
-(`main.TRAINING_OBJECTIVE_KNOBS`) **only when non-default**, so historical `cfg` hashes stay byte-identical
-while two different objectives can never share a checkpoint directory.
-
-## Measurement pitfalls (learned the expensive way)
-
-* **Do not rank architectures by validation LifeAvg.** Checkpoint selection still follows the frozen
-  `val_lifecycle` rule — that is not in question. But for *choosing between candidates*, METR-LA's
-  `validation_unseen` (20 nodes) is small and disjoint from `test_unseen` (30 nodes), and its ordering has
-  not transferred; since LifeAvg is a quarter Unseen, LifeAvg inherits the problem. Rank on **validation
-  Steady + Join + Fault**, and keep Unseen as a non-degradation constraint and a diagnostic — it is a real
-  signal about the no-history path, just not a reliable cross-architecture ordering on this dataset.
-  Worked example on disk: `ad-s32` beat `fg1-s32` on validation LifeAvg (4.637 vs 4.823) purely through
-  validation Unseen (5.92 vs 7.09), lost on validation S+J+F (mean 4.211 vs 4.066), and then lost on the
-  test set as S+J+F predicted (LifeAvg MAE 5.147 vs 4.927).
-* **Validation jitter is candidate-dependent — read it from that run's `training_summary.json`.**
-  `validation_group_volatility` records per-group std and max epoch-to-epoch jump for every run. `fg1-s32`
-  sits at std 0.24–0.45 / max jump 0.52–1.08; a frozen-anchor run like `kt-s32` is near zero because its
-  protected groups cannot move. Do not carry one run's numbers over to another. Whatever the run's own
-  figure is, candidate effects of 0.01–0.25 MAE from a single seed and a single checkpoint are not evidence.
-* **METR-LA's test split has been inspected many times and is now a development set.** Final claims need a
-  second dataset. Never tune on it, and never run it to break a validation tie.
-* Local GPU step-time measurements are unstable (6× outliers, a different variant each run) and bs64 hits
-  this card's memory ceiling. Profile at bs16, include an unchanged control variant in every profiling run,
-  and treat server `s/epoch` as the authoritative speed signal. Parallel server runs cannot be compared on
-  wall-clock at all.
-* **A protocol definition must have exactly one implementation.** `plot_counterfactual_shockwave.py` carried
-  its own copy of the PLES aggregation and all three parts of it had drifted from the frozen protocol: it
-  read `OutageFaultPenalty` off the *maximum* of the fault curve instead of the settled cell at
-  `tau = input_len - 1`, it kept the saturated cohorts the main plan excludes, and it weighted calendar
-  regimes equally instead of by their 5/7 and 2/7 shares. The formal PLES pipeline
-  (`ples_protocol.paired_effects`) was correct throughout, so `final_18_tables.json` was never affected —
-  but the two disagreed, and a maximum is not a paired quantity: the two models' maxima land at different
-  `tau`, so a difference of two maxima compares two different cells. The plot script now calls
-  `ples_protocol`; do not reintroduce a second copy.
-
-  Three measurements, on METR-LA s32 `OutageFaultPenaltyReduction/MAPE`. They must not be conflated —
-  each isolates a different defect, and only the first is what the old script actually printed:
-
-  | reading | definition | value |
-  |---|---|---|
-  | `legacy_exact_5a06678` | all cohorts, equal regime weights, two-sided max | **−0.46452883240133325** |
-  | `isolated_max_counterfactual` | main cohorts and 5/7–2/7 weighting fixed, max deliberately kept | +0.16168498470594983 |
-  | `formal_tau_L_minus_1` | both models read at `tau = 11` | **+0.6049055413153859** |
-
-  So shipped-old → formal **does flip sign** on this cell. The "maxima differ in 12 of 18 cells, contrast
-  flips in 2" figure was computed on *corrected* curves, so it describes the isolated-max defect only, not
-  the old-to-new transition; and the old script emitted no MAE at all, so any MAE flip attributed to it is
-  an extrapolated counterfactual, not a historical result.
-* **Report both PLES arms, never the contrast alone.** `JoinLift` is `control - treated` and the Fault
-  penalties are `treated - control`, so a model that merely predicts the *control* arm worse scores better
-  on every one of them. This is not hypothetical: on METR-LA s32 the measured `JoinLiftGain/MAE` of +0.358
-  comes with a control arm degraded by +0.234. `paired_effect_arms` and the `pareto` field exist for this,
-  and both are computed off `paired_effect_cells` so the arms and the contrast can never describe
-  different cells.
-* Auxiliary loss terms must be scaled against the measured base loss, not guessed. Base MSE is ~0.157 while
-  the tail term is ~1.18 — a weight of 0.1 is *not* small, it is 75% of the objective.
-
-## The frozen model
-
-**`gs` is ALFNet.** The architecture and all three protocols are frozen; nothing below is a live search.
-
-Named in the paper as **ALFNet**, mechanism described as **lifecycle-conditioned soft heterogeneous
-propagation aggregation** (生命周期条件化的异构传播算子聚合). That phrase is the *ceiling* of what the
-measurements support, and the two halves of the evidence pull in opposite directions:
-
-* **What holds.** `gs` aggregates densely, so its gate receives a non-zero forecast gradient — the exact
-  defect that makes `fg1` indefensible (`nn.Softmax` over a single top-1 column has derivative 0, so its
-  forecast gradient on `w_gate` is *exactly* 0.0) does not apply. The gate is conditioned on lifecycle
-  state and is genuinely trained by the prediction objective.
-* **What does not.** Measured `entropy_ratio` on `gs` is ≈ 0.99: the propagation operators are used
-  almost uniformly. No operator has specialised to a lifecycle phase.
-* **There are not five distinct operators.** `SUPPORT_NAMES` lists five, but
-  `weighted_mean = A / rowsum.clamp_min(1e-6)` (`layers/lifecycle_moge.py`) and
-  `forward_diffusion = calculate_random_walk_matrix(A) = diag(1/rowsum) @ A` (`layers/gnn.py`) are the
-  same operator. Measured `max |difference|`:
-
-  | dataset | duplicate pairs | effective operators |
-  |---|---|---|
-  | METR-LA | weighted ≡ forward (5.96e-08) | **4** |
-  | PEMS-BAY | weighted ≡ forward (5.96e-08) | **4** |
-  | PEMS03 | forward ≡ backward (0.0) | 4 nominal, **3 by design** |
-  | PEMS04 | forward ≡ backward (0.0) | 4 nominal, **3 by design** |
-  | PEMS08 | weighted ≡ forward ≡ backward | **3** |
-
-  This is **not** a PEMS quirk — the weighted/forward duplication holds on every dataset, and the
-  5.96e-08 is a float path difference, not a different operator. `forward ≡ backward` on PEMS03/04/08 is
-  separate and comes from the converter symmetrising the adjacency. On PEMS03/04 `weighted` does differ
-  from `forward`, but on **2 of 358** and **8 of 307** rows only, and every one of those is a row whose
-  sum falls below the `1e-6` clamp while the random walk normalises it properly — a clamp artifact, not a
-  designed operator.
-
-So: never write *sparse routing*, *expert routing*, *expert specialisation*, *five heterogeneous
-operators*, or any claim that the experts have divided the lifecycle between them. Two of the five labels
-are the same matrix, so the router's usage mass is **unidentifiable between duplicated labels** — a
-reported per-expert usage split across `weighted_mean` and `forward_diffusion` carries no information.
-The defensible v3 claim is that the aggregation weights are lifecycle-conditioned and end-to-end
-trainable, over an operator set that is smaller than its label count.
-
-Fixing this is a **model change**: removing or redefining the duplicate operator changes the parameter
-set, so ALFNet and every baseline must be retrained from scratch under v4. Do not patch a v3 checkpoint
-and keep quoting v3 numbers. Entry point
-`configs/ALFNet/alfnet.yaml`, which is content-identical
-to `configs/ALFNet/gs.yaml` and therefore the same experiment by hash, so existing `gs` checkpoints load
-under the paper's name. `gs.yaml` stays for that compatibility.
-
-Why `gs` and not the others, on validation only:
-
-* `fg1`'s router provably receives zero forecast gradient at `moge_top_k: 1`, so its headline mechanism is
-  expert dropout. Historical result and ablation, not a candidate.
-* `g1`'s hard routing is unstable across datasets; `gm` is the static control and loses to `gs`.
-* FiLM being active on zero-evidence nodes is a real measured phenomenon (`scripts/film_probe.py`), but the
-  evidence does **not** establish it as the cause of the Unseen gap — across the four variants the strength
-  of the asymmetry does not order the deficit. It is not grounds for a new candidate.
-
-`fg1`, `g1` and `gm` remain as routing ablations. Do not add router candidates.
-
-**The final experiment** is `scripts/run_final_18.sh`: 2 models × 3 datasets × 3 seeds, ALFNet against
-source-native MoGERNN on METR-LA, PEMS-BAY and PEMS08. Serial-safe, resumable, skips finished runs, at most
-three concurrent jobs on one GPU. It launches training only — `test_async` is spent once, after the
-training table has been checked. Main tables are three-seed mean±std. Hyper-parameter work is now
-sensitivity analysis on a frozen model, never selection.
-
-PEMS08 is the third dataset (170 nodes, 17,856 steps, 42 unknown nodes) and the only split that has taken
-no part in any selection. Its configs are twins under `tests/test_pemsbay_configs.py`; `spa_patchsize` is 7
-by the largest-part+1 rule (METR-LA 8, PEMS-BAY 12).
-
-## Current state
-
-**Every result on disk is invalid and everything must be retrained.** Three corrections landed that change
-what the models are and what they were trained on:
-
-* strict inductive — parameter counts and `state_dict` changed for ALFTemporal/ALFNet (1,041,561 →
-  1,037,529), PatchSTG, STID, SLPF, GWNET (300,920 → 299,104), STBP (351,352 → 270,072);
-* MoGERNN's batch adapter — its completion was off during training and on at test;
-* LCBT v3.2 — the training schedule and therefore `training_protocol_hash` moved on every dataset.
-
-So `fg1-s32`, `gs-s32`, `g1-s32`, `gsbay-s32`, `g1bay-s32`, `jr-s32`, `ad-s32`, `kt-s32`, `rg2-s32`,
-`mg-s32` and `mgbay-s32` are all superseded. The files stay in `outputs/` as a record of the old protocol;
-none of their numbers may be quoted against a new run. **Every architectural conclusion below predates
-these fixes and is provisional until re-measured.**
-
-The `*-r1-s32` runs (`gs`, `fg1`, `g1`, `gm`, `mg`) are the **current-fixed-protocol router diagnostic**,
-all under training hash `59c9ad67…` and comparable only with each other. They are *not* a reproduction of
-the historical `fg1-s32`. They are what selected `gs`, on validation only; no test split was read.
-
-`fg1` was the mainline until the r1 router diagnostic; **`gs` replaced it** — see "The frozen model" above.
-Under the old protocol (training hash `59c55e6e…`) `fg1` reached **32/36** main+phase cells against
-MoGERNN on METR-LA. The four misses, `fg1` vs MoGERNN:
-
-| table | cell | fg1 | MoGERNN |
-|---|---|---|---|
-| main | Join MAE | 4.6125 | 4.5827 |
-| phase | Warm MAE | 4.5698 | 4.5237 |
-| phase | Ready MAE | 4.4736 | 4.4423 |
-| phase | Ready RMSE | 6.8822 | 6.8736 |
-
-This result was accepted by the supervisor and is research history. It predates every correction — strict
-inductive, the MoGERNN batch adapter and LCBT v3.2 — so it is **not** a paper result, and none of its
-numbers may share a table or a mean with a run under the current protocol.
-
-`kt` reached **35/36** (only Ready RMSE missing) by distilling the retired `rf_l3s`/A2 teacher into a frozen
-two-stage schedule with 15,317 trainable parameters. That violates the end-to-end constraint, so it is a
-**recorded upper bound and not an active path**: the numbers stay in `outputs/ALFNet/kt-s32`, and the code,
-configs and teacher checkpoint are gone. ALFNet now *raises* on `lambda_kd`, `teacher_checkpoint` or
-`teacher_config_path` rather than ignoring them, so a stale YAML cannot reintroduce a two-stage run under a
-mainline name. Do not reintroduce distillation to chase 36/36, and do not reconstruct the teacher.
-
-Unrelated but easy to confuse: `ALFGraph`'s `teacher_forcing_ratio` is DCRNN scheduled sampling and has
-nothing to do with distillation. Leave it alone.
-
-Candidates run **under the old protocol** that did not improve `fg1` on validation S+J+F — all of these
-predate the strict-inductive and MoGERNN corrections, so they are prior evidence rather than settled
-results: `a b c d` (and combinations),
-the frozen label-residual family `rt rd rtg`, the training-objective knobs `tq wg tw` (tail weight,
-worst-group weight, and both), and `jr` — the end-to-end form of the protected additive residual, which
-lost on **all four** validation groups (S+J+F mean 4.282 vs 4.066) with its gate measurably open
-(`residual_gate_mean` 0.42), so the branch was active and harmful rather than switched off. Additive
-correction over the FiLM anchor is now refuted in both the frozen (`rt/rd/rtg`) and joint (`d`, `jr`)
-forms; do not propose a third. For `tq/wg/tw` the 0.1 weight turned out to be far too strong relative to a
-base MSE of ~0.157; a finer sweep is deliberately *not* being run. Also decided and closed: no CAGrad or
-PCGrad (24 real-batch gradient probes showed all six group-pair cosines positive — no systematic conflict),
-no extra gating (FiLM is measurably active), no distribution-shift module (no evidence of shift yet).
-
-**PEMS-BAY is a second development dataset, not a zero-tuning confirmation set.** It has been used to
-compare `gs` against `g1`, so its validation split has informed a design choice and cannot be described as
-untouched. **PEMS08 is the confirmation dataset** — it has taken no part in any selection, and that is the
-one property worth protecting now that the model is frozen. Operating rules:
-
-* **No test split is read until every training run in the 18-run matrix has finished and been checked.**
-  It is spent once. `scripts/run_final_18.sh` deliberately does not launch `test_async`.
-* **Never retune a twin config to close a gap.** The twin rule (`tests/test_pemsbay_configs.py`, now
-  covering PEMS08 too) is the point of the experiment. A real consequence to state in the paper rather than
-  fix: the twins inherit hyper-parameters selected on METR-LA, so a transfer gap is partly a
-  hyper-parameter transfer gap.
-* Never change the architecture on the basis of a test result. The model is frozen.
-
-**The strongest prior observation, now provisional.** Under the old protocol `fg1`'s validation Join MAE
-fell ~0.99 from `k1` to `k12` on METR-LA but was flat or inverted at every epoch on PEMS-BAY, while
-source-native MoGERNN held −0.25 to −0.75 throughout — the conditioner was not using accumulating
-own-history there. Two explanations were ruled out at the time: it was not under-training (the response
-was never present after epoch 2) and not the checkpoint rule (re-selecting by S+J+F still left MoGERNN
-ahead, 2.4058 vs 2.4253).
-
-Per-phase, `fg1` beat MoGERNN on **Cold** and **Outage** on both datasets and lost **Warm** and **Ready**
-on both at near-identical magnitude — the same four cells that missed on METR-LA — suggesting the
-join-track weakness was a property of the architecture rather than of PEMS-BAY.
-
-**All of it was measured with the leaking node embeddings and the disabled MoGERNN completion in place**,
-and the MoGERNN side of every comparison was handicapped. It is the best hypothesis to re-test first, not
-a result to build on. `scripts/validation_curve.py` prints the k1→k12 slope per epoch, which is the
-diagnostic to re-run once the new pair is trained.
-
-## Protocol changes that were considered and declined
-
-A round of protocol suggestions was raised and, on independent review, **not implemented**. They are
-recorded here so they are not re-proposed as defects: each would make the protocol more balanced or more
-complete, but the existing protocol is sound without them, and changing an evaluation definition costs
-every result on disk.
-
-* **Per-cell natural-availability thresholds** (input and target both >= 0.30). Pooled masked loss and
-  masked metrics already skip cells that cannot be computed. A threshold is a defensible design choice,
-  not a correctness fix, and it would silently drop data from the main tables.
-* **Natural-outage stress table**, **origin-specific LCE cohorts**, **node exposure `max-min <= 1`**.
-  Coverage improvements. The current cohort draw is valid; wider coverage would reduce variance, not
-  remove a bias.
-* **Nested bootstrap in place of the crossed design.** The crossed cohort draw matches what the manifest
-  declares, so implementation and manifest agree. Changing it without changing the design would be the
-  inconsistency.
-* **Per-sample cohort loss.** Implemented briefly, then reverted. Pooling every valid cell weights a
-  sample by its cohort size, and re-weighting to equal-per-sample is a change to the training objective,
-  not a fix — the training loss is not required to match the evaluation weighting. It also makes the
-  gradient noisier on the 2.5% cohorts (about 48 cells per sample), an unmeasured risk.
-* **LCE/PLES v4 and a wide YAML rename.** Nothing in LCE or PLES was shown to be wrong; renaming for
-  version tidiness is churn.
-
-The one suggestion that *was* adopted is the k quota, because it contradicted a manifest field
-(`event_evidence_distribution: uniform_k=1..L`) by construction rather than by rounding, and the fix
-changes no metric definition.
-
-## Housekeeping
-
-Failed candidates are ablation evidence **until the architecture is frozen**. Once it is, delete each dead
-candidate's YAML, code branch and tests together — git history and the written reports keep the negative
-result, and the repo should not become a candidate archive.
-
-## Keeping this file honest
-
-This file holds stable facts and operating rules, not a per-round experiment log. Update it, in the same
-task that causes the change, only when one of these changes:
-
-* the mainline config or the model's declared boundary;
-* the training / validation / test protocol;
-* the input contract, artefact paths, or the standard commands;
-* a candidate is promoted to mainline or permanently retired;
-* a conclusion is confirmed across datasets.
-
-Do not write provisional results, guesses, or unconfirmed candidates here.
+After all 30 runs are complete, validation audit/evaluation/collection and the
+explicit test evaluator are the only supported reporting path. Do not call
+legacy `main.py`, `run_final_18.sh`, candidate-data builders or v3 PLES tools.
+
+## Editing rules
+
+- YAML and manifests are authorities; runtime code validates and consumes them.
+- A config/runtime disagreement is an error, never an undocumented override.
+- Preserve `references/`, every `data/<dataset>/original/`, `data_v4/`, and the
+  archived 946d result artifacts.
+- No architecture, loss, optimizer, graph, split, target or patch-capacity
+  change is a cleanup. Such a change needs a new plan and full retraining.
+- Use targeted tests during editing. Run the full CPU suite once at the final
+  boundary, not repeatedly after every small patch.

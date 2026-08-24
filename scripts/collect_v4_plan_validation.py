@@ -20,8 +20,10 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from data_provider.ples_protocol import MAIN_TABLE_ROWS, PHASE_ORDER  # noqa: E402
-from experiments.v4_validation_collector import METRICS, aggregate_seeds  # noqa: E402
+from data_provider.v4_metrics import PHASE_ORDER  # noqa: E402
+from experiments.v4_validation_collector import (  # noqa: E402
+    MAIN_TABLE_ROWS, METRICS, aggregate_seeds,
+)
 from scripts.audit_v4_plan import audit  # noqa: E402
 from scripts.eval_v4_plan_validation import (  # noqa: E402
     EVAL_NAME, EVAL_SCHEMA, PARTIAL_NAME, TOLERANCE, load_plan, resolve_runs,
@@ -116,7 +118,7 @@ def compare(dataset_tables, models, seeds):
                 elif seed_wins == 0 and ties == 0:
                     unanimous[right_name].append(f"{section}/{row}/{metric}")
     return {"per_model": summaries, "cells": cells,
-            "cells_better": wins, "total_cells": 36,
+            "cells_better": wins, "total_cells": 33,
             "main_cells_left_better": by_section["main"],
             "phase_cells_left_better": by_section["phase"],
             "by_metric": by_metric, "worst_positive_delta": worst,
@@ -166,7 +168,7 @@ def collect(plan_path, output_root=None, skip_gates=False):
                 d: per_dataset[d]["cells_better"][left] for d in plan["datasets"]},
             "datasets_where_left_wins_every_cell": [
                 d for d in plan["datasets"]
-                if per_dataset[d]["cells_better"][left] == 36],
+                if per_dataset[d]["cells_better"][left] == 33],
         },
     }
     path = root / SUMMARY_NAME
@@ -189,8 +191,8 @@ def main(argv=None):
     left = summary["models"][0]
     for dataset, entry in summary["datasets"].items():
         print(f"\n{dataset}: {left} better in "
-              f"{entry['cells_better'][left]}/36 "
-              f"(main {entry['main_cells_left_better']}/18, "
+              f"{entry['cells_better'][left]}/33 "
+              f"(main {entry['main_cells_left_better']}/15, "
               f"phase {entry['phase_cells_left_better']}/18)")
         print(f"  worst cell for {left}: {entry['worst_positive_delta']['cell']} "
               f"{entry['worst_positive_delta']['delta']:+.4f}")

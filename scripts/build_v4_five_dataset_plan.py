@@ -1,11 +1,13 @@
 #!/usr/bin/env python
-"""Pre-register the five-dataset, three-seed experiment. Thirty runs, frozen.
+"""Build the canonical five-dataset, three-seed v4 reproduction plan.
 
 Written before the runs and hashed, so the datasets, the seeds, the endpoint,
 the tie rule and the reporting obligations cannot be chosen once numbers exist.
-Separate from the development plan, which stays exactly as it is: the twelve
-completed development runs remain traceable under their own hash, and they are
-*not* runs of this plan.
+The completed 946d experiment remains byte-for-byte under
+``configs/paper/archive/v4_result_946d`` and ``outputs_v4/five_dataset/946d...``.
+This generator describes a clean from-scratch reproduction after configuration
+authority was fixed (notably ``slide_step: 1``) and never aliases old checkpoints
+into a new plan identity.
 
 Two things this plan is explicit about, because both are easy to overstate:
 
@@ -40,7 +42,7 @@ from lib.lcbt_v4 import (  # noqa: E402
     TEACHER_FORCING_POLICY,
 )
 from lib.runtime_context import build_runtime_context  # noqa: E402
-from scripts.build_v4_development_plan import sha256_file  # noqa: E402
+from scripts.v4_utils import sha256_file  # noqa: E402
 
 PLAN_PATH = ROOT / "configs/paper/v4_five_dataset_plan.json"
 MANIFEST_DIR = ROOT / "configs/paper/v4_data_manifests"
@@ -51,14 +53,27 @@ SEEDS = (32, 42, 52)
 
 # Every source whose change would make a run a different experiment.
 CODE_SOURCES = (
-    "lib/lcbt_v4.py", "lib/runtime_context.py", "lib/v4_batch.py",
-    "lib/teacher_forcing.py", "data_provider/v4_lifecycle_loader.py",
+    "args.py", "lib/lcbt_v4.py", "lib/runtime_context.py",
+    "lib/v4_batch.py", "lib/v4_payload.py", "lib/teacher_forcing.py",
+    "lib/context_binding.py", "lib/graph_native_layout.py",
+    "data_provider/calendar_strata.py", "data_provider/lifecycle_roles.py",
+    "data_provider/v4_schedule.py", "data_provider/v4_metrics.py",
+    "data_provider/v4_lifecycle_loader.py", "experiments/v4_losses.py",
     "experiments/v4_runner.py", "experiments/v4_validation_collector.py",
-    "scripts/train_v4.py", "scripts/v4_launcher.py",
-    "scripts/v4_development_eval_v2.py",
-    "scripts/audit_v4_development_base.py",
-    "scripts/v4_reuse_audit.py",
-    "scripts/build_v4_readiness.py",
+    "model/ALFNet/ALFNet.py", "model/ALFGraph/ALFGraph.py",
+    "model/ALFTemporal/ALFTemporal.py", "model/ALFTemporal/patchstg.py",
+    "model/comparison_model/MoGERNN/MoGERNN.py",
+    "model/comparison_model/MoGERNN/layers/DCRNNCell.py",
+    "model/comparison_model/MoGERNN/layers/GRUCell.py",
+    "model/comparison_model/MoGERNN/layers/agg.py",
+    "model/comparison_model/MoGERNN/layers/gnn.py",
+    "model/comparison_model/family_utils.py",
+    "layers/DCRNNCell.py", "layers/gnn.py", "layers/evidence_router.py",
+    "layers/lifecycle_moge.py", "layers/protected_residual.py",
+    "layers/source_grin.py", "layers/source_timefilter.py",
+    "layers/source_tokenlearner.py", "layers/source_tsmixer.py",
+    "layers/structural_node_encoder.py", "scripts/train_v4.py",
+    "scripts/v4_launcher.py", "scripts/build_v4_readiness.py",
 )
 
 # What has already been read on each dataset's *test* split, stated rather than
@@ -160,57 +175,20 @@ def build_plan(include_commit=True):
                 runs.append({"dataset": dataset, "model": model, "seed": seed,
                              "config": str(path.relative_to(ROOT)),
                              "phase": 0 if seed == SEEDS[0] else 1,
-                             # filled in below from the reuse audit
                              "execution_action": "train"})
 
-    # Twelve PEMS08/PEMS-BAY runs already exist under the development plan. Each
-    # is audited individually against what this plan needs; one that fails any
-    # check is marked `train` and the others are unaffected. A reused run is
-    # never presented as a run of this plan -- it carries its source plan, its
-    # source commit, its source directory and its checkpoint digest.
-    from scripts.build_v4_development_plan import (assert_plan_still_holds,
-                                                   load_plan as load_development)
-    from scripts.v4_reuse_audit import audit_reusable
-
-    development = assert_plan_still_holds(load_development())
-    reuse = {record["run"]: record
-             for record in audit_reusable(development, data, configs)}
-    for entry in runs:
-        key = f"{entry['dataset']}/{entry['model']}/seed{entry['seed']}"
-        record = reuse.get(key)
-        if record is None or record["execution_action"] != "reuse":
-            entry["execution_action"] = "train"
-            if record is not None:
-                entry["reuse_compatibility_status"] = record[
-                    "reuse_compatibility_status"]
-                entry["reuse_rejected_because"] = record["findings"]
-            continue
-        entry.update({
-            "execution_action": "reuse",
-            "reuse_compatibility_status": record["reuse_compatibility_status"],
-            "source_plan_sha256": record["source_plan_sha256"],
-            "source_git_commit": record["source_git_commit"],
-            "source_run_directory": record["source_run_directory"],
-            "checkpoint_sha256": record["checkpoint_sha256"],
-            "best_epoch": record["best_epoch"],
-        })
-    reused = [entry for entry in runs if entry["execution_action"] == "reuse"]
-    to_train = [entry for entry in runs if entry["execution_action"] == "train"]
-
     plan = {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "v4_five_dataset_plan",
         "execution": {
             "total_result_slots": len(runs),
-            "provenance_verified_reused_runs": len(reused),
-            "new_training_runs": len(to_train),
-            "gpu_jobs_to_execute": len(to_train),
-            "reused_runs_are_not_runs_of_this_plan": True,
-            "reused_runs_source_plan": development["plan_sha256"],
-            "reuse_audit_code_sha256": sha256_file(ROOT / "scripts/v4_reuse_audit.py"),
+            "provenance_verified_reused_runs": 0,
+            "new_training_runs": len(runs),
+            "gpu_jobs_to_execute": len(runs),
+            "reuse_forbidden": True,
         },
-        "status": "preregistered_confirmatory_and_supportive",
-        "purpose": "one-shot five-dataset three-seed v4 experiment",
+        "status": "canonical_reproduction",
+        "purpose": "five-dataset three-seed v4 reproduction",
         "protocol": STRATEGY,
         "datasets": list(DATASETS),
         "models": list(MODELS),
@@ -221,6 +199,7 @@ def build_plan(include_commit=True):
         "data": data,
         "training": {
             "input_len": 12, "pred_len": 12,
+            "slide_step": 1,
             "split_fractions": list(SPLIT_FRACTIONS),
             "scenario_ratios": {name: 0.25 for name in
                                 ("zero_history", "steady", "join", "fault")},
@@ -236,14 +215,16 @@ def build_plan(include_commit=True):
                                   "phase; a user stop keeps last.pt and stays "
                                   "RESUMABLE"),
             "hyper_parameters_frozen": True,
-            "changes_this_round": "none",
+            "changes_from_completed_946d": (
+                "semantic no-op config repair: YAML slide_step now records the "
+                "effective stride 1; runtime consumes it; duplicate validation "
+                "forward and derived WorstGroup reporting were removed"),
         },
-        "output_root": "outputs_v4/five_dataset",
+        "output_root": "outputs_v4/reproduction",
         "endpoints": {
             "validation": {
-                "cells": 36,
-                "main_rows": ["Unseen", "Steady", "Join", "Fault", "LifeAvg",
-                              "WorstGroup"],
+                "cells": 33,
+                "main_rows": ["Unseen", "Steady", "Join", "Fault", "LifeAvg"],
                 "phase_rows": ["Cold", "Warm", "Ready", "Onset", "Decay",
                                "Outage"],
                 "metrics": ["MAE", "RMSE", "MAPE"],
@@ -252,7 +233,7 @@ def build_plan(include_commit=True):
                 "std_ddof": 1,
             },
             "test": {
-                "cells": 36,
+                "cells": 33,
                 "same_definitions_as_validation": True,
                 "opened_only_after": ["30/30 COMPLETE",
                                       "validation identity audit passes",
@@ -267,20 +248,21 @@ def build_plan(include_commit=True):
             "speed_datasets": ["METRLA", "PEMSBAY"],
             "forbidden": ["any avg_mae, avg_rmse or pooled absolute error across "
                           "flow and speed datasets"],
-            "allowed": ["per-dataset cells won out of 36", "seed agreement",
+            "allowed": ["per-dataset cells won out of 33", "seed agreement",
                         "relative change within a dataset"],
         },
         "reporting_obligations": {
             "every_dataset_reported": True,
             "no_dataset_may_be_dropped_after_seeing_results": True,
-            "36_of_36_is_an_engineering_target_not_a_stopping_rule": True,
+            "33_of_33_is_an_engineering_target_not_a_stopping_rule": True,
             "not_grounds_for_changing_dataset_split_or_hyper_parameters": True,
         },
-        "relationship_to_development_runs": {
-            "development_plan": "configs/paper/v4_development_plan.json",
-            "development_runs_are_historical_exploratory": True,
-            "development_checkpoints_may_not_be_reported_under_this_plan": True,
-            "development_checkpoints_may_not_initialise_a_run_of_this_plan": True,
+        "relationship_to_completed_result": {
+            "archive_plan": "configs/paper/archive/v4_result_946d/plan.json",
+            "archive_plan_sha256": "946d0b450bb10e3e0e5bc5ee066694bce13b3bdcc29c1c5e5a7e0702b2f4d0c8",
+            "archive_cells": 36,
+            "archive_includes_derived_worst_group": True,
+            "archive_checkpoints_may_not_be_relabelled_under_this_plan": True,
         },
         "readiness_attestation": {
             # Path and schema only. Hashing the attestation here while it hashes

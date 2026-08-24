@@ -102,7 +102,9 @@ def _dataset_block(fact, indent=""):
 {indent}input_len: 12
 {indent}pred_len: 12
 {indent}look_back: 0
-{indent}slide_step: 12
+{indent}# v4 enumerates every valid 5-minute origin; this is the effective
+{indent}# stride used by the completed five-dataset experiment.
+{indent}slide_step: 1
 {indent}input_features: {fact['target']}
 {indent}target_features: {fact['target']}
 {indent}freq: min
@@ -120,7 +122,6 @@ def _v4_lifecycle_block(lifecycle_features):
   lifecycle_observation_mask_feature: {flags}
   lifecycle_age_mode: state_duration
   lifecycle_training_strategy: {lcbt_v4.STRATEGY}
-  lcbt_protocol_seed: 2026
   lcbt_validation_seed: 12026
   # The v4 time split. args.py refuses any other value under this strategy.
   lcbt_train_end_ratio: {lcbt_v4.TRAIN_END_RATIO:.2f}

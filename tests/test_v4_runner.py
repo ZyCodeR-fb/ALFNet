@@ -263,7 +263,7 @@ def test_the_session_is_built_data_first():
 @pytest.mark.parametrize("who", sorted(CONFIGS))
 def test_the_loss_uses_exactly_the_loaders_mask(who):
     """Outside `loss_mask` the target may be anything at all."""
-    session = _session(who)
+    session = _session(who, batch_size=1)
     batch = next(iter(DataLoader(session.train_dataset, batch_size=2, shuffle=False)))
     mask = batch["loss_mask"].unsqueeze(-1)
     assert bool(mask.any()) and bool((~mask).any())
@@ -310,7 +310,7 @@ def test_valid_positions_is_the_mask_and_finiteness():
 
 @pytest.mark.parametrize("who", sorted(CONFIGS))
 def test_validation_updates_nothing(who):
-    session = _session(who)
+    session = _session(who, batch_size=1)
     optimizer = torch.optim.AdamW(session.model.parameters(), lr=1e-3)
     before = {name: p.detach().clone() for name, p in session.model.named_parameters()}
     report = validate(session, epoch=0, max_batches=2)
@@ -329,7 +329,7 @@ def test_validation_updates_nothing(who):
 def test_one_training_step_reproduces(who):
     results = []
     for _ in range(2):
-        session = _session(who)
+        session = _session(who, batch_size=1)
         optimizer = torch.optim.AdamW(session.model.parameters(), lr=1e-3)
         report = train_one_epoch(session, optimizer, 0, max_batches=1)
         results.append((report["base"], report["optimize"],
@@ -377,10 +377,7 @@ def test_an_unknown_model_is_refused(monkeypatch):
         build_v4_session(CONFIGS["ALFNet"])
 
 
-def test_the_runner_does_not_rewrite_the_strategy():
-    """A v3 config is refused, not silently relabelled as v4."""
-    with pytest.raises(RunnerRefused, match="does not rewrite one"):
-        build_v4_session("configs/ALFNet/gs_p8.yaml")
+def test_the_runner_uses_the_declared_v4_strategy():
     assert _session("ALFNet").args.lifecycle_training_strategy == "lcbt_v4"
 
 
