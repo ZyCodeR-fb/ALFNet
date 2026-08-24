@@ -426,17 +426,27 @@ def build_scheduler(session, optimizer):
 
 
 def load_plan_authority(plan_path=None):
-    """Load the one active v4 reproduction plan and its running permit."""
+    """Load a supported active plan; archived plans are never authorities."""
     if plan_path is None:
         plan_path = ROOT / "configs/paper/v4_five_dataset_plan.json"
     plan_path = Path(plan_path)
     if not plan_path.exists():
         raise RunnerRefused(f"{plan_path} does not exist")
     active = (ROOT / "configs/paper/v4_five_dataset_plan.json").resolve()
+    candidate = (ROOT / "configs/paper/v4_lf_sup_candidate_plan.json").resolve()
+    if plan_path.resolve() == candidate:
+        from scripts import build_v4_lf_sup_plan as candidate_builder
+        plan = candidate_builder.assert_plan_still_holds(
+            candidate_builder.load_plan(plan_path))
+        if plan.get("kind") != "v4_lf_sup_candidate_plan" \
+                or plan.get("status") != "development_validation_only" \
+                or not plan.get("selection", {}).get("test_forbidden"):
+            raise RunnerRefused("candidate plan is not validation-only")
+        return plan
     if plan_path.resolve() != active:
         raise RunnerRefused(
-            f"{plan_path} is not the active reproduction plan {active}; "
-            "archived result plans are evidence, not training authorities")
+            f"{plan_path} is neither active plan {active} nor candidate plan "
+            f"{candidate}; archived plans are evidence, not authorities")
     kind = json.loads(plan_path.read_text("utf-8")).get("kind")
     if kind != "v4_five_dataset_plan":
         raise RunnerRefused(f"{plan_path} declares unsupported kind={kind!r}")

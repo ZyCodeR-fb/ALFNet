@@ -151,3 +151,16 @@ def test_sup_model_router_width_matches_the_resolved_inventory():
     expected = distinct_support_names(context.adjacency)
     assert model.resolved_support_names == expected
     assert {conv.num_experts for conv in model._routed_convs()} == {len(expected)}
+
+
+def test_candidate_plan_is_exactly_five_validation_only_runs():
+    from scripts import build_v4_lf_sup_plan as builder
+    from scripts.train_v4 import load_plan_authority, resolve_plan
+    plan = builder.assert_plan_still_holds(builder.load_plan())
+    assert plan["trial_budget"] == len(plan["runs"]) == 5
+    assert plan["selection"]["split"] == "validation"
+    assert plan["selection"]["test_forbidden"] is True
+    authoritative = load_plan_authority(builder.PLAN_PATH)
+    for entry in authoritative["configs"].values():
+        _, registered = resolve_plan(entry["path"], authoritative)
+        assert registered["sha256"] == entry["sha256"]
