@@ -1,5 +1,6 @@
 import contextlib
 import importlib
+import math
 import os
 
 import torch
@@ -9,13 +10,6 @@ from args import load_args_from_config
 from layers.protected_residual import (
     ProtectedTemporalResidual,
     companion_residual_loss,
-)
-from layers.evidence_router import (
-    EvidenceRouter,
-    ObservedNLinear,
-    mask_shape,
-    neighbour_evidence,
-    routing_diagnostics,
     self_evidence,
 )
 from layers.source_grin import GRINInputImputer
@@ -25,8 +19,6 @@ from lib.v4_batch import read_common, resolve_adjacency
 from utils.model_output import unpack_model_output
 
 
-_RNG_OFFSET_EVIDENCE_ROUTER = 10_007
-_RNG_OFFSET_OBSERVED_NLINEAR = 20_011
 _RNG_OFFSET_PROTECTED_RESIDUAL = 30_013
 # 40_009 was _RNG_OFFSET_TEACHER. The offsets are fixed per module rather than
 # enumerated, so retiring one does not move any other module's initialisation;
@@ -265,6 +257,24 @@ class Model(nn.Module):
         self.forecast_role_balanced_beta = float(
             recipe.get("forecast_role_balanced_beta", 0.10)
         )
+        self.forecast_safe_relative_weight = float(
+            recipe.get("forecast_safe_relative_weight", 0.0)
+        )
+        self.forecast_safe_relative_floor_policy = str(
+            recipe.get(
+                "forecast_safe_relative_floor_policy",
+                "positive_target_q10_on_train_window_training_known_nodes",
+            )
+        )
+        if (not math.isfinite(self.forecast_safe_relative_weight)
+                or self.forecast_safe_relative_weight < 0):
+            raise ValueError(
+                "forecast_safe_relative_weight must be finite and >= 0")
+        if (self.forecast_safe_relative_weight > 0
+                and str(configs.target_features) != "q"):
+            raise ValueError(
+                "safe-relative loss is a flow-only candidate; set "
+                "forecast_safe_relative_weight=0 for non-flow targets")
         # "residual_gate": both experts decode, an availability gate blends them
         #   (original, kept as the low-risk fallback).
         # "film": the patch branch emits a per-node condition vector that
@@ -294,7 +304,6 @@ class Model(nn.Module):
         self.graph_expert_lr = float(recipe.get("graph_expert_lr", configs.lr))
         self.patch_expert_lr = float(recipe.get("patch_expert_lr", configs.lr))
         self.gate_lr = float(recipe.get("gate_lr", configs.lr))
-        self.router_lr = float(recipe.get("router_lr", 5e-4))
         # The residual is the only thing training in the frozen stage; it
         # needs a real step size, not the gate group's 5e-5.
         self.residual_lr = float(recipe.get("residual_lr", 5e-4))
@@ -347,55 +356,8 @@ class Model(nn.Module):
         # only, reusing the patch condition features rather than rebuilding the
         # second decoder. tanh bounds it and the zero-initialised output layer
         # makes an untrained model identical to fg1.
-        # C: evidence-aware router. Off -> fg1's FiLM path is untouched.
-        self.evidence_router_enabled = bool(recipe.get("evidence_router", False))
-        self.detach_imputer_for_temporal = bool(
-            recipe.get("detach_imputer_for_temporal", True)
-        )
-        # D: observed-history NLinear residual. Usable with or without C.
-        self.observed_nlinear_enabled = bool(recipe.get("observed_nlinear", False))
-        self.observed_residual_scale = float(recipe.get("observed_residual_scale", 0.35))
         self.pred_len = int(configs.pred_len)
         self.input_len = int(configs.input_len)
-        if (self.evidence_router_enabled or self.observed_nlinear_enabled) and not self.film_fusion:
-            raise ValueError(
-                "evidence_router and observed_nlinear extend the FiLM-conditioned "
-                "path; enable fusion_mode=film first"
-            )
-        self.observed_nlinear = None
-        if self.observed_nlinear_enabled:
-            # Every optional module draws from its own forked stream. Built on
-            # the shared stream they shift every later module's initialisation:
-            # measured, enabling C moved graph_refiner.input_proj by up to 1.01
-            # under the same seed, so a candidate and its base were no longer
-            # comparable at step 0. The offsets are fixed per module, so turning
-            # one switch on never perturbs another.
-            with _isolated_rng(
-                    getattr(configs, "model_init_seed", configs.seed),
-                    _RNG_OFFSET_OBSERVED_NLINEAR):
-                self.observed_nlinear = ObservedNLinear(
-                    self.input_len, self.pred_len, self.output_dim
-                )
-        self.patch_projection = None
-        self.evidence_router = None
-        self.patch_residual_scale = 1.0
-        if self.evidence_router_enabled:
-            # C must run without D: a light projection turns the existing patch
-            # condition features into Y_patch.
-            with _isolated_rng(
-                    getattr(configs, "model_init_seed", configs.seed),
-                    _RNG_OFFSET_EVIDENCE_ROUTER):
-                self._build_evidence_modules(
-                    gate_hidden_dim, recipe
-                )
-        self.last_routing_diagnostics = None
-        self._last_temporal = None
-        # film mode zeroes lambda_route because there was no second forecast to
-        # route between; the evidence router restores one, so it gets its own.
-        self.lambda_route_evidence = (
-            float(recipe.get("lambda_route", 0.05)) if self.evidence_router_enabled else 0.0
-        )
-
         # R: protected, directly-supervised temporal residual over the graph
         # anchor. Off -> fg1 unchanged.
         self.temporal_residual_kind = str(recipe.get("temporal_residual", "none"))
@@ -522,35 +484,26 @@ class Model(nn.Module):
             self.shared_input_imputer.parameters()
         )
         patch_params = list(self.patch_expert.parameters())
-        # The router has to travel: its bias starts at -2 and has to move by
-        # O(1) for beta to change meaningfully. AdamW's step is ~lr regardless
-        # of gradient size, so at the gate group's 5e-5 that is 20k steps, or
-        # 75 epochs -- far past where these runs early-stop. Measured over 20
-        # real steps the bias moved 1.004e-3, i.e. exactly 20 x lr. It gets its
-        # own configurable group instead.
-        routing_params = [
+        residual_params = [
             parameter
-            for module in (self.evidence_router, self.patch_projection,
-                           self.temporal_residual)
+            for module in (self.temporal_residual,)
             if module is not None
             for parameter in module.parameters()
         ]
-        routing_ids = {id(parameter) for parameter in routing_params}
+        residual_ids = {id(parameter) for parameter in residual_params}
         expert_ids = {id(parameter) for parameter in graph_params + patch_params}
         fusion_params = [
             parameter
             for parameter in self.parameters()
-            if id(parameter) not in expert_ids and id(parameter) not in routing_ids
+            if id(parameter) not in expert_ids and id(parameter) not in residual_ids
         ]
         groups = [
             {"params": graph_params, "lr": self.graph_expert_lr},
             {"params": patch_params, "lr": self.patch_expert_lr},
             {"params": fusion_params, "lr": self.gate_lr or float(base_lr)},
         ]
-        if routing_params:
-            groups.append({"params": routing_params, "lr": self.router_lr})
-        if self.temporal_residual is not None:
-            groups[-1]["lr"] = self.residual_lr
+        if residual_params:
+            groups.append({"params": residual_params, "lr": self.residual_lr})
         return groups
 
     def _state(self, x_enc):
@@ -562,30 +515,6 @@ class Model(nn.Module):
             torch.cat([last_availability, last_age, visibility], dim=-1)
         )
         return state, last_availability
-
-    def _build_evidence_modules(self, gate_hidden_dim, recipe):
-        """C's modules. Called inside a forked RNG so the switch is isolating."""
-        # Not zero: with Yt == Yg exactly, dYhat/dbeta = (Yt - Yg) = 0 and the
-        # router receives no gradient from the forecast loss at all. A small
-        # non-zero init breaks that degeneracy while keeping the perturbation
-        # tiny, and the tanh bound below keeps it that way during training.
-        self.patch_projection = nn.Sequential(
-            nn.Linear(int(self.patch_expert.feature_dim), gate_hidden_dim),
-            nn.ReLU(),
-            nn.Linear(gate_hidden_dim, self.pred_len * self.output_dim),
-        )
-        nn.init.normal_(self.patch_projection[-1].weight, std=1e-3)
-        nn.init.zeros_(self.patch_projection[-1].bias)
-        self.patch_residual_scale = float(recipe.get("patch_residual_scale", 1.0))
-        self.evidence_router = EvidenceRouter(
-            self.output_dim,
-            self.pred_len,
-            AVAILABILITY_COUNT,
-            hidden_dim=gate_hidden_dim,
-            self_evidence_floor=float(recipe.get("self_evidence_floor", 0.02)),
-            initial_beta_logit=float(recipe.get("initial_beta_logit", -2.0)),
-            router_weight_std=float(recipe.get("router_weight_std", 1e-2)),
-        )
 
     def _protected_residual(self, y_graph, x_enc, adjacency, last_availability):
         """Y_hat = Y_g + g(availability, age, visibility) * R.
@@ -634,68 +563,6 @@ class Model(nn.Module):
                 parameter.requires_grad_(False)
                 frozen += 1
         return frozen
-
-    def _evidence_context(self, x_enc, adjacency, last_availability, state):
-        """Everything the router reads, all of it known at prediction time."""
-        observation_mask = x_enc[..., self.mask_index:self.mask_index + 1]
-        e_self = self_evidence(observation_mask)
-        e_nbr = neighbour_evidence(adjacency, observation_mask)
-        return {
-            "availability": last_availability,
-            "state_age": x_enc[:, -1, :, self.age_index:self.age_index + 1],
-            "visibility": observation_mask.mean(dim=1),
-            "e_self": e_self,
-            "e_nbr": e_nbr,
-            "mask_shape": mask_shape(observation_mask),
-        }, observation_mask, e_self
-
-    def _evidence_fusion(self, y_graph, patch_features, x_enc, adjacency,
-                         last_availability, state):
-        """Yt = Y_patch + g_self * Y_self, then one beta over the graph anchor.
-
-        `Y_self` is gated by the node's own evidence -- with no measurements the
-        NLinear has nothing to project. `Y_patch` deliberately is not: Unseen
-        and Outage both have e_self = 0, and gating the patch path on e_self
-        would switch off exactly the correction that the fault track shows is
-        worth up to -2.35 MAE. The router separates the two cases from the
-        availability context, state_age and the neighbourhood evidence instead.
-        """
-        context, observation_mask, e_self = self._evidence_context(
-            x_enc, adjacency, last_availability, state
-        )
-        y_temporal = y_graph
-        if self.patch_projection is not None:
-            projected = self.patch_projection(patch_features).reshape(
-                y_graph.shape[0], y_graph.shape[2], self.pred_len, self.output_dim
-            ).permute(0, 2, 1, 3)
-            # Bounded so an early large activation cannot throw the forecast:
-            # the correction is at most patch_residual_scale in normalised units.
-            y_temporal = y_graph + self.patch_residual_scale * torch.tanh(projected)
-        if self.observed_nlinear is not None:
-            raw = x_enc[..., :self.output_dim]
-            self_residual, _anchor = self.observed_nlinear(raw, observation_mask)
-            gate = (
-                self.evidence_router.self_gate(e_self)
-                if self.evidence_router is not None
-                else (e_self / 0.02).clamp(0.0, 1.0)
-            ).unsqueeze(1)
-            # A residual, not a blend towards persistence: zero at
-            # initialisation, gated to nodes that actually have measurements,
-            # and bounded by the configured scale.
-            y_temporal = y_temporal + self.observed_residual_scale * gate * torch.tanh(
-                self_residual
-            )
-        self._last_temporal = y_temporal
-        if self.evidence_router is None:
-            # D alone: a bounded observed-history residual on the graph output.
-            return y_temporal, None
-        prediction, beta = self.evidence_router(y_graph, y_temporal, context)
-        if not self.training:
-            self.last_routing_diagnostics = {
-                "beta_mean": float(beta.mean()),
-                "beta_std": float(beta.std()),
-            }
-        return prediction, beta
 
     # --- the v4 entry point ---------------------------------------------------
     #
@@ -782,15 +649,7 @@ class Model(nn.Module):
         # filled is [imputed_raw, availability(4), state_age, observation_mask];
         # each expert takes the prefix it declares.
         graph_input = filled[..., :self.graph_input_dim]
-        # The shared GRIN is in the graph parameter group. Letting the temporal
-        # branch push gradients back into it is the mechanism that cost fg1 its
-        # Unseen accuracy relative to the two-expert model; detaching keeps the
-        # imputer optimised for the path that depends on it. Detaching changes
-        # which gradients flow, never a single value that arrives.
-        patch_source = filled.detach() if (
-            self.evidence_router_enabled and self.detach_imputer_for_temporal
-        ) else filled
-        patch_input = patch_source[..., :self.patch_input_dim]
+        patch_input = filled[..., :self.patch_input_dim]
         if hasattr(self.graph_expert, "set_current_node_ids"):
             self.graph_expert.set_current_node_ids(self._current_node_ids(filled.size(2)))
         decoder = None if x_dec is None else x_dec[..., :self.output_dim]
@@ -818,6 +677,18 @@ class Model(nn.Module):
         y_graph, graph_meta = unpack_model_output(graph_output)
         y_patch, _ = unpack_model_output(patch_output)
         return y_graph, y_patch, graph_meta.get("aux_losses")
+
+    def _forecast_metadata(self, expert_aux_losses):
+        """Training-objective declaration consumed by the shared v4 runner."""
+        return {
+            "aux_losses": expert_aux_losses,
+            "forecast_loss_mode": "role_balanced_mix",
+            "forecast_role_balanced_beta": self.forecast_role_balanced_beta,
+            "forecast_safe_relative_weight": self.forecast_safe_relative_weight,
+            "forecast_safe_relative_floor_policy": (
+                self.forecast_safe_relative_floor_policy
+            ),
+        }
 
     def forward(
         self,
@@ -852,9 +723,7 @@ class Model(nn.Module):
                 )
                 return {
                     "pred": prediction,
-                    "aux_losses": expert_aux_losses,
-                    "forecast_loss_mode": "role_balanced_mix",
-                    "forecast_role_balanced_beta": self.forecast_role_balanced_beta,
+                    **self._forecast_metadata(expert_aux_losses),
                     # The residual is supervised directly against the anchor's
                     # error rather than only through the fused loss.
                     "companion_residual": {
@@ -864,31 +733,6 @@ class Model(nn.Module):
                     },
                     "residual_gate": extras["gate"],
                     "router_diagnostics": self._last_router_diagnostics,
-                }
-            if self.evidence_router_enabled or self.observed_nlinear_enabled:
-                prediction, beta = self._evidence_fusion(
-                    prediction, y_patch, x_enc, adjacency, last_availability, state
-                )
-                if self.evidence_router_enabled:
-                    return {
-                        "pred": prediction,
-                        "aux_losses": expert_aux_losses,
-                        "forecast_loss_mode": "role_balanced_mix",
-                        "forecast_role_balanced_beta": self.forecast_role_balanced_beta,
-                        "route_routing": {
-                            "alpha": 1.0 - beta,
-                            "y_graph": y_graph.detach(),
-                            "y_patch": self._last_temporal.detach(),
-                            "lambda_route": float(self.lambda_route_evidence),
-                            "warmup_epoch": self.route_warmup_epoch,
-                            "role_balanced": self.route_role_balanced,
-                        },
-                    }
-                return {
-                    "pred": prediction,
-                    "aux_losses": expert_aux_losses,
-                    "forecast_loss_mode": "role_balanced_mix",
-                    "forecast_role_balanced_beta": self.forecast_role_balanced_beta,
                 }
             if self.fault_residual_head is not None:
                 # One-hot, so the gate is exactly 0 on AAS/NAS/VS nodes and the
@@ -902,9 +746,7 @@ class Model(nn.Module):
                 )
             return {
                 "pred": prediction,
-                "aux_losses": expert_aux_losses,
-                "forecast_loss_mode": "role_balanced_mix",
-                "forecast_role_balanced_beta": self.forecast_role_balanced_beta,
+                **self._forecast_metadata(expert_aux_losses),
                 # fg1 and the router candidates take this path.
                 "router_diagnostics": self._last_router_diagnostics,
             }
@@ -933,9 +775,7 @@ class Model(nn.Module):
         }
         return {
             "pred": prediction,
-            "aux_losses": expert_aux_losses,
-            "forecast_loss_mode": "role_balanced_mix",
-            "forecast_role_balanced_beta": self.forecast_role_balanced_beta,
+            **self._forecast_metadata(expert_aux_losses),
             "route_routing": {
                 **expert_meta,
                 "lambda_route": self.lambda_route,

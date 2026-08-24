@@ -19,6 +19,16 @@ def element_loss(prediction, target, name):
 
 def role_balanced_loss(prediction, target, valid, last_role, name):
     elements = element_loss(prediction, target, name)
+    return role_balanced_elements(elements, valid, last_role)
+
+
+def role_balanced_elements(elements, valid, last_role):
+    """Equal-weight the lifecycle roles represented in one batch.
+
+    ``elements`` is already an element-wise loss.  Keeping aggregation separate
+    lets ALFNet reuse exactly the same role contract for its squared-error and
+    safe-relative terms instead of maintaining two subtly different masks.
+    """
     terms = []
     for role in range(ROLE_CHANNEL_COUNT):
         role_mask = last_role[..., role].unsqueeze(1).unsqueeze(-1) > 0.5
@@ -26,3 +36,21 @@ def role_balanced_loss(prediction, target, valid, last_role, name):
         if selected.any():
             terms.append(elements[selected].mean())
     return torch.stack(terms).mean() if terms else None
+
+
+def safe_relative_elements(prediction, target, scaler, floor):
+    """Absolute relative error in original units with a train-only floor.
+
+    Raw MAPE has an unbounded gradient near zero.  ``floor`` is fitted once on
+    positive training-known targets, so this term gives low-flow observations
+    more influence than MSE without letting a one-vehicle denominator dominate
+    an update.  It is a training primitive, not a replacement metric.
+    """
+    floor = float(floor)
+    if not torch.isfinite(torch.tensor(floor)) or floor <= 0:
+        raise ValueError("safe-relative floor must be finite and positive")
+    mean, std = float(scaler["mean"]), float(scaler["std"])
+    predicted = prediction * std + mean
+    actual = target * std + mean
+    denominator = actual.abs().clamp_min(floor)
+    return (predicted - actual).abs() / denominator

@@ -7,7 +7,7 @@
 # Every dataset-specific value below is read from
 # configs/paper/v4_data_manifests/PEMSBAY_run_manifest.json:
 #   target 'v' at channel 2, 325 nodes,
-#   layout kdtree_on_verified_wgs84 with spa_patchsize 12.
+#   layout kdtree_on_verified_wgs84 with spa_patchsize 11.
 runtime:
   model: ALFGraph
   model_variant: alf_gsd_soft
@@ -76,7 +76,9 @@ family:
     decoder_output_mode: residual_delta
     decoder_residual_scale: 0.3
     graph_conv: lifecycle_moge
-    moge_num_experts: 5
+    # Candidate switch. `legacy5` reproduces the completed run; SUP candidates
+    # use `distinct_multiscale_v1` and derive the expert count from the graph.
+    moge_support_set: legacy5
     moge_top_k: 1
     moge_router_mode: soft
     moge_noisy_gating: true

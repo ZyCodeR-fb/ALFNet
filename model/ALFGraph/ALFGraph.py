@@ -4,10 +4,13 @@ from torch import nn
 from layers.DCRNNCell import DCRNNCell
 from layers.gnn import calculate_random_walk_matrix
 from layers.lifecycle_moge import (
+    DISTINCT_MULTISCALE_SUPPORT_SET,
+    LEGACY_SUPPORT_SET,
     LIFECYCLE_STATE_CHANNELS,
     SUPPORT_NAMES,
     LifecycleRoutedGraphConv,
     build_lifecycle_supports,
+    distinct_support_names,
 )
 from lib.teacher_forcing import step_teacher_input
 
@@ -135,7 +138,18 @@ class Model(nn.Module):
         from lib.context_binding import assert_config_agrees_with_context
 
         assert_config_agrees_with_context(configs, runtime_context, "ALFGraph")
-        model = cls(configs)
+        recipe = (getattr(configs, "model_family_cfg", {}) or {}).get("recipe", {})
+        support_set = str(recipe.get("moge_support_set", LEGACY_SUPPORT_SET))
+        if support_set == DISTINCT_MULTISCALE_SUPPORT_SET:
+            resolved_support_names = distinct_support_names(
+                runtime_context.adjacency, support_set)
+        elif support_set == LEGACY_SUPPORT_SET:
+            resolved_support_names = SUPPORT_NAMES
+        else:
+            # Let the common resolver produce the canonical error text.
+            resolved_support_names = distinct_support_names(
+                runtime_context.adjacency, support_set)
+        model = cls(configs, resolved_support_names=resolved_support_names)
         identity = runtime_context.static_asset_identity()
         model.runtime_context = runtime_context
         model.static_asset_hash = runtime_context.static_asset_hash()
@@ -143,7 +157,7 @@ class Model(nn.Module):
         model.context_node_ids_sha256 = identity["node_ids_sha256"]
         return model
 
-    def __init__(self, configs):
+    def __init__(self, configs, resolved_support_names=None):
         super().__init__()
         self.runtime_context = None
         self.static_asset_hash = None
@@ -163,6 +177,17 @@ class Model(nn.Module):
         if self.graph_conv not in {"lifecycle_moge", "diffusion"}:
             raise ValueError(f"unsupported ALFGraph graph_conv: {self.graph_conv}")
         self.routed = self.graph_conv == "lifecycle_moge"
+        self.moge_support_set = str(
+            recipe.get("moge_support_set", LEGACY_SUPPORT_SET)
+        )
+        if (self.moge_support_set == DISTINCT_MULTISCALE_SUPPORT_SET
+                and resolved_support_names is None):
+            raise ValueError(
+                "distinct_multiscale_v1 must be resolved from a "
+                "RuntimeDataContext before ALFGraph construction")
+        self.resolved_support_names = tuple(
+            resolved_support_names or SUPPORT_NAMES
+        )
         self.state_dim = LIFECYCLE_STATE_CHANNELS
         if self.raw_enc_in + self.state_dim != backbone_input:
             raise ValueError(
@@ -172,7 +197,13 @@ class Model(nn.Module):
 
         conv_factory = None
         if self.routed:
-            num_experts = int(recipe.get("moge_num_experts", len(SUPPORT_NAMES)))
+            num_experts = len(self.resolved_support_names)
+            declared_count = recipe.get("moge_num_experts")
+            if declared_count is not None and int(declared_count) != num_experts:
+                raise ValueError(
+                    "moge_num_experts contradicts the resolved distinct support "
+                    f"inventory: declared {declared_count}, resolved "
+                    f"{num_experts} {self.resolved_support_names}")
             top_k = int(recipe.get("moge_top_k", 2))
             noisy_gating = bool(recipe.get("moge_noisy_gating", True))
             loss_coef = float(recipe.get("moge_load_balance_coef", 1e-2))
@@ -265,7 +296,11 @@ class Model(nn.Module):
                 adjacency,
                 forward_support,
                 backward_support,
+                support_set=self.moge_support_set,
+                selected_names=self.resolved_support_names,
             )
+            if supports.shape[0] != len(self.resolved_support_names):
+                raise RuntimeError("support inventory changed after model construction")
             state_sequence = x_enc[..., self.raw_enc_in:self.raw_enc_in + self.state_dim]
             for conv in self._routed_convs():
                 conv.reset_router_stats()
@@ -318,5 +353,7 @@ class Model(nn.Module):
                 output["aux_losses"] = {"graph_router": torch.stack(terms).mean()}
             diagnostics = self.pop_router_diagnostics()
             if diagnostics:
+                diagnostics["support_set"] = self.moge_support_set
+                diagnostics["support_names"] = list(self.resolved_support_names)
                 output["router_diagnostics"] = diagnostics
         return output

@@ -117,7 +117,7 @@ def test_metrla_keeps_its_canonical_graph_and_coordinates():
     assert manifest["positions"]["policy"] == "verified_wgs84"
     assert manifest["unseen"]["count"] == 50
     assert manifest["layout"]["algorithm"] == "kdtree_on_verified_wgs84"
-    assert manifest["layout"]["spa_patchsize"] == 8
+    assert manifest["layout"]["spa_patchsize"] == 7
     assert manifest["time"]["start"].startswith("2012-03-01")
     assert manifest["time"]["end"].startswith("2012-06-27")
     assert manifest["files"] == ["raw_data.pkl", "unknown_nodes.npy"]

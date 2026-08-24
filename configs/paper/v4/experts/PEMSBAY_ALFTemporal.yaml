@@ -7,12 +7,11 @@
 # Every dataset-specific value below is read from
 # configs/paper/v4_data_manifests/PEMSBAY_run_manifest.json:
 #   target 'v' at channel 2, 325 nodes,
-#   layout kdtree_on_verified_wgs84 with spa_patchsize 12.
+#   layout kdtree_on_verified_wgs84 with spa_patchsize 11.
 #
-# spa_patchsize is geometry, not tuning: the layout splits the node set into
-# 2^recur_times parts and `_reorder_data` pads a part up to spa_patchsize but
-# never splits one. The manifest froze the value together with the membership
-# hash, so it is read from there and never guessed from a comment.
+# spa_patchsize is derived geometry, not tuning: it equals the largest resolved
+# part. `_reorder_data` pads only smaller parts and never splits one. The
+# manifest freezes the value together with the membership hash.
 runtime:
   model: ALFTemporal
   model_variant: cond1
@@ -49,7 +48,7 @@ family:
     tem_patchsize: 12
     tem_patchnum: 1
     recur_times: 5
-    spa_patchsize: 12
+    spa_patchsize: 11
     factors: 1
     crossformer_router_factor: 4
     crossformer_dropout: 0.1

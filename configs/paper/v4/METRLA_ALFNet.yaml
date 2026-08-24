@@ -7,7 +7,7 @@
 # Every dataset-specific value below is read from
 # configs/paper/v4_data_manifests/METRLA_run_manifest.json:
 #   target 'v' at channel 2, 207 nodes,
-#   layout kdtree_on_verified_wgs84 with spa_patchsize 8.
+#   layout kdtree_on_verified_wgs84 with spa_patchsize 7.
 runtime:
   model: ALFNet
   model_variant: gs_v4
@@ -91,6 +91,10 @@ family:
     fusion_mode: film
     forecast_loss_mode: role_balanced_mix
     forecast_role_balanced_beta: 0.10
+    # Candidate switch. Zero preserves the completed v4 objective exactly;
+    # flow-only LF candidates set a positive value in a separately hashed YAML.
+    forecast_safe_relative_weight: 0.0
+    forecast_safe_relative_floor_policy: positive_target_q10_on_train_window_training_known_nodes
     graph_diffusion_steps: 1
     graph_diffusion_scale: 0.05
     graph_diffusion_role_scale: {aas: 0.0, nas: 1.0, vs: 1.0, fs: 0.25}

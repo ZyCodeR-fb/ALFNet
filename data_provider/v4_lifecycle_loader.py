@@ -108,10 +108,21 @@ class V4LifecycleDataset(Dataset):
         valid = window[natural[:train_end][:, known_nodes]]
         if valid.size == 0:
             raise ContextRefused("no valid training-known values to fit the scaler")
+        positive = valid[valid > 0]
+        if positive.size == 0:
+            raise ContextRefused(
+                "no positive training-known values for the safe-relative floor")
         std = float(valid.std())
         return {"mean": float(valid.mean()), "std": std if std > 1e-6 else 1.0,
                 "fitted_on": "train window, training-known nodes only",
-                "n_values": int(valid.size)}
+                "n_values": int(valid.size),
+                # A robust denominator fixed before validation/test is opened.
+                # q10 is deliberately data-scale aware: one vehicle and one mph
+                # should not mean the same thing across unrelated targets.
+                "safe_relative_floor": float(np.quantile(positive, 0.10)),
+                "safe_relative_floor_policy":
+                    "positive_target_q10_on_train_window_training_known_nodes",
+                "safe_relative_floor_n_values": int(positive.size)}
 
     def _build_origins(self):
         """Window starts whose guard reads only in-scope nodes."""

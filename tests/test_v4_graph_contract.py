@@ -45,7 +45,7 @@ def test_resolved_layout_fits_the_frozen_patch_capacity(dataset):
     context = build_runtime_context(dataset, "train", seed=32)
     manifest = _manifest(dataset)
     largest = max(len(part) for part in context.layout_parts)
-    assert int(manifest["layout"]["spa_patchsize"]) >= largest
+    assert int(manifest["layout"]["spa_patchsize"]) == largest
     expected = ("kdtree_on_verified_wgs84" if dataset in ("METRLA", "PEMSBAY")
                 else "graph_native_component_bfs")
     assert manifest["layout"]["algorithm"] == expected

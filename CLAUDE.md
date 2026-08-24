@@ -25,19 +25,19 @@ removes WorstGroup from runtime reporting, so its table has 33 cells.
 | dataset | N | target | channel | unit | static layout | `spa_patchsize` | largest resolved part |
 |---|---:|---|---:|---|---|---:|---:|
 | PEMS03 | 358 | flow (`q`) | 0 | veh/5min | component-aware graph BFS | 12 | 12 |
-| PEMS04 | 307 | flow (`q`) | 0 | veh/5min | component-aware graph BFS | 11 | 10 |
-| PEMS08 | 170 | flow (`q`) | 0 | veh/5min | component-aware graph BFS | 7 | 6 |
-| METR-LA | 207 | speed (`v`) | 2 | mph | KD-tree on verified WGS84 | 8 | 7 |
-| PEMS-BAY | 325 | speed (`v`) | 2 | mph | KD-tree on verified WGS84 | 12 | 11 |
+| PEMS04 | 307 | flow (`q`) | 0 | veh/5min | component-aware graph BFS | 10 | 10 |
+| PEMS08 | 170 | flow (`q`) | 0 | veh/5min | component-aware graph BFS | 6 | 6 |
+| METR-LA | 207 | speed (`v`) | 2 | mph | KD-tree on verified WGS84 | 7 | 7 |
+| PEMS-BAY | 325 | speed (`v`) | 2 | mph | KD-tree on verified WGS84 | 11 | 11 |
 
 Channel is an array index, not the number of variables. Flow and speed are
 different tasks and their absolute errors must never be averaged together.
 
-`spa_patchsize` is a padding capacity, not a temporal patch count. The uniform
-correctness rule is `spa_patchsize >= largest resolved part`. Forcing every
-dataset to either `max` or `max+1` would change four of the five frozen ALFNet
-computations; therefore the measured capacities above are retained. PEMS03's
-12 is valid and is not changed to 13 merely for cosmetic uniformity.
+`spa_patchsize` is a padding capacity, not a temporal patch count. The active
+retraining rule is derived, not hand-written: it equals the largest resolved
+part. Smaller parts are padded and no part is split. This changes four ALFNet
+layouts relative to archived plan 946d, so those checkpoints remain historical
+evidence and are not reused by a new plan.
 
 The temporal encoder uses `tem_patchsize=12`, `tem_patchnum=1`: one 12-step
 history token per spatial part.
@@ -100,17 +100,26 @@ ALFTemporal applies the resolved static spatial layout plus the one-token
 12-step temporal encoder. Their features are fused by FiLM and passed through
 the graph refiner. The frozen parameter count is 1,037,529.
 
-The router exposes five labels but fewer numerically distinct propagation
-operators:
+Archived plan 946d exposed five labels but fewer numerically distinct
+propagation operators:
 
 - directed weighted METR-LA/PEMS-BAY: 4 effective supports because weighted
   mean and forward diffusion are the same row-normalised operator;
 - binary/symmetric PEMS03/PEMS04/PEMS08: 3 effective supports because weighted
   mean equals forward diffusion and forward equals backward.
 
-Do not claim five independent propagation mechanisms and do not change the
-operators merely to make the labels distinct; that would be a model change and
-would require retraining.
+The bounded SUP candidate replaces that inventory with ordered candidates
+`I, binary-mean, forward-1, backward-1, forward-2, backward-2`, then removes
+numerically duplicated matrices per dataset before constructing the router.
+The existing soft lifecycle router and its load-balance auxiliary remain; no
+second evidence router exists. SUP is a model change and requires retraining.
+
+The bounded LF candidate is flow-only. It adds a small safe-relative term in
+original units, role-balanced exactly like the existing ALFNet objective, with
+a denominator floor fitted as the positive-target q10 on train-time known
+nodes only. Weight zero is bit-identical to BASE. Generated PEMS08 development
+configs live under `configs/paper/v4_candidates/PEMS08/`; they must not access
+the test split or overwrite plan 946d.
 
 MoGERNN is the sole headline baseline and has 226,270 parameters. It receives
 the common inputs but not ALFNet's lifecycle context.

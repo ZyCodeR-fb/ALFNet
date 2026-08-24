@@ -189,6 +189,10 @@ family:
     fusion_mode: film
     forecast_loss_mode: role_balanced_mix
     forecast_role_balanced_beta: 0.10
+    # Candidate switch. Zero preserves the completed v4 objective exactly;
+    # flow-only LF candidates set a positive value in a separately hashed YAML.
+    forecast_safe_relative_weight: 0.0
+    forecast_safe_relative_floor_policy: positive_target_q10_on_train_window_training_known_nodes
     graph_diffusion_steps: 1
     graph_diffusion_scale: 0.05
     graph_diffusion_role_scale: {{aas: 0.0, nas: 1.0, vs: 1.0, fs: 0.25}}
@@ -270,7 +274,9 @@ family:
     decoder_output_mode: residual_delta
     decoder_residual_scale: 0.3
     graph_conv: lifecycle_moge
-    moge_num_experts: 5
+    # Candidate switch. `legacy5` reproduces the completed run; SUP candidates
+    # use `distinct_multiscale_v1` and derive the expert count from the graph.
+    moge_support_set: legacy5
     moge_top_k: 1
     moge_router_mode: soft
     moge_noisy_gating: true
@@ -280,10 +286,9 @@ family:
 
 def alftemporal_config(fact):
     return f"""{_header(fact)}#
-# spa_patchsize is geometry, not tuning: the layout splits the node set into
-# 2^recur_times parts and `_reorder_data` pads a part up to spa_patchsize but
-# never splits one. The manifest froze the value together with the membership
-# hash, so it is read from there and never guessed from a comment.
+# spa_patchsize is derived geometry, not tuning: it equals the largest resolved
+# part. `_reorder_data` pads only smaller parts and never splits one. The
+# manifest freezes the value together with the membership hash.
 runtime:
   model: ALFTemporal
   model_variant: cond1

@@ -80,10 +80,16 @@ CODE_SOURCES = ("experiments/v4_runner.py", "experiments/v4_validation_collector
 # something it does not do. Refused by name so the refusal survives a rename of
 # whatever module would otherwise have implemented them.
 FORBIDDEN_ARGUMENT_SUBSTRINGS = ("test", "evaluate", "confirmation")
+CANDIDATE_CONFIG_DIR = ROOT / "configs/paper/v4_candidates/PEMS08"
 
 
 def v4_config_paths():
     return sorted(path for path in CONFIG_DIR.glob("*.yaml"))
+
+
+def v4_candidate_config_paths():
+    """Generated bounded-development configs; nested expert YAMLs excluded."""
+    return sorted(path for path in CANDIDATE_CONFIG_DIR.glob("*.yaml"))
 
 
 def _sha256_file(path):
@@ -118,6 +124,19 @@ def resolve_run_directory(output_root, session, config_path, config_sha):
     """dataset / model / config hash / seed. Identity, not a timestamp."""
     return (Path(output_root) / session.dataset / session.model_name
             / config_sha[:16] / f"seed{session.run_seed}")
+
+
+def model_method_contract(session):
+    graph = getattr(session.model, "graph_expert", None)
+    return {
+        "safe_relative_weight": float(getattr(
+            session.model, "forecast_safe_relative_weight", 0.0)),
+        "safe_relative_floor_policy": getattr(
+            session.model, "forecast_safe_relative_floor_policy", None),
+        "graph_support_set": getattr(graph, "moge_support_set", None),
+        "graph_support_names": list(getattr(
+            graph, "resolved_support_names", ())),
+    }
 
 
 def checkpoint_payload(session, config_path, config_sha, epoch, best_epoch,
@@ -156,8 +175,10 @@ def checkpoint_payload(session, config_path, config_sha, epoch, best_epoch,
         "objective_terms": {
             "base": "masked MSE over loss_mask & isfinite",
             "role_balanced_mix": train_report.get("role_mix") is not None,
+            "safe_relative": train_report.get("safe_relative") is not None,
             "model_aux_losses": train_report.get("aux") is not None,
         },
+        "model_method_contract": model_method_contract(session),
         "train_report": {key: value for key, value in train_report.items()
                          if key != "model_state"},
         "validation_report": validation_report,
@@ -265,6 +286,7 @@ def run_state_payload(session, config_path, config_sha, epoch, best, wait,
         "teacher_forcing_policy": TEACHER_FORCING_POLICY,
         "shuffle_policy": SHUFFLE_POLICY,
         "loss": getattr(session.args, "loss", "mse"),
+        "model_method_contract": model_method_contract(session),
         "parameter_count": sum(p.numel() for p in session.model.parameters()),
     }
 
@@ -274,7 +296,7 @@ RESUME_IDENTITY_FIELDS = (
     "payload_sha256", "unseen_sha256", "manifest_sha256", "static_asset_hash",
     "train_exposure_hash", "validation_exposure_hash", "split_fractions",
     "teacher_forcing_policy", "shuffle_policy", "seed_contract", "loss",
-    "parameter_count",
+    "parameter_count", "model_method_contract",
 )
 
 
@@ -453,11 +475,17 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
           collect_development_table=False, restart_incomplete=False):
     """One v4 run. Returns the run report; writes nothing when `save` is false."""
     config_path = Path(config_path).resolve()
-    known = {path.resolve() for path in v4_config_paths()}
+    canonical = {path.resolve() for path in v4_config_paths()}
+    candidates = {path.resolve() for path in v4_candidate_config_paths()}
+    known = canonical | candidates
     if config_path not in known:
         raise RunnerRefused(
             f"{config_path} is not one of the {len(known)} v4 configs in "
             f"{CONFIG_DIR.relative_to(ROOT)}")
+    if config_path in candidates and save and plan is None:
+        raise RunnerRefused(
+            "a development candidate may preflight without a plan but may not "
+            "write a run until a candidate plan registers its config hash")
     config_sha = _sha256_file(config_path)
     plan_entry = None
     if plan is not None or collect_development_table:
@@ -570,6 +598,7 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
         "best_validation_life_avg_mae": best["life_avg_mae"],
         "early_stopping_metric": "validation life_avg_mae", "tie_rule": TIE_RULE,
         "parameter_count": sum(p.numel() for p in session.model.parameters()),
+        "model_method_contract": model_method_contract(session),
         "history": history,
     }
     if plan is not None:

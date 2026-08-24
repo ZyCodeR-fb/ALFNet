@@ -47,6 +47,15 @@ import torch
 from torch import nn
 
 
+def self_evidence(mask, half_life=4.0):
+    """Recency-weighted share of the node's own observed input steps."""
+    length = mask.shape[1]
+    steps = torch.arange(length, device=mask.device, dtype=mask.dtype)
+    weight = torch.pow(0.5, (length - 1 - steps) / float(half_life)).view(
+        1, -1, 1, 1)
+    return (mask * weight).sum(dim=1) / weight.sum()
+
+
 class DepthwiseCausalTCN(nn.Module):
     """One depthwise causal convolution block, per the TCN reference.
 

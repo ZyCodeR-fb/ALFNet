@@ -70,7 +70,7 @@ CODE_SOURCES = (
     "model/comparison_model/MoGERNN/layers/agg.py",
     "model/comparison_model/MoGERNN/layers/gnn.py",
     "model/comparison_model/family_utils.py",
-    "layers/DCRNNCell.py", "layers/gnn.py", "layers/evidence_router.py",
+    "layers/DCRNNCell.py", "layers/gnn.py",
     "layers/lifecycle_moge.py", "layers/protected_residual.py",
     "layers/source_grin.py", "layers/source_timefilter.py",
     "layers/source_tokenlearner.py", "layers/source_tsmixer.py",

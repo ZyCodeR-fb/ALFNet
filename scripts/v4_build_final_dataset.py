@@ -11,10 +11,10 @@ import argparse
 import hashlib
 import json
 import sys
-import tempfile
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -24,25 +24,22 @@ from lib.graph_native_layout import (  # noqa: E402
     connected_components, resolve_layout, structural_view,
 )
 from lib.v4_payload import load_legacy_payload, load_v4_payload, save_v4_payload  # noqa: E402
-from scripts import v4_build_candidate_payload as candidate_builder  # noqa: E402
 
 REGISTRY = ROOT / "configs/paper/v4_dataset_registry.json"
-# recur_times / spa_patchsize come from the model configs; recorded here so the
-# layout a manifest describes is the layout the models will actually build.
+# Only the number of recursive splits is a policy input. Patch capacity is
+# derived from the resolved membership as its exact largest part; keeping a
+# hand-written +1 for four datasets but not the fifth created an undocumented
+# dataset-specific architecture difference.
 LAYOUT_SETTINGS = {
-    "PEMS03": {"recur_times": 5, "spa_patchsize": 12},
-    "PEMS04": {"recur_times": 5, "spa_patchsize": 11},
-    "PEMS08": {"recur_times": 5, "spa_patchsize": 7},
-    # METR-LA's 8 is the largest-part+1 geometry its existing base config has
-    # always used (207 nodes -> 32 parts of 6-7), not a value chosen here.
-    "METRLA": {"recur_times": 5, "spa_patchsize": 8},
-    "PEMSBAY": {"recur_times": 5, "spa_patchsize": 12},
+    dataset: {"recur_times": 5}
+    for dataset in ("PEMS03", "PEMS04", "PEMS08", "METRLA", "PEMSBAY")
 }
 DEST_ROOT = ROOT / "data_v4"
 # Directory name under data/ differs from the registry key for PEMS-BAY.
 SOURCE_DIR = {"PEMS03": "PEMS03", "PEMS04": "PEMS04", "PEMS08": "PEMS08",
               "METRLA": "METR-LA", "PEMSBAY": "PEMS-BAY"}
 DEST_DIR = dict(SOURCE_DIR)
+ORIGINAL_SOURCE_DATASETS = {"PEMS03", "PEMS04", "PEMS08"}
 
 
 def array_sha256(array):
@@ -68,6 +65,7 @@ def graph_fields(dataset, adjacency, positions):
     # layout. Recording graph-native here while ALFTemporal built a KD-tree gave
     # the dataset two layouts and one hash that described neither.
     layout = resolve_layout(adjacency, positions, settings["recur_times"])
+    spa_patchsize = max(len(part) for part in layout["parts"])
     return {
         "propagation_graph": {
             "role": "what the models diffuse over",
@@ -91,8 +89,11 @@ def graph_fields(dataset, adjacency, positions):
             "algorithm": layout["algorithm"],
             "version": layout["version"],
             "recur_times": settings["recur_times"],
-            "spa_patchsize": settings["spa_patchsize"],
-            "padding_rule": "parts are padded up to spa_patchsize and never split",
+            "spa_patchsize": spa_patchsize,
+            "padding_rule": (
+                "spa_patchsize equals the largest resolved part; smaller parts "
+                "are padded and no part is split"
+            ),
             "membership_sha256": layout["membership_sha256"],
         },
     }
@@ -106,25 +107,59 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def _source_payload(dataset, entry, source, destination):
+    """Build canonical signal/time/graph arrays directly from immutable sources."""
+    if dataset not in ORIGINAL_SOURCE_DATASETS:
+        legacy = source / "raw_data.pkl"
+        if legacy.exists():
+            return load_legacy_payload(legacy)
+        # Refinement removed duplicate active v3 payloads. METR-LA/PEMS-BAY's
+        # canonical v4 bytes were already audited against original H5/CSV; use
+        # that canonical container when only layout metadata is being rebuilt.
+        canonical = destination / "raw_data.pkl"
+        if not canonical.exists():
+            raise SystemExit(f"{dataset}: missing canonical payload {canonical}")
+        return load_v4_payload(canonical)
+    signal_path = source / entry["signal_source"]
+    edge_path = source / entry["edge_source"]
+    with np.load(signal_path) as archive:
+        keys = list(archive.keys())
+        if len(keys) != 1:
+            raise SystemExit(f"{signal_path}: expected one signal array, got {keys}")
+        data = np.asarray(archive[keys[0]], dtype=np.float32)
+    if tuple(data.shape) != tuple(entry["expected_shape"]):
+        raise SystemExit(
+            f"{dataset}: signal shape {data.shape} != {entry['expected_shape']}")
+    stamps = pd.date_range(
+        entry["start_time"], periods=data.shape[0],
+        freq=f"{int(entry['freq_minutes'])}min",
+    )
+    if str(stamps[-1]) != entry["end_time"]:
+        raise SystemExit(
+            f"{dataset}: generated end {stamps[-1]} != {entry['end_time']}")
+    edges = pd.read_csv(edge_path)
+    columns = {str(column).lower(): column for column in edges.columns}
+    if "from" not in columns or "to" not in columns:
+        raise SystemExit(f"{edge_path}: missing from/to columns")
+    pairs = edges[[columns["from"], columns["to"]]].to_numpy(dtype=np.int64)
+    num_nodes = int(entry["num_nodes"])
+    if pairs.min() < 0 or pairs.max() >= num_nodes:
+        raise SystemExit(f"{edge_path}: node ids outside [0, {num_nodes})")
+    adjacency = np.zeros((num_nodes, num_nodes), dtype=np.float32)
+    adjacency[pairs[:, 0], pairs[:, 1]] = 1.0
+    return {"data": data, "adj": adjacency,
+            "time_stamp": stamps.to_numpy(), "pos_stamp": None}
+
+
 def build(dataset):
     entry = json.loads(REGISTRY.read_text("utf-8"))["datasets"][dataset]
     source = ROOT / "data" / SOURCE_DIR[dataset]
     destination = DEST_ROOT / DEST_DIR[dataset]
 
-    if dataset in candidate_builder.BUILDABLE:
-        # Rebuilt from original/ into a scratch directory rather than read from a
-        # kept intermediate. The intermediate is a build artefact, and a run
-        # directory that can only be reproduced from another build artefact is
-        # not reproducible.
-        with tempfile.TemporaryDirectory() as scratch:
-            _, candidate_path, _ = candidate_builder.build(dataset, output_dir=scratch)
-            payload = load_legacy_payload(candidate_path)
-        positions = None                     # these three datasets ship no coordinates
-    else:
-        # PEMS-BAY keeps its canonical signal, timeline, directed weighted graph
-        # and real WGS84 coordinates; only the container format changes.
-        payload = load_legacy_payload(source / "raw_data.pkl")
-        positions = np.asarray(payload["pos_stamp"], dtype=np.float32)
+    payload = _source_payload(dataset, entry, source, destination)
+    positions = payload.get("pos_stamp")
+    if positions is not None:
+        positions = np.asarray(positions, dtype=np.float32)
 
     payload_path = save_v4_payload(
         destination / "raw_data.pkl",
@@ -134,7 +169,15 @@ def build(dataset):
     # Node ordering is unchanged from v3, so the frozen master unseen pool is
     # reused rather than redrawn. Redrawing it here would silently change the
     # experiment.
-    unseen = np.asarray(np.load(source / "unknown_nodes.npy"), dtype=np.int64)
+    source_unseen = source / "unknown_nodes.npy"
+    if not source_unseen.exists():
+        # Code refinement removed duplicate v3 inputs. The canonical v4 pool is
+        # already beside the payload and remains immutable; rebuilding data
+        # metadata must never redraw it.
+        source_unseen = destination / "unknown_nodes.npy"
+    if not source_unseen.exists():
+        raise SystemExit(f"{dataset}: no frozen unknown_nodes.npy to reuse")
+    unseen = np.asarray(np.load(source_unseen), dtype=np.int64)
     unseen = np.unique(unseen)
     num_nodes = payload["data"].shape[1]
     if unseen.min() < 0 or unseen.max() >= num_nodes:

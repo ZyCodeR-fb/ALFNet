@@ -25,7 +25,12 @@ from torch.utils.data import DataLoader, Sampler
 from args import load_args_from_config
 from data_provider.lifecycle_roles import ROLE_CHANNEL_COUNT
 from data_provider.v4_lifecycle_loader import V4LifecycleDataset
-from experiments.v4_losses import element_loss, role_balanced_loss
+from experiments.v4_losses import (
+    element_loss,
+    role_balanced_elements,
+    role_balanced_loss,
+    safe_relative_elements,
+)
 from lib.lcbt_v4 import (
     SHUFFLE_POLICY,
     assert_v4_strategy,
@@ -298,7 +303,28 @@ def _alfnet_role_mix(prediction, batch, valid, meta, loss_name):
     return role_loss, float(meta.get("forecast_role_balanced_beta", 0.1))
 
 
-def compute_losses(model_output, batch, loss_name="mse"):
+def _alfnet_safe_relative(prediction, batch, valid, meta, scaler):
+    """ALFNet-only low-flow calibration term declared by the model config."""
+    weight = float(meta.get("forecast_safe_relative_weight", 0.0))
+    if weight < 0 or not torch.isfinite(torch.tensor(weight)):
+        raise RunnerRefused("forecast_safe_relative_weight must be finite and >= 0")
+    if weight == 0.0:
+        return None, 0.0
+    if meta.get("forecast_safe_relative_floor_policy") != \
+            "positive_target_q10_on_train_window_training_known_nodes":
+        raise RunnerRefused("unknown or missing safe-relative floor policy")
+    if scaler is None or "safe_relative_floor" not in scaler:
+        raise RunnerRefused("safe-relative loss requires the training-fitted scaler")
+    elements = safe_relative_elements(
+        prediction, batch["target"], scaler, scaler["safe_relative_floor"])
+    last_role = batch["lifecycle_context"][:, -1, :, :ROLE_CHANNEL_COUNT]
+    loss = role_balanced_elements(elements, valid, last_role)
+    if loss is None:
+        return None, weight
+    return loss, weight
+
+
+def compute_losses(model_output, batch, loss_name="mse", scaler=None):
     """Split the objective into what is shared and what the model declared.
 
     Returns `base`, the model's own terms, and the tensor actually optimised.
@@ -310,17 +336,23 @@ def compute_losses(model_output, batch, loss_name="mse"):
     base = base_loss(prediction, batch, valid, loss_name)
     if base is None:
         return {"prediction": prediction, "valid": valid, "base": None,
-                "optimize": None, "role_mix": None, "aux": None, "meta": meta}
+                "optimize": None, "role_mix": None, "safe_relative": None,
+                "aux": None, "meta": meta}
 
     optimize = base
     role_loss, beta = _alfnet_role_mix(prediction, batch, valid, meta, loss_name)
     if role_loss is not None:
         optimize = (1.0 - beta) * optimize + beta * role_loss
+    relative_loss, relative_weight = _alfnet_safe_relative(
+        prediction, batch, valid, meta, scaler)
+    if relative_loss is not None:
+        optimize = optimize + relative_weight * relative_loss
     aux = sum_aux_losses(meta.get("aux_losses"), device=prediction.device)
     if aux is not None:
         optimize = optimize + aux
     return {"prediction": prediction, "valid": valid, "base": base,
-            "optimize": optimize, "role_mix": role_loss, "aux": aux, "meta": meta}
+            "optimize": optimize, "role_mix": role_loss,
+            "safe_relative": relative_loss, "aux": aux, "meta": meta}
 
 
 # --- the two passes ------------------------------------------------------------
@@ -357,12 +389,14 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
     session.model.train()
     session.set_epoch(epoch)
     totals = {"batches": 0, "skipped": 0, "base": 0.0, "optimize": 0.0,
-              "role_mix": 0.0, "aux": 0.0, "forced_positions": 0,
+              "role_mix": 0.0, "safe_relative": 0.0, "aux": 0.0,
+              "forced_positions": 0,
               "available_positions": 0}
     # Counted separately from the sums: a model that declares no role-mix term
     # must report `None`, not the 0.0 that an absent term and a zero-valued one
     # would otherwise share. MoGERNN declares none and gets no stand-in.
-    contributed = {"base": 0, "optimize": 0, "role_mix": 0, "aux": 0}
+    contributed = {"base": 0, "optimize": 0, "role_mix": 0,
+                   "safe_relative": 0, "aux": 0}
     for index, batch in enumerate(session.train_loader):
         if max_batches is not None and index >= max_batches:
             break
@@ -373,7 +407,8 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
         totals["available_positions"] += int(batch["decoder_available_mask"].sum())
         optimizer.zero_grad(set_to_none=True)
         losses = compute_losses(_forward(session, batch, session.train_context,
-                                         epoch, teacher), batch, loss_name)
+                                         epoch, teacher), batch, loss_name,
+                                scaler=session.scaler)
         if losses["optimize"] is None or not torch.isfinite(losses["optimize"]):
             # Counted, never silently averaged into a zero.
             totals["skipped"] += 1
@@ -382,7 +417,7 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
         losses["optimize"].backward()
         optimizer.step()
         totals["batches"] += 1
-        for key in ("base", "optimize", "role_mix", "aux"):
+        for key in ("base", "optimize", "role_mix", "safe_relative", "aux"):
             if losses[key] is not None:
                 totals[key] += float(losses[key].detach())
                 contributed[key] += 1
@@ -391,7 +426,7 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
             f"epoch {epoch} produced no batch with a valid loss position; "
             "refusing to report a zero")
     report = {key: (totals[key] / contributed[key] if contributed[key] else None)
-              for key in ("base", "optimize", "role_mix", "aux")}
+              for key in ("base", "optimize", "role_mix", "safe_relative", "aux")}
     report.update({"batches": totals["batches"], "skipped": totals["skipped"],
                    "forced_positions": totals["forced_positions"],
                    "available_positions": totals["available_positions"]})
