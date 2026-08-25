@@ -42,6 +42,9 @@ LIFECYCLE_STATE_CHANNELS = 6
 SQRT_HALF = 0.7071067811865476
 DISTINCT_MULTISCALE_SUPPORT_SET = "distinct_multiscale_v1"
 EXPERIMENTAL_LEGACY_SUPPORT_SET = "candidate_legacy5"
+EXPERIMENTAL_UNIFIED_MULTISCALE5_SUPPORT_SET = (
+    "candidate_unified_multiscale5_v1"
+)
 LEGACY_SUPPORT_NAMES = (
     "identity", "mean", "weighted_mean", "forward_diffusion",
     "backward_diffusion",
@@ -90,6 +93,17 @@ def _candidate_supports(adjacency, forward_support, backward_support,
         return {
             "identity": identity,
             "binary_mean": mean_support,
+            "forward_1": forward,
+            "backward_1": backward,
+            "forward_2": forward @ forward,
+            "backward_2": backward @ backward,
+        }
+    if support_set == EXPERIMENTAL_UNIFIED_MULTISCALE5_SUPPORT_SET:
+        # On binary PeMS flow graphs ``forward_1`` is exactly the support
+        # previously retained under ``binary_mean``.  On weighted speed graphs
+        # this removes only the extra distance-agnostic equal-neighbour mean.
+        return {
+            "identity": identity,
             "forward_1": forward,
             "backward_1": backward,
             "forward_2": forward @ forward,

@@ -127,15 +127,19 @@ opening test (candidate plan SHA
 Therefore PEMS03/04/08 use SUP plus LF weight 0.05; METR-LA/PEMS-BAY use SUP
 with LF weight 0 in the current final plan.
 
-Before launching that 30-run plan, one bounded exploratory study tests whether
-the same LF_SUP recipe should also be used on speed. It contains exactly five
-METR-LA seed-32 validation-only runs: BASE, LF, SUP, LF_SUP and the unchanged
-MoGERNN control. Its configs live only under
-`configs/paper/v4_candidates/METRLA/`; its plan forbids test access and freezes
-the adoption gates before training. LF on speed is permitted only by the two
-explicit candidate flags, so no final speed config can enable it accidentally.
-After the validation decision, regenerate the final five-dataset plan with the
-selected single recipe before any 30-run training.
+The completed METR-LA seed-32 study is now immutable reference evidence. It
+showed that LF improves the six-support model but that the six-support model is
+still weaker than BASE on speed. It is no longer an executable plan.
+
+The final bounded development study is
+`configs/paper/v4_speed_sup5_candidate_plan.json`. It runs exactly six new
+seed-32 validation-only jobs over METR-LA and PEMS-BAY. SUP5 is the single
+ordered inventory `I, F1, B1, F2, B2`: on binary PeMS flow graphs its matrices
+are exactly the current five SUP matrices, while on weighted speed graphs it
+removes only the extra distance-agnostic `binary_mean`. The frozen decision is
+SUP5 if it passes BASE/control gates on both speed datasets, otherwise LF_SUP5
+if it passes both, otherwise unified BASE. Test is forbidden. After this one
+decision, regenerate the final five-dataset plan before any 30-run training.
 
 MoGERNN is the sole headline baseline. It receives the common inputs but not
 ALFNet's method-specific lifecycle context.

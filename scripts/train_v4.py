@@ -425,11 +425,11 @@ def load_plan_authority(plan_path=None):
     if not plan_path.exists():
         raise RunnerRefused(f"{plan_path} does not exist")
     active = (ROOT / "configs/paper/v4_five_dataset_plan.json").resolve()
-    candidate = (ROOT / "configs/paper/v4_metrla_lf_sup_candidate_plan.json").resolve()
-    if plan_path.resolve() not in {active, candidate}:
+    speed_sup5 = (ROOT / "configs/paper/v4_speed_sup5_candidate_plan.json").resolve()
+    if plan_path.resolve() not in {active, speed_sup5}:
         raise RunnerRefused(
-            f"{plan_path} is neither the active final plan nor the bounded "
-            "METR-LA validation-only candidate plan; archived plans are evidence")
+            f"{plan_path} is neither the active final plan nor a bounded "
+            "validation-only candidate plan; archived plans are evidence")
     kind = json.loads(plan_path.read_text("utf-8")).get("kind")
     if kind == "v4_five_dataset_plan":
         from scripts import build_v4_five_dataset_plan as five
@@ -440,13 +440,12 @@ def load_plan_authority(plan_path=None):
         except ReadinessRefused as error:
             raise RunnerRefused(f"{plan_path}: {error}") from error
         return plan
-    if kind == "v4_metrla_lf_sup_candidate_plan":
-        from scripts import build_v4_metrla_lf_sup_plan as candidate_plan
-        plan = candidate_plan.assert_plan_still_holds(
-            candidate_plan.load_plan(plan_path))
+    if kind == "v4_speed_sup5_candidate_plan":
+        from scripts import build_v4_speed_sup5_plan as speed_plan
+        plan = speed_plan.assert_plan_still_holds(speed_plan.load_plan(plan_path))
         if plan.get("selection", {}).get("split") != "validation" or not \
                 plan.get("selection", {}).get("test_forbidden"):
-            raise RunnerRefused("candidate plan is not validation-only")
+            raise RunnerRefused("speed SUP5 candidate plan is not validation-only")
         return plan
     raise RunnerRefused(f"{plan_path} declares unsupported kind={kind!r}")
 

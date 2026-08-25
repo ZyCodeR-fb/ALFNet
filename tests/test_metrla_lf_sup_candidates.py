@@ -20,7 +20,9 @@ CANDIDATE_DIR = ROOT / "configs/paper/v4_candidates/METRLA"
 
 
 def test_plan_is_exactly_five_validation_only_runs():
-    plan = candidate_plan.assert_plan_still_holds(candidate_plan.load_plan())
+    # Completed evidence: its own content hash still holds, but current source
+    # code is intentionally allowed to move on to the next bounded study.
+    plan = candidate_plan.load_plan()
     assert plan["candidates"] == ["BASE", "LF", "SUP", "LF_SUP", "CONTROL"]
     assert plan["seed"] == 32 and plan["trial_budget"] == 5
     assert plan["selection"]["split"] == "validation"
@@ -68,14 +70,14 @@ def test_candidate_models_resolve_the_declared_support_inventory():
     assert sup.model.graph_expert.resolved_support_names != LEGACY_SUPPORT_NAMES
 
 
-def test_candidate_plan_is_an_explicit_trainer_authority():
-    plan = load_plan_authority(
-        ROOT / "configs/paper/v4_metrla_lf_sup_candidate_plan.json")
-    assert plan["kind"] == "v4_metrla_lf_sup_candidate_plan"
+def test_completed_candidate_plan_is_no_longer_a_trainer_authority():
+    with pytest.raises(RunnerRefused, match="neither the active final plan"):
+        load_plan_authority(
+            ROOT / "configs/paper/v4_metrla_lf_sup_candidate_plan.json")
 
 
 def test_launcher_enumerates_five_unique_candidate_configs(tmp_path):
-    plan = candidate_plan.assert_plan_still_holds(candidate_plan.load_plan())
+    plan = candidate_plan.load_plan()
     runs = plan_runs(tmp_path, plan)
     assert len(runs) == 5
     assert len({run.name for run in runs}) == 5
