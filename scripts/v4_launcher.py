@@ -50,6 +50,7 @@ from scripts.train_v4 import (  # noqa: E402
     FAILED_MARKER,
     LAUNCHER_VERSION,
     RUN_STATE_NAME,
+    load_plan_authority,
     run_artefacts,
 )
 
@@ -68,18 +69,10 @@ def resolve_plan_and_root(plan_path=None):
     """Load the active reproduction plan and the output root it names."""
     if plan_path is None:
         plan_path = ROOT / "configs/paper/v4_five_dataset_plan.json"
-    from scripts import build_v4_five_dataset_plan as five
-    from scripts.build_v4_readiness import ReadinessRefused, assert_ready
-
-    plan = five.assert_plan_still_holds(five.load_plan(plan_path))
-    # The running permit, checked here -- before a run directory exists, before
-    # a child is spawned and before anything touches CUDA. A manifest flag that
-    # the entry point ignores is worse than no flag.
-    if plan.get("readiness_attestation"):
-        try:
-            assert_ready(plan)
-        except ReadinessRefused as error:
-            raise LauncherRefused(f"{plan_path}: {error}") from error
+    try:
+        plan = load_plan_authority(plan_path)
+    except Exception as error:  # normalise trainer refusal for the queue CLI
+        raise LauncherRefused(str(error)) from error
     root = plan.get("output_root")
     if not root:
         raise LauncherRefused(f"{plan_path} declares no output_root")
@@ -103,10 +96,12 @@ class Run:
     # another plan; it occupies a result slot, never a GPU worker.
     execution_action: str = "train"
     entry: dict = field(default_factory=dict, repr=False)
+    candidate: str = None
 
     @property
     def name(self):
-        return f"{self.dataset}/{self.model}/seed{self.seed}"
+        suffix = "" if self.candidate is None else f"[{self.candidate}]"
+        return f"{self.dataset}/{self.model}{suffix}/seed{self.seed}"
 
 
 # --- planning -----------------------------------------------------------------
@@ -142,7 +137,9 @@ def assign_slots(jobs, devices, allow_sharing=False):
 
 def _make_run(output_root, dataset, model, seed, phase, entry=None):
     entry = entry or {}
-    config = ROOT / f"configs/paper/v4/{dataset}_{model}.yaml"
+    candidate = entry.get("candidate")
+    config = ROOT / entry.get(
+        "config", f"configs/paper/v4/{dataset}_{model}.yaml")
     digest = sha256_file(config)[:16]
     action = entry.get("execution_action", "train")
     # A reused run points at the directory that already holds its checkpoint, so
@@ -152,8 +149,10 @@ def _make_run(output_root, dataset, model, seed, phase, entry=None):
                  else Path(output_root) / dataset / model / digest / f"seed{seed}")
     return Run(dataset=dataset, model=model, seed=int(seed), phase=int(phase),
                config=config, directory=directory,
-               log=Path(output_root) / "logs" / f"{dataset}_{model}_seed{seed}.log",
-               execution_action=action, entry=entry)
+               log=Path(output_root) / "logs" /
+                   f"{dataset}_{model}{'' if candidate is None else '_' + candidate}_seed{seed}.log",
+               execution_action=action, entry=entry,
+               candidate=candidate)
 
 
 def plan_runs(output_root, plan):
@@ -169,12 +168,15 @@ def plan_runs(output_root, plan):
     runs, seen = [], set()
     if plan.get("runs"):
         for entry in plan["runs"]:
-            key = (entry["dataset"], entry["model"], int(entry["seed"]))
+            key = (entry["dataset"], entry["model"], int(entry["seed"]),
+                   entry.get("candidate"))
             if key in seen:
                 raise LauncherRefused(f"duplicate run {key}")
             seen.add(key)
-            runs.append(_make_run(output_root, *key, entry.get(
-                "phase", 0 if int(entry["seed"]) == HEALTH_SEED else 1), entry))
+            runs.append(_make_run(
+                output_root, entry["dataset"], entry["model"], int(entry["seed"]),
+                entry.get("phase", 0 if int(entry["seed"]) == HEALTH_SEED else 1),
+                entry))
     else:
         datasets = tuple(plan["datasets"])
         models = tuple(plan["models"])
@@ -501,7 +503,7 @@ class Launcher:
                          "the remaining phases are not started")
                 return 1
             self.print_status()
-        self.say("all 12 runs COMPLETE")
+        self.say(f"all {len(self.runs)} result slots COMPLETE")
         return 0
 
 

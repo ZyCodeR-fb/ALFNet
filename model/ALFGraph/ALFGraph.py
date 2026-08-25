@@ -5,6 +5,8 @@ from layers.DCRNNCell import DCRNNCell
 from layers.gnn import calculate_random_walk_matrix
 from layers.lifecycle_moge import (
     DISTINCT_MULTISCALE_SUPPORT_SET,
+    EXPERIMENTAL_LEGACY_SUPPORT_SET,
+    LEGACY_SUPPORT_NAMES,
     LIFECYCLE_STATE_CHANNELS,
     LifecycleRoutedGraphConv,
     build_lifecycle_supports,
@@ -138,11 +140,18 @@ class Model(nn.Module):
         assert_config_agrees_with_context(configs, runtime_context, "ALFGraph")
         recipe = (getattr(configs, "model_family_cfg", {}) or {}).get("recipe", {})
         support_set = str(recipe.get("moge_support_set", ""))
-        if support_set != DISTINCT_MULTISCALE_SUPPORT_SET:
+        candidate_only = bool(recipe.get("candidate_validation_only", False))
+        if (support_set == EXPERIMENTAL_LEGACY_SUPPORT_SET
+                and candidate_only):
+            resolved_support_names = LEGACY_SUPPORT_NAMES
+        elif support_set == DISTINCT_MULTISCALE_SUPPORT_SET:
+            resolved_support_names = distinct_support_names(
+                runtime_context.adjacency, support_set)
+        else:
             raise ValueError(
-                "the final ALFGraph requires moge_support_set="
-                f"{DISTINCT_MULTISCALE_SUPPORT_SET!r}, got {support_set!r}")
-        resolved_support_names = distinct_support_names(runtime_context.adjacency)
+                "ALFGraph requires the final distinct support set; the legacy "
+                "inventory is accepted only with candidate_validation_only=true, "
+                f"got support_set={support_set!r}, candidate={candidate_only}")
         model = cls(configs, resolved_support_names=resolved_support_names)
         identity = runtime_context.static_asset_identity()
         model.runtime_context = runtime_context
@@ -288,6 +297,7 @@ class Model(nn.Module):
                 adjacency,
                 forward_support,
                 backward_support,
+                support_set=self.moge_support_set,
                 selected_names=self.resolved_support_names,
             )
             if supports.shape[0] != len(self.resolved_support_names):

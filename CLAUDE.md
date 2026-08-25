@@ -118,16 +118,24 @@ numerically duplicated matrices per dataset before constructing the router.
 The existing soft lifecycle router and its load-balance auxiliary remain; no
 second evidence router exists.
 
-LF is flow-only. It adds a small safe-relative term in
+LF adds a small safe-relative term in
 original units, role-balanced exactly like the existing ALFNet objective, with
 a denominator floor fitted as the positive-target q10 on train-time known
 nodes only. The bounded PEMS08/seed-32 validation study selected LF_SUP without
 opening test (candidate plan SHA
 `8f8a48a949f442a2ee7fd8df3f0502077219325f75272648c4d085e7abe8b0cd`).
 Therefore PEMS03/04/08 use SUP plus LF weight 0.05; METR-LA/PEMS-BAY use SUP
-with LF weight 0 because the objective is not defined for speed. Retired
-candidate YAMLs and launchers are absent; their outputs and Git history remain
-the audit evidence.
+with LF weight 0 in the current final plan.
+
+Before launching that 30-run plan, one bounded exploratory study tests whether
+the same LF_SUP recipe should also be used on speed. It contains exactly five
+METR-LA seed-32 validation-only runs: BASE, LF, SUP, LF_SUP and the unchanged
+MoGERNN control. Its configs live only under
+`configs/paper/v4_candidates/METRLA/`; its plan forbids test access and freezes
+the adoption gates before training. LF on speed is permitted only by the two
+explicit candidate flags, so no final speed config can enable it accidentally.
+After the validation decision, regenerate the final five-dataset plan with the
+selected single recipe before any 30-run training.
 
 MoGERNN is the sole headline baseline. It receives the common inputs but not
 ALFNet's method-specific lifecycle context.
@@ -155,9 +163,10 @@ ALLOW_GPU_SHARING=1 JOBS=5 DEVICES=0,0,0,0,0 \
 bash scripts/tmux_v4_five_dataset.sh status
 ```
 
-After all 30 runs are complete, validation audit/evaluation/collection and the
-explicit test evaluator are the only supported reporting path. Do not call
-legacy v3/candidate launchers or archived evaluation tools.
+After all 30 final runs are complete, validation audit/evaluation/collection
+and the explicit test evaluator are the only supported reporting path. The
+bounded METR-LA candidate launcher is permitted only before this final freeze;
+do not call legacy v3 or archived evaluation tools.
 
 ## Editing rules
 

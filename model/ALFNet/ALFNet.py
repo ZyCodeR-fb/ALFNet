@@ -197,11 +197,16 @@ class Model(nn.Module):
                 or self.forecast_safe_relative_weight < 0):
             raise ValueError(
                 "forecast_safe_relative_weight must be finite and >= 0")
+        speed_candidate = bool(
+            recipe.get("candidate_validation_only", False)
+            and recipe.get("experimental_speed_safe_relative", False)
+        )
         if (self.forecast_safe_relative_weight > 0
-                and str(configs.target_features) != "q"):
+                and str(configs.target_features) != "q"
+                and not speed_candidate):
             raise ValueError(
-                "safe-relative loss is a flow-only candidate; set "
-                "forecast_safe_relative_weight=0 for non-flow targets")
+                "safe-relative loss on a non-flow target is permitted only for "
+                "an explicitly marked validation-only speed candidate")
         self.fusion_mode = str(recipe.get("fusion_mode", "film"))
         if self.fusion_mode != "film":
             raise ValueError("the final ALFNet supports FiLM fusion only")

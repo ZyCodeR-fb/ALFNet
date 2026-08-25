@@ -41,6 +41,11 @@ from torch import nn
 LIFECYCLE_STATE_CHANNELS = 6
 SQRT_HALF = 0.7071067811865476
 DISTINCT_MULTISCALE_SUPPORT_SET = "distinct_multiscale_v1"
+EXPERIMENTAL_LEGACY_SUPPORT_SET = "candidate_legacy5"
+LEGACY_SUPPORT_NAMES = (
+    "identity", "mean", "weighted_mean", "forward_diffusion",
+    "backward_diffusion",
+)
 MULTISCALE_SUPPORT_NAMES = (
     "identity", "binary_mean", "forward_1", "backward_1",
     "forward_2", "backward_2",
@@ -58,26 +63,44 @@ def cv_squared(x):
     return x.float().var() / (x.float().mean() ** 2 + eps)
 
 
-def _candidate_supports(adjacency, forward_support, backward_support):
-    """Return the final ordered directed multi-scale support candidates."""
+def _candidate_supports(adjacency, forward_support, backward_support,
+                        support_set=DISTINCT_MULTISCALE_SUPPORT_SET):
+    """Return one explicitly declared support inventory.
+
+    ``candidate_legacy5`` exists only for the bounded validation-only ablation
+    that compares the selected SUP inventory with the pre-SUP model.  Final
+    configs remain locked to ``distinct_multiscale_v1``.
+    """
     weights = torch.nan_to_num(adjacency, nan=0.0)
     binary = (weights > 0).to(weights.dtype)
     identity = torch.eye(weights.shape[0], device=weights.device, dtype=weights.dtype)
     mean_support = binary / binary.sum(dim=1, keepdim=True).clamp_min(1.0)
     forward = forward_support.to(device=weights.device, dtype=weights.dtype)
     backward = backward_support.to(device=weights.device, dtype=weights.dtype)
-    return {
-        "identity": identity,
-        "binary_mean": mean_support,
-        "forward_1": forward,
-        "backward_1": backward,
-        "forward_2": forward @ forward,
-        "backward_2": backward @ backward,
-    }
+    if support_set == EXPERIMENTAL_LEGACY_SUPPORT_SET:
+        weighted = weights / weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
+        return {
+            "identity": identity,
+            "mean": mean_support,
+            "weighted_mean": weighted,
+            "forward_diffusion": forward,
+            "backward_diffusion": backward,
+        }
+    if support_set == DISTINCT_MULTISCALE_SUPPORT_SET:
+        return {
+            "identity": identity,
+            "binary_mean": mean_support,
+            "forward_1": forward,
+            "backward_1": backward,
+            "forward_2": forward @ forward,
+            "backward_2": backward @ backward,
+        }
+    raise ValueError(f"unsupported moge_support_set {support_set!r}")
 
 
 def distinct_support_names(
     adjacency,
+    support_set=DISTINCT_MULTISCALE_SUPPORT_SET,
     atol=1e-9,
     rtol=1e-7,
 ):
@@ -93,7 +116,7 @@ def distinct_support_names(
     forward = weights / weights.sum(dim=1, keepdim=True).clamp_min(1e-12)
     transposed = weights.T
     backward = transposed / transposed.sum(dim=1, keepdim=True).clamp_min(1e-12)
-    candidates = _candidate_supports(weights, forward, backward)
+    candidates = _candidate_supports(weights, forward, backward, support_set)
     kept_names, kept = [], []
     for name, candidate in candidates.items():
         if not any(torch.allclose(candidate, prior, atol=atol, rtol=rtol)
@@ -108,6 +131,7 @@ def build_lifecycle_supports(
     forward_support,
     backward_support,
     selected_names=None,
+    support_set=DISTINCT_MULTISCALE_SUPPORT_SET,
 ):
     """Stack the resolved supports into ``[num_experts, node, node]``.
 
@@ -116,7 +140,8 @@ def build_lifecycle_supports(
     separate kernel launches per call into 1 matters more than the identity
     expert's redundant multiply by ``eye``.
     """
-    candidates = _candidate_supports(adjacency, forward_support, backward_support)
+    candidates = _candidate_supports(
+        adjacency, forward_support, backward_support, support_set)
     names = tuple(candidates) if selected_names is None else tuple(selected_names)
     unknown = [name for name in names if name not in candidates]
     if unknown:

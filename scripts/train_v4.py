@@ -425,21 +425,30 @@ def load_plan_authority(plan_path=None):
     if not plan_path.exists():
         raise RunnerRefused(f"{plan_path} does not exist")
     active = (ROOT / "configs/paper/v4_five_dataset_plan.json").resolve()
-    if plan_path.resolve() != active:
+    candidate = (ROOT / "configs/paper/v4_metrla_lf_sup_candidate_plan.json").resolve()
+    if plan_path.resolve() not in {active, candidate}:
         raise RunnerRefused(
-            f"{plan_path} is not the active plan {active}; archived plans are "
-            "evidence, not authorities")
+            f"{plan_path} is neither the active final plan nor the bounded "
+            "METR-LA validation-only candidate plan; archived plans are evidence")
     kind = json.loads(plan_path.read_text("utf-8")).get("kind")
-    if kind != "v4_five_dataset_plan":
-        raise RunnerRefused(f"{plan_path} declares unsupported kind={kind!r}")
-    from scripts import build_v4_five_dataset_plan as five
-    from scripts.build_v4_readiness import ReadinessRefused, assert_ready
-    plan = five.assert_plan_still_holds(five.load_plan(plan_path))
-    try:
-        assert_ready(plan)
-    except ReadinessRefused as error:
-        raise RunnerRefused(f"{plan_path}: {error}") from error
-    return plan
+    if kind == "v4_five_dataset_plan":
+        from scripts import build_v4_five_dataset_plan as five
+        from scripts.build_v4_readiness import ReadinessRefused, assert_ready
+        plan = five.assert_plan_still_holds(five.load_plan(plan_path))
+        try:
+            assert_ready(plan)
+        except ReadinessRefused as error:
+            raise RunnerRefused(f"{plan_path}: {error}") from error
+        return plan
+    if kind == "v4_metrla_lf_sup_candidate_plan":
+        from scripts import build_v4_metrla_lf_sup_plan as candidate_plan
+        plan = candidate_plan.assert_plan_still_holds(
+            candidate_plan.load_plan(plan_path))
+        if plan.get("selection", {}).get("split") != "validation" or not \
+                plan.get("selection", {}).get("test_forbidden"):
+            raise RunnerRefused("candidate plan is not validation-only")
+        return plan
+    raise RunnerRefused(f"{plan_path} declares unsupported kind={kind!r}")
 
 
 def resolve_plan(config_path, plan=None):
@@ -468,7 +477,9 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
     """One v4 run. Returns the run report; writes nothing when `save` is false."""
     config_path = Path(config_path).resolve()
     canonical = {path.resolve() for path in v4_config_paths()}
-    known = canonical
+    known = (canonical if plan is None else {
+        (ROOT / entry["path"]).resolve() for entry in plan["configs"].values()
+    })
     if config_path not in known:
         raise RunnerRefused(
             f"{config_path} is not one of the {len(known)} v4 configs in "
@@ -634,10 +645,15 @@ def main(argv=None):
     arguments = parser.parse_args(argv)
 
     if arguments.preflight:
+        # Preflight must be authorised by the same plan as a real run.  Without
+        # this, candidate configs are either refused as non-final configs or,
+        # worse, never exercise the production plan-membership checks.
+        plan = load_plan_authority(arguments.plan)
         report = train(arguments.config, output_root=None, device="cpu",
                        seed=arguments.seed, max_epochs=1, max_train_batches=1,
                        max_validation_batches=1, batch_size=1, num_workers=0,
-                       save=False)
+                       save=False, plan=plan,
+                       collect_development_table=False)
         print(json.dumps({key: report[key] for key in
                           ("dataset", "model", "parameter_count", "best_epoch")},
                          indent=1))

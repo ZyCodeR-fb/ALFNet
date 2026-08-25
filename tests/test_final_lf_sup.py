@@ -114,7 +114,9 @@ def test_patch_capacity_is_exactly_the_largest_resolved_part():
             len(part) for part in context.layout_parts)
 
 
-def test_retired_candidate_tree_and_second_evidence_router_are_absent():
-    assert not (ROOT / "configs/paper/v4_candidates").exists()
+def test_only_the_bounded_metrla_candidate_tree_exists_and_evidence_router_is_absent():
+    candidate_root = ROOT / "configs/paper/v4_candidates"
+    assert {path.name for path in candidate_root.iterdir()} == {"METRLA"}
+    assert not (candidate_root / "PEMS08").exists()
     assert not (ROOT / "configs/paper/v4_lf_sup_candidate_plan.json").exists()
     assert not (ROOT / "layers/evidence_router.py").exists()
