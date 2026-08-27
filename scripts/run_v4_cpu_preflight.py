@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Run the ten final one-batch CPU smoke tests and write their attestation."""
+"""Run every final dataset/model one-batch smoke test."""
 
 import argparse
 import json
@@ -10,10 +10,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from scripts import build_v4_five_dataset_plan as builder  # noqa: E402
+from scripts import build_final_plan as builder  # noqa: E402
 from scripts.train_v4 import train  # noqa: E402
 
-OUTPUT = ROOT / "configs/paper/v4_cpu_preflight.json"
+OUTPUT = ROOT / "configs/paper/final_cpu_preflight.json"
 
 
 def expected_combinations(plan):
@@ -29,7 +29,7 @@ def validate(report, plan):
         raise ValueError("CPU preflight combination inventory is incomplete or reordered")
     results = report.get("results", {})
     if set(results) != set(expected):
-        raise ValueError("CPU preflight result keys do not match the ten final combinations")
+        raise ValueError("CPU preflight result keys do not match the final combinations")
     failures = [name for name in expected if results[name].get("status") != "PASS"]
     if failures or report.get("passed") != len(expected) or report.get("failed") != 0 \
             or report.get("all_passed") is not True:
@@ -46,7 +46,7 @@ def validate(report, plan):
     return report
 
 
-def run(plan):
+def run(plan, device="cpu"):
     results = {}
     for dataset in plan["datasets"]:
         for model in plan["models"]:
@@ -55,7 +55,7 @@ def run(plan):
             print(f"preflight {name}", flush=True)
             try:
                 report = train(
-                    config, output_root=None, device="cpu", seed=32,
+                    config, output_root=None, device=device, seed=32,
                     max_epochs=1, max_train_batches=1, max_validation_batches=1,
                     batch_size=1, num_workers=0, save=False)
                 epoch = report["history"][0]
@@ -75,10 +75,11 @@ def run(plan):
     passed = sum(results[name]["status"] == "PASS" for name in expected)
     report = {
         "schema_version": 2,
-        "kind": "v4_cpu_preflight",
+        "kind": "v4_final_one_batch_preflight",
         "plan_sha256": plan["plan_sha256"],
         "seed": 32,
-        "scope": "one train batch and one validation batch on CPU",
+        "scope": f"one train batch and one validation batch on {device}",
+        "device": device,
         "combinations": expected,
         "results": results,
         "passed": passed,
@@ -97,13 +98,14 @@ def run(plan):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--device", default="cpu")
     args = parser.parse_args(argv)
     plan = builder.assert_plan_still_holds(builder.load_plan())
     if args.check:
         validate(json.loads(OUTPUT.read_text("utf-8")), plan)
         print(f"CPU preflight holds for {len(expected_combinations(plan))} combinations")
     else:
-        report = run(plan)
+        report = run(plan, device=args.device)
         print(f"wrote {OUTPUT.relative_to(ROOT)}: {report['passed']}/"
               f"{len(report['combinations'])} passed")
     return 0

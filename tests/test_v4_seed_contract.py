@@ -15,7 +15,7 @@ from lib.v4_seeds import (
 )
 
 
-CONFIG = "configs/paper/v4/PEMS08_MoGERNN.yaml"
+CONFIG = "configs/MoGERNN/PEMS08.yaml"
 
 
 def test_one_run_seed_has_distinct_stable_named_substreams():

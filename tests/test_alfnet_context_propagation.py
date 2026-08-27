@@ -15,8 +15,8 @@ import torch
 from args import load_args_from_config
 from lib.runtime_context import build_runtime_context
 
-CONFIGS = {"PEMS08": "configs/paper/v4/PEMS08_ALFNet.yaml",
-           "PEMSBAY": "configs/paper/v4/PEMSBAY_ALFNet.yaml"}
+CONFIGS = {"PEMS08": "configs/ALFNet/PEMS08.yaml",
+           "PEMSBAY": "configs/ALFNet/PEMSBAY.yaml"}
 PHASES = ("train", "validation", "test")
 
 
@@ -106,8 +106,8 @@ def test_every_v4_entry_point_refuses_a_missing_context():
     import model.ALFTemporal.ALFTemporal as alftemporal
 
     for module, config in ((alfnet, CONFIGS["PEMS08"]),
-                           (alfgraph, "configs/paper/v4/experts/PEMS08_ALFGraph.yaml"),
-                           (alftemporal, "configs/paper/v4/experts/PEMS08_ALFTemporal.yaml")):
+                           (alfgraph, "configs/ALFGraph/PEMS08.yaml"),
+                           (alftemporal, "configs/ALFTemporal/PEMS08.yaml")):
         args = load_args_from_config(config, [])
         args.device = "cpu"
         with pytest.raises(ValueError, match="requires a RuntimeDataContext"):
@@ -168,5 +168,5 @@ def test_construction_is_deterministic_and_the_parameter_set_is_unchanged(
     assert set(a) == set(b)
     for name in a:
         assert a[name].shape == b[name].shape and torch.equal(a[name], b[name]), name
-    # The count CLAUDE.md records for ALFNet after the strict-inductive fix.
-    assert sum(p.numel() for p in _build("PEMSBAY").parameters()) == 1_112_937
+    # Unified BASE uses the same frozen five-support graph expert everywhere.
+    assert sum(p.numel() for p in _build("PEMSBAY").parameters()) == 1_037_529

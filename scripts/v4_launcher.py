@@ -5,7 +5,7 @@ Written in Python rather than shell because the four things that actually
 matter here are all things shell does badly: an atomic per-run lock, a bounded
 worker pool with a phase barrier, forwarding a signal to a process *group* so no
 orphaned trainer survives the launcher, and a failure that propagates instead of
-  being swallowed by `|| true`. `run_v4_five_dataset.sh` is the documented
+  being swallowed by `|| true`. `run_experiments.sh` is the documented
   entry point and execs this.
 
 Four properties, each of which the first launcher lacked:
@@ -14,11 +14,10 @@ Four properties, each of which the first launcher lacked:
   `DEVICES`. More jobs than devices is refused unless `ALLOW_GPU_SHARING=1` says
   so deliberately, because two trainers sharing a card is a memory decision
   somebody should make on purpose.
-* **a health barrier.** The ten seed-32 runs go first and must all reach
-  COMPLETE before any seed-42/52 run starts. A problem specific to one dataset
-  or model surfaces after roughly one run each rather than after every PEMS08
-  seed has finished. Their *numbers* decide nothing -- the queue does not branch
-  on them, only on whether they completed.
+* **model-family barriers.** The plan runs every ALFNet slot first, then every
+  MoGERNN slot, followed by the remaining baselines in its declared order.
+  Every family must reach COMPLETE before the next begins. Metrics never alter
+  that queue; only an execution failure stops it.
 * **real resume.** A run with a valid `last.pt` is continued with `--resume`, at
   its next epoch, not restarted. A directory that is non-empty but has no
   `last.pt` is refused rather than overwritten.
@@ -54,8 +53,8 @@ from scripts.train_v4 import (  # noqa: E402
     run_artefacts,
 )
 
-# Retained only as the development plan's historical shape; nothing enumerates
-# runs from these. `plan_runs` reads the plan.
+# Used only for legacy plans without an explicit run inventory. The active final
+# plan always enumerates every slot and its phase.
 HEALTH_SEED = 32
 LOCK_NAME = ".lock"
 POLL_SECONDS = 5
@@ -68,7 +67,7 @@ class LauncherRefused(RuntimeError):
 def resolve_plan_and_root(plan_path=None):
     """Load the active reproduction plan and the output root it names."""
     if plan_path is None:
-        plan_path = ROOT / "configs/paper/v4_five_dataset_plan.json"
+        plan_path = ROOT / "configs/paper/final_plan.json"
     try:
         plan = load_plan_authority(plan_path)
     except Exception as error:  # normalise trainer refusal for the queue CLI
@@ -138,8 +137,9 @@ def assign_slots(jobs, devices, allow_sharing=False):
 def _make_run(output_root, dataset, model, seed, phase, entry=None):
     entry = entry or {}
     candidate = entry.get("candidate")
-    config = ROOT / entry.get(
-        "config", f"configs/paper/v4/{dataset}_{model}.yaml")
+    if not entry.get("config"):
+        raise LauncherRefused(f"plan run {dataset}/{model}/seed{seed} has no config")
+    config = ROOT / entry["config"]
     digest = sha256_file(config)[:16]
     action = entry.get("execution_action", "train")
     # A reused run points at the directory that already holds its checkpoint, so
@@ -204,6 +204,20 @@ def plan_runs(output_root, plan):
             f"planned {len(runs)} runs, the plan registered "
             f"{plan['trial_budget']}")
     return runs
+
+
+def select_runs(runs, models=(), datasets=(), seeds=()):
+    """Filter a verified plan without inventing runs outside it."""
+    model_set = set(models)
+    dataset_set = set(datasets)
+    seed_set = {int(seed) for seed in seeds}
+    selected = [run for run in runs
+                if (not model_set or run.model in model_set)
+                and (not dataset_set or run.dataset in dataset_set)
+                and (not seed_set or run.seed in seed_set)]
+    if not selected:
+        raise LauncherRefused("the model/dataset/seed filters select zero runs")
+    return selected
 
 
 # --- run state ----------------------------------------------------------------
@@ -306,14 +320,14 @@ def write_failure(run, returncode, command):
 class Launcher:
 
     def __init__(self, output_root, plan, slots, retry_failed=False,
-                 restart_unresumable=False, plan_path=None):
+                 restart_unresumable=False, plan_path=None, filters=None):
         self.output_root = Path(output_root)
         self.plan = plan
         self.plan_path = plan_path
         self.slots = list(slots)
         self.retry_failed = retry_failed
         self.restart_unresumable = restart_unresumable
-        self.runs = plan_runs(self.output_root, plan)
+        self.runs = select_runs(plan_runs(self.output_root, plan), **(filters or {}))
         self.active = []
         self.failed = []
         self.stopping = False
@@ -492,8 +506,9 @@ class Launcher:
         self.install_signal_handlers()
         self.say(f"launcher {LAUNCHER_VERSION}  plan {self.plan['plan_sha256'][:16]}  "
                  f"slots {self.slots}")
-        for phase, label in ((0, "health (seed 32)"), (1, "remaining seeds")):
-            self.say(f"--- phase {phase}: {label} ---")
+        for phase in sorted({run.phase for run in self.runs}):
+            model = next(run.model for run in self.runs if run.phase == phase)
+            self.say(f"--- phase {phase}: {model} ---")
             if not self.run_phase(phase):
                 self.print_status()
                 if self.stopping:
@@ -520,8 +535,8 @@ def summarise(runs):
             "reused": reused, "training": training}
 
 
-def dry_run(output_root, plan, slots):
-    runs = plan_runs(output_root, plan)
+def dry_run(output_root, plan, slots, filters=None):
+    runs = select_runs(plan_runs(output_root, plan), **(filters or {}))
     counts = summarise(runs)
     print(f"plan     {plan['plan_sha256']}")
     print(f"output   {output_root}")
@@ -537,7 +552,8 @@ def dry_run(output_root, plan, slots):
             print(f"  REUSED_COMPLETE {run.name:26s} "
                   f"source_plan={str(entry.get('source_plan_sha256',''))[:12]}... "
                   f"checkpoint_sha={str(entry.get('checkpoint_sha256',''))[:12]}...")
-    for phase, label in ((0, "health (seed 32)"), (1, "remaining seeds")):
+    for phase in sorted({run.phase for run in runs}):
+        label = next(run.model for run in runs if run.phase == phase)
         members = [run for run in counts["training"] if run.phase == phase]
         print(f"\nphase {phase}: {label}  ({len(members)} runs to train, "
               f"at most {len(slots)} at a time)")
@@ -545,15 +561,9 @@ def dry_run(output_root, plan, slots):
             print(f"  [{index + 1:2d}] {run.name:26s} gpu={slots[index % len(slots)]:8s} "
                   f"state={run_state(run):16s} {run.directory}")
     names = [run.name for run in runs]
-    if len(names) != len(set(names)) or len(names) != plan["trial_budget"]:
+    if len(names) != len(set(names)):
         raise LauncherRefused(
-            f"{len(names)} runs, {len(set(names))} unique, plan registered "
-            f"{plan['trial_budget']}")
-    declared = plan.get("execution")
-    if declared and declared["gpu_jobs_to_execute"] != counts["gpu_jobs_to_execute"]:
-        raise LauncherRefused(
-            f"the plan declares {declared['gpu_jobs_to_execute']} GPU jobs, the "
-            f"queue enumerated {counts['gpu_jobs_to_execute']}")
+            f"{len(names)} selected runs but only {len(set(names))} unique")
     print(f"\n{len(names)} unique result slots, no duplicates; "
           f"{counts['gpu_jobs_to_execute']} to train")
     return 0
@@ -572,15 +582,24 @@ def main(argv=None):
                         help="print the queue state and exit")
     parser.add_argument("--plan", default=None,
                         help="a frozen plan JSON; defaults to the development plan")
+    parser.add_argument("--model", action="append", default=[],
+                        help="select one model; repeat for several")
+    parser.add_argument("--dataset", action="append", default=[],
+                        help="select one dataset; repeat for several")
+    parser.add_argument("--seed", action="append", type=int, default=[],
+                        help="select one seed; repeat for several")
     arguments = parser.parse_args(argv)
 
     plan, output_root = resolve_plan_and_root(arguments.plan)
     slots = assign_slots(arguments.jobs, parse_devices(arguments.devices),
                          arguments.allow_gpu_sharing)
+    filters = {"models": arguments.model, "datasets": arguments.dataset,
+               "seeds": arguments.seed}
     if arguments.dry_run:
-        return dry_run(output_root, plan, slots)
+        return dry_run(output_root, plan, slots, filters)
     if arguments.status:
-        launcher = Launcher(output_root, plan, slots, plan_path=arguments.plan)
+        launcher = Launcher(output_root, plan, slots, plan_path=arguments.plan,
+                            filters=filters)
         for row in launcher.status_rows():
             print(f"{row['state']:12s} phase{row['phase']} {row['run']:26s} "
                   f"epoch={row['epoch']}  {row['log']}")
@@ -588,7 +607,7 @@ def main(argv=None):
     return Launcher(output_root, plan, slots,
                     retry_failed=arguments.retry_failed,
                     restart_unresumable=arguments.restart_unresumable,
-                    plan_path=arguments.plan).execute()
+                    plan_path=arguments.plan, filters=filters).execute()
 
 
 if __name__ == "__main__":

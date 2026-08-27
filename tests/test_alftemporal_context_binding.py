@@ -17,8 +17,8 @@ import torch
 from args import load_args_from_config
 from lib.runtime_context import ContextRefused, build_runtime_context
 
-CONFIGS = {"PEMSBAY": "configs/paper/v4/experts/PEMSBAY_ALFTemporal.yaml",
-           "PEMS08": "configs/paper/v4/experts/PEMS08_ALFTemporal.yaml"}
+CONFIGS = {"PEMSBAY": "configs/ALFTemporal/PEMSBAY.yaml",
+           "PEMS08": "configs/ALFTemporal/PEMS08.yaml"}
 PHASES = ("train", "validation", "test")
 
 

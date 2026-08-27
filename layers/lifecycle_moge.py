@@ -40,18 +40,10 @@ from torch import nn
 # Availability one-hot (4) + state_age (1) + observation mask (1).
 LIFECYCLE_STATE_CHANNELS = 6
 SQRT_HALF = 0.7071067811865476
-DISTINCT_MULTISCALE_SUPPORT_SET = "distinct_multiscale_v1"
-EXPERIMENTAL_LEGACY_SUPPORT_SET = "candidate_legacy5"
-EXPERIMENTAL_UNIFIED_MULTISCALE5_SUPPORT_SET = (
-    "candidate_unified_multiscale5_v1"
-)
+BASE_SUPPORT_SET = "unified_base_legacy5_v1"
 LEGACY_SUPPORT_NAMES = (
     "identity", "mean", "weighted_mean", "forward_diffusion",
     "backward_diffusion",
-)
-MULTISCALE_SUPPORT_NAMES = (
-    "identity", "binary_mean", "forward_1", "backward_1",
-    "forward_2", "backward_2",
 )
 
 
@@ -67,20 +59,15 @@ def cv_squared(x):
 
 
 def _candidate_supports(adjacency, forward_support, backward_support,
-                        support_set=DISTINCT_MULTISCALE_SUPPORT_SET):
-    """Return one explicitly declared support inventory.
-
-    ``candidate_legacy5`` exists only for the bounded validation-only ablation
-    that compares the selected SUP inventory with the pre-SUP model.  Final
-    configs remain locked to ``distinct_multiscale_v1``.
-    """
+                        support_set=BASE_SUPPORT_SET):
+    """Return the frozen BASE support inventory."""
     weights = torch.nan_to_num(adjacency, nan=0.0)
     binary = (weights > 0).to(weights.dtype)
     identity = torch.eye(weights.shape[0], device=weights.device, dtype=weights.dtype)
     mean_support = binary / binary.sum(dim=1, keepdim=True).clamp_min(1.0)
     forward = forward_support.to(device=weights.device, dtype=weights.dtype)
     backward = backward_support.to(device=weights.device, dtype=weights.dtype)
-    if support_set == EXPERIMENTAL_LEGACY_SUPPORT_SET:
+    if support_set == BASE_SUPPORT_SET:
         weighted = weights / weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
         return {
             "identity": identity,
@@ -89,55 +76,7 @@ def _candidate_supports(adjacency, forward_support, backward_support,
             "forward_diffusion": forward,
             "backward_diffusion": backward,
         }
-    if support_set == DISTINCT_MULTISCALE_SUPPORT_SET:
-        return {
-            "identity": identity,
-            "binary_mean": mean_support,
-            "forward_1": forward,
-            "backward_1": backward,
-            "forward_2": forward @ forward,
-            "backward_2": backward @ backward,
-        }
-    if support_set == EXPERIMENTAL_UNIFIED_MULTISCALE5_SUPPORT_SET:
-        # On binary PeMS flow graphs ``forward_1`` is exactly the support
-        # previously retained under ``binary_mean``.  On weighted speed graphs
-        # this removes only the extra distance-agnostic equal-neighbour mean.
-        return {
-            "identity": identity,
-            "forward_1": forward,
-            "backward_1": backward,
-            "forward_2": forward @ forward,
-            "backward_2": backward @ backward,
-        }
     raise ValueError(f"unsupported moge_support_set {support_set!r}")
-
-
-def distinct_support_names(
-    adjacency,
-    support_set=DISTINCT_MULTISCALE_SUPPORT_SET,
-    atol=1e-9,
-    rtol=1e-7,
-):
-    """Resolve a stable, numerically distinct support inventory.
-
-    Resolution runs in float64 on CPU and preserves the declared candidate
-    order.  Symmetric road graphs therefore collapse forward/backward at each
-    hop, while directed graphs retain them.  The result is data-contract state,
-    not a learned or node-ID-dependent graph.
-    """
-    dense = torch.as_tensor(adjacency, dtype=torch.float64, device="cpu")
-    weights = torch.nan_to_num(dense, nan=0.0)
-    forward = weights / weights.sum(dim=1, keepdim=True).clamp_min(1e-12)
-    transposed = weights.T
-    backward = transposed / transposed.sum(dim=1, keepdim=True).clamp_min(1e-12)
-    candidates = _candidate_supports(weights, forward, backward, support_set)
-    kept_names, kept = [], []
-    for name, candidate in candidates.items():
-        if not any(torch.allclose(candidate, prior, atol=atol, rtol=rtol)
-                   for prior in kept):
-            kept_names.append(name)
-            kept.append(candidate)
-    return tuple(kept_names)
 
 
 def build_lifecycle_supports(
@@ -145,7 +84,7 @@ def build_lifecycle_supports(
     forward_support,
     backward_support,
     selected_names=None,
-    support_set=DISTINCT_MULTISCALE_SUPPORT_SET,
+    support_set=BASE_SUPPORT_SET,
 ):
     """Stack the resolved supports into ``[num_experts, node, node]``.
 
@@ -450,7 +389,7 @@ class LifecycleRoutedGraphConv(nn.Module):
         self,
         in_channels,
         out_channels,
-        num_experts=len(MULTISCALE_SUPPORT_NAMES),
+        num_experts=len(LEGACY_SUPPORT_NAMES),
         state_dim=LIFECYCLE_STATE_CHANNELS,
         k=2,
         noisy_gating=True,

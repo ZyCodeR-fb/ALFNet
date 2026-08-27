@@ -36,27 +36,3 @@ def role_balanced_elements(elements, valid, last_role):
         if selected.any():
             terms.append(elements[selected].mean())
     return torch.stack(terms).mean() if terms else None
-
-
-def safe_relative_elements(prediction, target, scaler, floor):
-    """Absolute relative error in original units with a train-only floor.
-
-    Raw MAPE has an unbounded gradient near zero.  ``floor`` is fitted once on
-    positive training-known targets, so this term gives low-flow observations
-    more influence than MSE without letting a one-vehicle denominator dominate
-    an update.  It is a training primitive, not a replacement metric.
-    """
-    floor = float(floor)
-    if not torch.isfinite(torch.tensor(floor)) or floor <= 0:
-        raise ValueError("safe-relative floor must be finite and positive")
-    mean, std = float(scaler["mean"]), float(scaler["std"])
-    # Invalid targets are excluded by the runner's validity mask, but leaving
-    # NaN/Inf in this element-wise graph can still poison backward through an
-    # unselected element (zero upstream gradient multiplied by a NaN local
-    # derivative).  Sanitising only invalid values preserves every evaluated
-    # cell while making the mask a real optimisation boundary.
-    safe_target = torch.nan_to_num(target, nan=0.0, posinf=0.0, neginf=0.0)
-    predicted = prediction * std + mean
-    actual = safe_target * std + mean
-    denominator = actual.abs().clamp_min(floor)
-    return (predicted - actual).abs() / denominator

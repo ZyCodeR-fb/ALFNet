@@ -246,7 +246,7 @@ class K_GCN(nn.Module):
         :param out_channels: Desired number of output features at each node in
         each time step.
         :param num_nodes: Number of nodes in the graph.
-        :relu is not good for K_GCN on Kriging, so we suggest 'selu' 
+        :relu is not good for K_GCN on Kriging, so we suggest 'selu'
         """
         super(K_GCN, self).__init__()
         self.Theta1 = nn.Parameter(torch.FloatTensor(in_channels,

@@ -1,4 +1,4 @@
-"""One v4 train/validation runner, shared by ALFNet and MoGERNN.
+"""One v4 train/validation runner shared by every registered model.
 
 This runner contains only the active v4 protocol and objective.
 
@@ -27,9 +27,7 @@ from data_provider.lifecycle_roles import ROLE_CHANNEL_COUNT
 from data_provider.v4_lifecycle_loader import V4LifecycleDataset
 from experiments.v4_losses import (
     element_loss,
-    role_balanced_elements,
     role_balanced_loss,
-    safe_relative_elements,
 )
 from lib.lcbt_v4 import (
     SHUFFLE_POLICY,
@@ -49,12 +47,23 @@ from utils.model_output import sum_aux_losses, unpack_model_output
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_DIR = ROOT / "configs/paper/v4_data_manifests"
-CONFIG_DIR = ROOT / "configs/paper/v4"
+CONFIG_DIR = ROOT / "configs"
 
 SCENARIOS = ("zero_history", "steady", "join", "fault")
 MODEL_ENTRY_POINTS = {
     "ALFNet": "model.ALFNet.ALFNet",
     "MoGERNN": "model.comparison_model.MoGERNN.MoGERNN",
+    "HA": "model.comparison_model.HA",
+    "FCLSTM": "model.comparison_model.FCLSTM",
+    "STGCN": "model.comparison_model.STGCN",
+    "STGODE": "model.comparison_model.stgode",
+    "GWNET": "model.comparison_model.GWNet",
+    "STID": "model.comparison_model.STID",
+    "STFiT": "model.comparison_model.STFiT",
+    "SLPF": "model.comparison_model.SLPF",
+    "PatchSTG": "model.comparison_model.PatchSTG",
+    "STBP": "model.comparison_model.STBP",
+    "MCPST_FSL": "model.comparison_model.MCPST_FSL",
 }
 
 
@@ -279,11 +288,11 @@ def valid_positions(batch, prediction):
     return mask & torch.isfinite(prediction) & torch.isfinite(batch["target"])
 
 
-def base_loss(prediction, batch, valid, loss_name="mse"):
+def base_loss(prediction, target, valid, loss_name="mse"):
     """The one common objective, identical for both models."""
     if not bool(valid.any()):
         return None
-    return element_loss(prediction, batch["target"], loss_name)[valid].mean()
+    return element_loss(prediction, target, loss_name)[valid].mean()
 
 
 def _alfnet_role_mix(prediction, batch, valid, meta, loss_name):
@@ -303,56 +312,39 @@ def _alfnet_role_mix(prediction, batch, valid, meta, loss_name):
     return role_loss, float(meta.get("forecast_role_balanced_beta", 0.1))
 
 
-def _alfnet_safe_relative(prediction, batch, valid, meta, scaler):
-    """ALFNet-only low-flow calibration term declared by the model config."""
-    weight = float(meta.get("forecast_safe_relative_weight", 0.0))
-    if weight < 0 or not torch.isfinite(torch.tensor(weight)):
-        raise RunnerRefused("forecast_safe_relative_weight must be finite and >= 0")
-    if weight == 0.0:
-        return None, 0.0
-    if meta.get("forecast_safe_relative_floor_policy") != \
-            "positive_target_q10_on_train_window_training_known_nodes":
-        raise RunnerRefused("unknown or missing safe-relative floor policy")
-    if scaler is None or "safe_relative_floor" not in scaler:
-        raise RunnerRefused("safe-relative loss requires the training-fitted scaler")
-    elements = safe_relative_elements(
-        prediction, batch["target"], scaler, scaler["safe_relative_floor"])
-    last_role = batch["lifecycle_context"][:, -1, :, :ROLE_CHANNEL_COUNT]
-    loss = role_balanced_elements(elements, valid, last_role)
-    if loss is None:
-        return None, weight
-    return loss, weight
-
-
 def compute_losses(model_output, batch, loss_name="mse", scaler=None):
     """Split the objective into what is shared and what the model declared.
 
     Returns `base`, the model's own terms, and the tensor actually optimised.
-    Keeping them apart is the point: `base` is the only quantity the two models
-    can be compared on, and it must not quietly absorb an ALFNet-only term.
+    Keeping them apart is the point: `base` is the model's declared forecast
+    loss and must not quietly absorb an ALFNet-only or source-specific term.
     """
     prediction, meta = unpack_model_output(model_output)
-    valid = valid_positions(batch, prediction)
-    base = base_loss(prediction, batch, valid, loss_name)
+    target = meta.get("target", batch["target"])
+    if target.shape != prediction.shape:
+        raise RunnerRefused(
+            f"model target override shape {tuple(target.shape)} does not match "
+            f"prediction {tuple(prediction.shape)}")
+    if "target" in meta:
+        valid = torch.isfinite(prediction) & torch.isfinite(target)
+    else:
+        valid = valid_positions(batch, prediction)
+    base = base_loss(prediction, target, valid, loss_name)
     if base is None:
         return {"prediction": prediction, "valid": valid, "base": None,
-                "optimize": None, "role_mix": None, "safe_relative": None,
-                "aux": None, "meta": meta}
+                "optimize": None, "role_mix": None, "aux": None,
+                "meta": meta}
 
     optimize = base
     role_loss, beta = _alfnet_role_mix(prediction, batch, valid, meta, loss_name)
     if role_loss is not None:
         optimize = (1.0 - beta) * optimize + beta * role_loss
-    relative_loss, relative_weight = _alfnet_safe_relative(
-        prediction, batch, valid, meta, scaler)
-    if relative_loss is not None:
-        optimize = optimize + relative_weight * relative_loss
     aux = sum_aux_losses(meta.get("aux_losses"), device=prediction.device)
     if aux is not None:
         optimize = optimize + aux
     return {"prediction": prediction, "valid": valid, "base": base,
             "optimize": optimize, "role_mix": role_loss,
-            "safe_relative": relative_loss, "aux": aux, "meta": meta}
+            "aux": aux, "meta": meta}
 
 
 # --- the two passes ------------------------------------------------------------
@@ -387,16 +379,19 @@ def _forward(session, batch, context, epoch, teacher_forcing_mask):
 def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"):
     """One training pass. Deterministic given the session, seed and epoch."""
     session.model.train()
+    epoch_hook = getattr(session.model, "on_train_epoch_start", None)
+    if callable(epoch_hook):
+        epoch_hook(epoch)
     session.set_epoch(epoch)
     totals = {"batches": 0, "skipped": 0, "base": 0.0, "optimize": 0.0,
-              "role_mix": 0.0, "safe_relative": 0.0, "aux": 0.0,
+              "role_mix": 0.0, "aux": 0.0,
               "forced_positions": 0,
               "available_positions": 0}
     # Counted separately from the sums: a model that declares no role-mix term
     # must report `None`, not the 0.0 that an absent term and a zero-valued one
     # would otherwise share. MoGERNN declares none and gets no stand-in.
     contributed = {"base": 0, "optimize": 0, "role_mix": 0,
-                   "safe_relative": 0, "aux": 0}
+                   "aux": 0}
     for index, batch in enumerate(session.train_loader):
         if max_batches is not None and index >= max_batches:
             break
@@ -417,7 +412,7 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
         losses["optimize"].backward()
         optimizer.step()
         totals["batches"] += 1
-        for key in ("base", "optimize", "role_mix", "safe_relative", "aux"):
+        for key in ("base", "optimize", "role_mix", "aux"):
             if losses[key] is not None:
                 totals[key] += float(losses[key].detach())
                 contributed[key] += 1
@@ -426,7 +421,7 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
             f"epoch {epoch} produced no batch with a valid loss position; "
             "refusing to report a zero")
     report = {key: (totals[key] / contributed[key] if contributed[key] else None)
-              for key in ("base", "optimize", "role_mix", "safe_relative", "aux")}
+              for key in ("base", "optimize", "role_mix", "aux")}
     report.update({"batches": totals["batches"], "skipped": totals["skipped"],
                    "forced_positions": totals["forced_positions"],
                    "available_positions": totals["available_positions"]})

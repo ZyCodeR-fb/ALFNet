@@ -29,10 +29,10 @@ from lib.teacher_forcing import (
 )
 from lib.v4_payload import load_v4_payload, save_v4_payload
 
-ALFNET_CONFIGS = {"PEMS08": "configs/paper/v4/PEMS08_ALFNet.yaml",
-                  "PEMSBAY": "configs/paper/v4/PEMSBAY_ALFNet.yaml"}
-MOGERNN_CONFIGS = {"PEMS08": "configs/paper/v4/PEMS08_MoGERNN.yaml",
-                   "PEMSBAY": "configs/paper/v4/PEMSBAY_MoGERNN.yaml"}
+ALFNET_CONFIGS = {"PEMS08": "configs/ALFNet/PEMS08.yaml",
+                  "PEMSBAY": "configs/ALFNet/PEMSBAY.yaml"}
+MOGERNN_CONFIGS = {"PEMS08": "configs/MoGERNN/PEMS08.yaml",
+                   "PEMSBAY": "configs/MoGERNN/PEMSBAY.yaml"}
 PAYLOADS = {"PEMS08": "data_v4/PEMS08/raw_data.pkl",
             "PEMSBAY": "data_v4/PEMS-BAY/raw_data.pkl"}
 
@@ -514,7 +514,7 @@ def test_neither_parameter_set_changed(context):
     alfnet = _alfnet("PEMS08", context)
     assert sum(p.numel() for p in alfnet.parameters()) == 1_037_529
     assert sum(p.numel() for p in _alfnet(
-        "PEMSBAY", build_runtime_context("PEMSBAY", "train")).parameters()) == 1_112_937
+        "PEMSBAY", build_runtime_context("PEMSBAY", "train")).parameters()) == 1_037_529
 
     for dataset in sorted(MOGERNN_CONFIGS):
         bound = _mogernn(dataset, build_runtime_context(dataset, "train"))

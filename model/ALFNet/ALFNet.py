@@ -1,5 +1,4 @@
 import importlib
-import math
 import os
 
 import torch
@@ -184,29 +183,6 @@ class Model(nn.Module):
         self.forecast_role_balanced_beta = float(
             recipe.get("forecast_role_balanced_beta", 0.10)
         )
-        self.forecast_safe_relative_weight = float(
-            recipe.get("forecast_safe_relative_weight", 0.0)
-        )
-        self.forecast_safe_relative_floor_policy = str(
-            recipe.get(
-                "forecast_safe_relative_floor_policy",
-                "positive_target_q10_on_train_window_training_known_nodes",
-            )
-        )
-        if (not math.isfinite(self.forecast_safe_relative_weight)
-                or self.forecast_safe_relative_weight < 0):
-            raise ValueError(
-                "forecast_safe_relative_weight must be finite and >= 0")
-        speed_candidate = bool(
-            recipe.get("candidate_validation_only", False)
-            and recipe.get("experimental_speed_safe_relative", False)
-        )
-        if (self.forecast_safe_relative_weight > 0
-                and str(configs.target_features) != "q"
-                and not speed_candidate):
-            raise ValueError(
-                "safe-relative loss on a non-flow target is permitted only for "
-                "an explicitly marked validation-only speed candidate")
         self.fusion_mode = str(recipe.get("fusion_mode", "film"))
         if self.fusion_mode != "film":
             raise ValueError("the final ALFNet supports FiLM fusion only")
@@ -425,10 +401,6 @@ class Model(nn.Module):
             "aux_losses": expert_aux_losses,
             "forecast_loss_mode": "role_balanced_mix",
             "forecast_role_balanced_beta": self.forecast_role_balanced_beta,
-            "forecast_safe_relative_weight": self.forecast_safe_relative_weight,
-            "forecast_safe_relative_floor_policy": (
-                self.forecast_safe_relative_floor_policy
-            ),
         }
 
     def forward(

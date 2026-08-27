@@ -147,8 +147,16 @@ def collect(plan_path, output_root=None, skip_gates=False):
                 raise CollectRefused(
                     f"{dataset}/{model} has seeds {present}, expected {list(seeds)}")
 
-    per_dataset = {d: compare(tables[d], models, seeds) for d in plan["datasets"]}
     left = models[0]
+    per_dataset = {
+        dataset: {
+            "per_model": {model: aggregate_seeds(tables[dataset][model])
+                          for model in models},
+            "comparisons": {right: compare(
+                tables[dataset], (left, right), seeds)
+                for right in models[1:]},
+        } for dataset in plan["datasets"]
+    }
     summary = {
         "schema_version": 1,
         "plan_validation_only": True,
@@ -165,10 +173,9 @@ def collect(plan_path, output_root=None, skip_gates=False):
             "reason": ("three datasets are veh/5min and two are mph; a mean over "
                        "them would carry no unit"),
             f"{left.lower()}_cells_better_per_dataset": {
-                d: per_dataset[d]["cells_better"][left] for d in plan["datasets"]},
-            "datasets_where_left_wins_every_cell": [
-                d for d in plan["datasets"]
-                if per_dataset[d]["cells_better"][left] == 33],
+                d: {right: per_dataset[d]["comparisons"][right]
+                    ["cells_better"][left] for right in models[1:]}
+                for d in plan["datasets"]},
         },
     }
     path = root / SUMMARY_NAME
@@ -190,12 +197,11 @@ def main(argv=None):
     print(f"wrote {path}")
     left = summary["models"][0]
     for dataset, entry in summary["datasets"].items():
-        print(f"\n{dataset}: {left} better in "
-              f"{entry['cells_better'][left]}/33 "
-              f"(main {entry['main_cells_left_better']}/15, "
-              f"phase {entry['phase_cells_left_better']}/18)")
-        print(f"  worst cell for {left}: {entry['worst_positive_delta']['cell']} "
-              f"{entry['worst_positive_delta']['delta']:+.4f}")
+        print(f"\n{dataset}")
+        for right, result in entry["comparisons"].items():
+            print(f"  {left} vs {right}: {result['cells_better'][left]}/33 "
+                  f"(main {result['main_cells_left_better']}/15, "
+                  f"phase {result['phase_cells_left_better']}/18)")
     return 0
 
 

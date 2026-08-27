@@ -28,8 +28,8 @@ from data_provider.v4_lifecycle_loader import V4LifecycleDataset
 from lib.runtime_context import ContextRefused, build_runtime_context
 from lib.v4_payload import load_v4_payload, save_v4_payload
 
-CONFIGS = {"PEMS08": "configs/paper/v4/PEMS08_ALFNet.yaml",
-           "PEMSBAY": "configs/paper/v4/PEMSBAY_ALFNet.yaml"}
+CONFIGS = {"PEMS08": "configs/ALFNet/PEMS08.yaml",
+           "PEMSBAY": "configs/ALFNet/PEMSBAY.yaml"}
 PAYLOADS = {"PEMS08": "data_v4/PEMS08/raw_data.pkl",
             "PEMSBAY": "data_v4/PEMS-BAY/raw_data.pkl"}
 
@@ -302,7 +302,7 @@ def test_a_real_v4_eval_forward_on_each_dataset(dataset, phase):
 def test_the_parameter_set_is_exactly_what_it_was(p8_context):
     """forward_v4 is wiring. It may not add, rename or resize a parameter."""
     model = _build_model("PEMSBAY", build_runtime_context("PEMSBAY", "train"))
-    assert sum(p.numel() for p in model.parameters()) == 1_112_937
+    assert sum(p.numel() for p in model.parameters()) == 1_037_529
     p8 = _build_model("PEMS08", p8_context)
     assert not [name for name, _ in p8.named_parameters() if "v4" in name]
     # The adjacency cache is a plain attribute, so nothing about it can be

@@ -137,7 +137,7 @@ def audit(plan_path, output_root=None):
     if declared:
         reused = sum(1 for run in runs if run.execution_action == "reuse")
         trained = sum(1 for run in runs if run.execution_action == "train")
-        if reused != declared["provenance_verified_reused_runs"]:
+        if reused != declared.get("provenance_verified_reused_runs", 0):
             findings.append(f"{reused} reused slots, plan declares "
                             f"{declared['provenance_verified_reused_runs']}")
         if trained != declared["new_training_runs"]:
@@ -147,12 +147,14 @@ def audit(plan_path, output_root=None):
         findings.append(f"{len(runs)} slots, plan declares {plan['trial_budget']}")
     for run in runs:
         audit_run(run, plan, findings, notes, design)
-    # Both models must have scored the same cells on the same dataset and seed.
+    # Every model must have scored the same valid cells as ALFNet.
     for (dataset, seed), models in sorted(design.items()):
-        if set(models) == {"ALFNet", "MoGERNN"} and \
-                models["ALFNet"] != models["MoGERNN"]:
-            findings.append(f"{dataset}/seed{seed}: the two models scored "
-                            "different valid-cell counts")
+        if "ALFNet" in models:
+            for model, counts in models.items():
+                if counts != models["ALFNet"]:
+                    findings.append(
+                        f"{dataset}/{model}/seed{seed}: valid-cell counts differ "
+                        "from ALFNet")
     complete = sum(1 for run in runs if (run.directory / COMPLETE_MARKER).exists())
     return {"plan_sha256": plan["plan_sha256"], "output_root": str(root),
             "slots": len(runs), "complete": complete,

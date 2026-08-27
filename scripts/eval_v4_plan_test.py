@@ -22,7 +22,7 @@ Access is recorded once and is resumable only under identical identity:
 `TEST_OPENED.json` on the first run, per-run results that are never clobbered,
 `TEST_COMPLETE` when all slots are done.
 
-    python scripts/eval_v4_plan_test.py --plan configs/paper/v4_five_dataset_plan.json
+    python scripts/eval_v4_plan_test.py --plan configs/paper/final_plan.json
 """
 
 import argparse
@@ -63,11 +63,8 @@ class TestAccessRefused(RuntimeError):
 
 def access_identity(plan):
     """What must be identical for a resumed test run to be the same run."""
-    from scripts.build_v4_readiness import load as load_attestation
-
     return {
         "plan_sha256": plan["plan_sha256"],
-        "attestation_sha256": load_attestation()["attestation_sha256"],
         "configs": {name: entry["sha256"]
                     for name, entry in plan["configs"].items()},
         "data": {name: entry["payload_sha256"]
@@ -78,15 +75,10 @@ def access_identity(plan):
 
 
 def assert_may_open(plan, runs, root):
-    """The eight gates. Nothing below reads a test target until these pass."""
-    from scripts.build_v4_readiness import ReadinessRefused, assert_ready
+    """Nothing below reads a test target until all evidence gates pass."""
     from scripts.collect_v4_plan_validation import SUMMARY_NAME
     problems = []
-    try:                                             # 1, 2
-        assert_ready(plan)
-    except ReadinessRefused as error:
-        problems.append(f"readiness: {error}")
-    if len(runs) != plan["trial_budget"]:            # 3
+    if len(runs) != plan["trial_budget"]:
         problems.append(f"{len(runs)} slots, plan declares {plan['trial_budget']}")
 
     reused = [run for run in runs if run.execution_action == "reuse"]

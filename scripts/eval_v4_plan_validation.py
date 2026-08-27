@@ -54,7 +54,7 @@ class PlanEvalRefused(ValueError):
 
 
 def load_plan(path):
-    from scripts import build_v4_five_dataset_plan as five
+    from scripts import build_final_plan as five
 
     return five.assert_plan_still_holds(five.load_plan(path))
 

@@ -23,7 +23,7 @@ from model.comparison_model.MoGERNN.MoGERNN import Model
 
 def _model():
     pl.seed_everything(32, workers=True)
-    args = load_args_from_config("configs/paper/v4/METRLA_MoGERNN.yaml", [])
+    args = load_args_from_config("configs/MoGERNN/METRLA.yaml", [])
     args.device = "cpu"
     return args, Model.from_runtime_context(args, build_runtime_context("METRLA", "train"))
 
@@ -44,7 +44,7 @@ def _mixed_batch(args, nodes, size, hidden=8, seed=3):
 def test_batch_wide_detection_would_miss_every_cohort():
     """The defect, pinned: it is a property of the rule, not of our data."""
     nodes, hidden = 157, 8
-    x, _ = _mixed_batch(load_args_from_config("configs/paper/v4/METRLA_MoGERNN.yaml", []),
+    x, _ = _mixed_batch(load_args_from_config("configs/MoGERNN/METRLA.yaml", []),
                         nodes, size=8, hidden=hidden)
     flat = x.squeeze(-1)
     batch_wide = torch.where(torch.sum(flat, dim=(0, 1)) == 0)[0]

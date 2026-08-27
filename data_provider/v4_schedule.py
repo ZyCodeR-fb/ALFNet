@@ -117,6 +117,16 @@ def _hop_distances(adjacency):
     return shortest_path(undirected, method="D", unweighted=True, directed=False)
 
 
+def topology_statistics(adjacency):
+    """Compute the immutable graph statistics reused by every schedule epoch."""
+    adjacency = np.asarray(adjacency)
+    degree = np.asarray(_weighted_degree(adjacency), dtype=np.float64)
+    hops = np.asarray(_hop_distances(adjacency), dtype=np.float64)
+    degree.setflags(write=False)
+    hops.setflags(write=False)
+    return degree, hops
+
+
 def _least_exposed(candidates, exposure, rng, count):
     candidates = np.asarray(candidates, dtype=np.int64)
     if count <= 0 or len(candidates) == 0:
@@ -272,6 +282,8 @@ def build_lcbt_schedule(
     node_ids=None,
     stratify_by_evidence=True,
     hidden_fraction=0.0,
+    topology_degree=None,
+    topology_hops=None,
 ):
     """Build the frozen LCBT schedule with uniform evidence k=1..L.
 
@@ -419,8 +431,14 @@ def build_lcbt_schedule(
     # only *restricted* to the pool afterwards, never recomputed on the induced
     # subgraph: a pool of scattered unseen sensors has almost no internal edges,
     # so its induced degrees and distances describe the pool, not the network.
-    graph_degree = _weighted_degree(topology)
-    graph_hops = _hop_distances(topology)
+    graph_degree = (_weighted_degree(topology) if topology_degree is None
+                    else np.asarray(topology_degree, dtype=np.float64))
+    graph_hops = (_hop_distances(topology) if topology_hops is None
+                  else np.asarray(topology_hops, dtype=np.float64))
+    if graph_degree.shape != (topology.shape[0],):
+        raise ValueError("topology_degree does not match topology_adjacency")
+    if graph_hops.shape != topology.shape:
+        raise ValueError("topology_hops does not match topology_adjacency")
 
     hidden_fraction = float(hidden_fraction)
     if hidden_fraction and scenario_node_pools is not None:

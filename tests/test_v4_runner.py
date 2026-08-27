@@ -14,11 +14,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 from torch.utils.data import DataLoader
 
 from data_provider.v4_lifecycle_loader import V4LifecycleDataset
+from data_provider.v4_schedule import build_lcbt_schedule, topology_statistics
 from experiments import v4_runner
 from experiments.v4_runner import (
     RunnerRefused,
@@ -38,8 +40,8 @@ from lib.lcbt_v4 import (
 from lib.runtime_context import build_runtime_context
 
 PAYLOAD = "data_v4/PEMS08/raw_data.pkl"
-CONFIGS = {"ALFNet": "configs/paper/v4/PEMS08_ALFNet.yaml",
-           "MoGERNN": "configs/paper/v4/PEMS08_MoGERNN.yaml"}
+CONFIGS = {"ALFNet": "configs/ALFNet/PEMS08.yaml",
+           "MoGERNN": "configs/MoGERNN/PEMS08.yaml"}
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -166,6 +168,22 @@ def test_both_models_receive_the_identical_teacher_mask():
 
 
 # --- the schedule --------------------------------------------------------------
+
+
+def test_cached_topology_statistics_are_schedule_semantic_noops():
+    adjacency = np.zeros((12, 12), dtype=np.float32)
+    for node in range(11):
+        adjacency[node, node + 1] = adjacency[node + 1, node] = node + 1
+    regimes = ["weekday_peak", "weekday_offpeak", "weekend_peak",
+               "weekend_offpeak"] * 24
+    kwargs = dict(num_samples=len(regimes), input_len=12,
+                  adjacency=adjacency, calendar_regimes=regimes,
+                  seed=32, epoch=4, cohort_size_base=12)
+    direct = build_lcbt_schedule(**kwargs)
+    degree, hops = topology_statistics(adjacency)
+    cached = build_lcbt_schedule(
+        **kwargs, topology_degree=degree, topology_hops=hops)
+    assert cached == direct
 
 
 def test_set_epoch_is_deterministic_and_moves_only_the_schedule(train_context):

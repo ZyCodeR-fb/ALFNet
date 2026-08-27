@@ -19,10 +19,11 @@ import torch
 
 from experiments.v4_runner import RunnerRefused
 from scripts import train_v4
+from scripts.build_final_configs import CONFIG_DIR
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIGS = {"ALFNet": ROOT / "configs/paper/v4/PEMS08_ALFNet.yaml",
-           "MoGERNN": ROOT / "configs/paper/v4/PEMS08_MoGERNN.yaml"}
+CONFIGS = {"ALFNet": ROOT / "configs/ALFNet/PEMS08.yaml",
+           "MoGERNN": ROOT / "configs/MoGERNN/PEMS08.yaml"}
 DATASETS = ("PEMS03", "PEMS04", "PEMS08", "METRLA", "PEMSBAY")
 
 
@@ -45,7 +46,8 @@ def preflight():
         key = (dataset, model)
         if key not in _PREFLIGHT_CACHE:
             _PREFLIGHT_CACHE[key] = _preflight(
-                ROOT / f"configs/paper/v4/{dataset}_{model}.yaml", save=False)
+                ROOT / "configs" / CONFIG_DIR[model] / f"{dataset}.yaml",
+                save=False)
         return _PREFLIGHT_CACHE[key]
 
     return run
@@ -73,16 +75,15 @@ def test_only_the_generated_v4_configs_are_accepted():
     A hardcoded 8 here is the same class of defect as a launcher with
     `DATASETS = (...)` baked in: it silently ignores a dataset that was added.
     """
-    from scripts.build_v4_configs import DATASETS
+    from scripts.build_final_configs import DATASETS, MODELS
 
     paths = train_v4.v4_config_paths()
-    assert len(paths) == 2 * len(DATASETS) == 10
-    assert {path.name for path in paths} == {
-        f"{dataset}_{model}.yaml" for dataset in DATASETS
-        for model in ("ALFNet", "MoGERNN")}
+    assert len(paths) == len(MODELS) * len(DATASETS) == 65
+    assert {(path.parent.name, path.stem) for path in paths} == {
+        (CONFIG_DIR[model], dataset) for dataset in DATASETS for model in MODELS}
     with pytest.raises(RunnerRefused, match="is not one of the .* v4 configs"):
         _preflight(
-            ROOT / "configs/paper/v4/experts/PEMS08_ALFTemporal.yaml",
+            ROOT / "configs/ALFTemporal/PEMS08.yaml",
             save=False,
         )
 
@@ -237,7 +238,7 @@ def test_the_cpu_preflight_passes_for_every_combination(preflight, dataset, mode
     train_report, validation_report = epoch["train"], epoch["validation"]
 
     assert report["dataset"] == dataset and report["model"] == model
-    alfnet_count = 1_112_937 if dataset in ("METRLA", "PEMSBAY") else 1_037_529
+    alfnet_count = 1_037_529
     assert report["parameter_count"] == (alfnet_count if model == "ALFNet"
                                          else 226_270)
     assert train_report["batches"] == 1 and train_report["skipped"] == 0

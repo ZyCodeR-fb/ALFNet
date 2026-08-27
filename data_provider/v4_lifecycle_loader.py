@@ -19,7 +19,7 @@ import torch
 from torch.utils.data import Dataset
 
 from data_provider.calendar_strata import calendar_stratum
-from data_provider.v4_schedule import build_lcbt_schedule
+from data_provider.v4_schedule import build_lcbt_schedule, topology_statistics
 from lib.runtime_context import ContextRefused
 from data_provider.lifecycle_roles import (
     ROLE_AAS, ROLE_CHANNEL_COUNT, ROLE_FS, ROLE_NAS, ROLE_VS,
@@ -27,6 +27,11 @@ from data_provider.lifecycle_roles import (
 from lib.lcbt_v4 import SPLIT_FRACTIONS
 from lib.v4_payload import load_v4_payload
 from utils.timefeatures import time_features
+
+
+# Five immutable entries at most.  The key is a manifest-verified adjacency
+# digest, so a changed graph cannot reuse another graph's degree or hop matrix.
+_TOPOLOGY_STATISTICS_CACHE = {}
 
 
 class V4LifecycleDataset(Dataset):
@@ -47,6 +52,12 @@ class V4LifecycleDataset(Dataset):
         if self.slide_step <= 0:
             raise ContextRefused("slide_step must be a positive integer")
         self.num_nodes = context.num_nodes
+        cache_key = context.adjacency_sha256
+        if cache_key not in _TOPOLOGY_STATISTICS_CACHE:
+            _TOPOLOGY_STATISTICS_CACHE[cache_key] = topology_statistics(
+                context.adjacency.numpy())
+        self._topology_degree, self._topology_hops = \
+            _TOPOLOGY_STATISTICS_CACHE[cache_key]
         payload = load_v4_payload(payload_path)
 
         raw = np.asarray(payload["data"], dtype=np.float32)
@@ -108,21 +119,10 @@ class V4LifecycleDataset(Dataset):
         valid = window[natural[:train_end][:, known_nodes]]
         if valid.size == 0:
             raise ContextRefused("no valid training-known values to fit the scaler")
-        positive = valid[valid > 0]
-        if positive.size == 0:
-            raise ContextRefused(
-                "no positive training-known values for the safe-relative floor")
         std = float(valid.std())
         return {"mean": float(valid.mean()), "std": std if std > 1e-6 else 1.0,
                 "fitted_on": "train window, training-known nodes only",
-                "n_values": int(valid.size),
-                # A robust denominator fixed before validation/test is opened.
-                # q10 is deliberately data-scale aware: one vehicle and one mph
-                # should not mean the same thing across unrelated targets.
-                "safe_relative_floor": float(np.quantile(positive, 0.10)),
-                "safe_relative_floor_policy":
-                    "positive_target_q10_on_train_window_training_known_nodes",
-                "safe_relative_floor_n_values": int(positive.size)}
+                "n_values": int(valid.size)}
 
     def _build_origins(self):
         """Window starts whose guard reads only in-scope nodes."""
@@ -157,7 +157,9 @@ class V4LifecycleDataset(Dataset):
             adjacency=adjacency, calendar_regimes=regimes, seed=seed, epoch=epoch,
             scenario_node_pools=self._scenario_pools(),
             topology_adjacency=adjacency, node_ids=np.arange(self.num_nodes),
-            cohort_size_base=self.num_nodes)
+            cohort_size_base=self.num_nodes,
+            topology_degree=self._topology_degree,
+            topology_hops=self._topology_hops)
 
     def set_epoch(self, epoch):
         """Redraw the training schedule for `epoch`. Deterministic in (seed, epoch).

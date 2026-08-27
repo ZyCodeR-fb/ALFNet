@@ -1,0 +1,1 @@
+from .STFiT import Model

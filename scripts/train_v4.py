@@ -10,7 +10,7 @@ What this refuses, by name rather than by omission:
 
 * any `test`, `evaluate` or `confirmation` argument -- the confirmation splits
   are read once, by the evaluator, and never during training or selection;
-* a config that is not one of the ten final v4 configs;
+* a config that is not one of the final generated outer-model configs;
 * an override of anything but seed, device, output root and the preflight caps.
   Split, target, layout and capacity are properties of the experiment, not of
   the command line that happened to launch it;
@@ -20,7 +20,7 @@ Checkpoint selection is validation LifeAvg and nothing else. Ties keep the
 *earlier* epoch -- fixed here, before any number exists, and written into the
 checkpoint so the rule cannot be chosen after the fact.
 
-    python scripts/train_v4.py --config configs/paper/v4/PEMS08_ALFNet.yaml \
+    python scripts/train_v4.py --config configs/ALFNet/PEMS08.yaml \
         --device cuda:0 --seed 32 --output_root ./outputs_v4
     python scripts/train_v4.py --config ... --preflight     # 1 batch, CPU, no checkpoint
 """
@@ -81,7 +81,8 @@ CODE_SOURCES = ("experiments/v4_runner.py", "experiments/v4_validation_collector
 # whatever module would otherwise have implemented them.
 FORBIDDEN_ARGUMENT_SUBSTRINGS = ("test", "evaluate", "confirmation")
 def v4_config_paths():
-    return sorted(path for path in CONFIG_DIR.glob("*.yaml"))
+    return sorted(path for path in CONFIG_DIR.glob("*/*.yaml")
+                  if path.parent.name not in {"ALFGraph", "ALFTemporal"})
 
 
 def _sha256_file(path):
@@ -121,10 +122,6 @@ def resolve_run_directory(output_root, session, config_path, config_sha):
 def model_method_contract(session):
     graph = getattr(session.model, "graph_expert", None)
     return {
-        "safe_relative_weight": float(getattr(
-            session.model, "forecast_safe_relative_weight", 0.0)),
-        "safe_relative_floor_policy": getattr(
-            session.model, "forecast_safe_relative_floor_policy", None),
         "graph_support_set": getattr(graph, "moge_support_set", None),
         "graph_support_names": list(getattr(
             graph, "resolved_support_names", ())),
@@ -165,9 +162,9 @@ def checkpoint_payload(session, config_path, config_sha, epoch, best_epoch,
         "teacher_forcing_ratio": teacher_forcing_ratio(epoch),
         "loss": getattr(session.args, "loss", "mse"),
         "objective_terms": {
-            "base": "masked MSE over loss_mask & isfinite",
+            "base": (f"masked {str(getattr(session.args, 'loss', 'mse')).upper()} "
+                     "over loss_mask & isfinite"),
             "role_balanced_mix": train_report.get("role_mix") is not None,
-            "safe_relative": train_report.get("safe_relative") is not None,
             "model_aux_losses": train_report.get("aux") is not None,
         },
         "model_method_contract": model_method_contract(session),
@@ -397,7 +394,7 @@ def _table_from_best(session, run_directory, best_epoch):
 
 
 def build_optimizer(session):
-    """Each model's existing optimiser. No learning rate is changed here."""
+    """The common AdamW training policy, with model-declared parameter groups."""
     args = session.args
     groups = (session.model.get_optimizer_param_groups(args.lr)
               if hasattr(session.model, "get_optimizer_param_groups")
@@ -420,33 +417,23 @@ def build_scheduler(session, optimizer):
 def load_plan_authority(plan_path=None):
     """Load a supported active plan; archived plans are never authorities."""
     if plan_path is None:
-        plan_path = ROOT / "configs/paper/v4_five_dataset_plan.json"
+        plan_path = ROOT / "configs/paper/final_plan.json"
     plan_path = Path(plan_path)
     if not plan_path.exists():
         raise RunnerRefused(f"{plan_path} does not exist")
-    active = (ROOT / "configs/paper/v4_five_dataset_plan.json").resolve()
-    speed_sup5 = (ROOT / "configs/paper/v4_speed_sup5_candidate_plan.json").resolve()
-    if plan_path.resolve() not in {active, speed_sup5}:
+    active = (ROOT / "configs/paper/final_plan.json").resolve()
+    if plan_path.resolve() != active:
         raise RunnerRefused(
-            f"{plan_path} is neither the active final plan nor a bounded "
-            "validation-only candidate plan; archived plans are evidence")
+            f"{plan_path} is not the sole active unified-BASE plan; old final "
+            "and candidate plans are archived evidence, not authorities")
     kind = json.loads(plan_path.read_text("utf-8")).get("kind")
-    if kind == "v4_five_dataset_plan":
-        from scripts import build_v4_five_dataset_plan as five
-        from scripts.build_v4_readiness import ReadinessRefused, assert_ready
-        plan = five.assert_plan_still_holds(five.load_plan(plan_path))
+    if kind == "v4_unified_base_comparison_plan":
+        from scripts import build_final_plan
         try:
-            assert_ready(plan)
-        except ReadinessRefused as error:
+            return build_final_plan.assert_plan_still_holds(
+                build_final_plan.load_plan(plan_path))
+        except ValueError as error:
             raise RunnerRefused(f"{plan_path}: {error}") from error
-        return plan
-    if kind == "v4_speed_sup5_candidate_plan":
-        from scripts import build_v4_speed_sup5_plan as speed_plan
-        plan = speed_plan.assert_plan_still_holds(speed_plan.load_plan(plan_path))
-        if plan.get("selection", {}).get("split") != "validation" or not \
-                plan.get("selection", {}).get("test_forbidden"):
-            raise RunnerRefused("speed SUP5 candidate plan is not validation-only")
-        return plan
     raise RunnerRefused(f"{plan_path} declares unsupported kind={kind!r}")
 
 
@@ -638,9 +625,9 @@ def main(argv=None):
     parser.add_argument("--max_train_batches", type=int, default=None)
     parser.add_argument("--max_validation_batches", type=int, default=None)
     parser.add_argument(
-        "--plan", default="configs/paper/v4_five_dataset_plan.json",
+        "--plan", default="configs/paper/final_plan.json",
         help=("path to the frozen plan this run belongs to, e.g. "
-              "configs/paper/v4_five_dataset_plan.json"))
+              "configs/paper/final_plan.json"))
     arguments = parser.parse_args(argv)
 
     if arguments.preflight:

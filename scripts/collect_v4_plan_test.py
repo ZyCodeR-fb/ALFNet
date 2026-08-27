@@ -44,8 +44,16 @@ def collect(plan_path, output_root=None, skip_gates=False):
         tables.setdefault(run.dataset, {}).setdefault(
             run.model, {})[run.seed] = record["cells"]
     models, seeds = tuple(plan["models"]), tuple(int(s) for s in plan["seeds"])
-    per_dataset = {d: compare(tables[d], models, seeds) for d in plan["datasets"]}
     left = models[0]
+    per_dataset = {
+        dataset: {
+            "per_model": {model: aggregate_seeds(tables[dataset][model])
+                          for model in models},
+            "comparisons": {right: compare(
+                tables[dataset], (left, right), seeds)
+                for right in models[1:]},
+        } for dataset in plan["datasets"]
+    }
     summary = {
         "schema_version": 1, "split": "test", "read_once": True,
         "plan_sha256": plan["plan_sha256"],
@@ -60,7 +68,9 @@ def collect(plan_path, output_root=None, skip_gates=False):
             "reason": ("flow and speed do not share a unit, and confirmatory and "
                        "supportive datasets do not share a status"),
             f"{left.lower()}_cells_better_per_dataset": {
-                d: per_dataset[d]["cells_better"][left] for d in plan["datasets"]},
+                d: {right: per_dataset[d]["comparisons"][right]
+                    ["cells_better"][left] for right in models[1:]}
+                for d in plan["datasets"]},
             "confirmatory_datasets": [d for d in plan["datasets"]
                                       if plan["data"][d]["test_exposure"]["status"]
                                       == "confirmatory"],
@@ -84,8 +94,10 @@ def main(argv=None):
     print(f"wrote {path}")
     left = summary["models"][0]
     for dataset, entry in summary["datasets"].items():
-        print(f"  {dataset:8s} [{summary['exposure'][dataset]:12s}] "
-              f"{left} better in {entry['cells_better'][left]}/33")
+        print(f"  {dataset:8s} [{summary['exposure'][dataset]:12s}]")
+        for right, result in entry["comparisons"].items():
+            print(f"    {left} vs {right}: "
+                  f"{result['cells_better'][left]}/33")
     return 0
 
 

@@ -4,14 +4,11 @@ from torch import nn
 from layers.DCRNNCell import DCRNNCell
 from layers.gnn import calculate_random_walk_matrix
 from layers.lifecycle_moge import (
-    DISTINCT_MULTISCALE_SUPPORT_SET,
-    EXPERIMENTAL_LEGACY_SUPPORT_SET,
-    EXPERIMENTAL_UNIFIED_MULTISCALE5_SUPPORT_SET,
+    BASE_SUPPORT_SET,
     LEGACY_SUPPORT_NAMES,
     LIFECYCLE_STATE_CHANNELS,
     LifecycleRoutedGraphConv,
     build_lifecycle_supports,
-    distinct_support_names,
 )
 from lib.teacher_forcing import step_teacher_input
 
@@ -141,22 +138,12 @@ class Model(nn.Module):
         assert_config_agrees_with_context(configs, runtime_context, "ALFGraph")
         recipe = (getattr(configs, "model_family_cfg", {}) or {}).get("recipe", {})
         support_set = str(recipe.get("moge_support_set", ""))
-        candidate_only = bool(recipe.get("candidate_validation_only", False))
-        if (support_set == EXPERIMENTAL_LEGACY_SUPPORT_SET
-                and candidate_only):
+        if support_set == BASE_SUPPORT_SET:
             resolved_support_names = LEGACY_SUPPORT_NAMES
-        elif (support_set == EXPERIMENTAL_UNIFIED_MULTISCALE5_SUPPORT_SET
-              and candidate_only):
-            resolved_support_names = distinct_support_names(
-                runtime_context.adjacency, support_set)
-        elif support_set == DISTINCT_MULTISCALE_SUPPORT_SET:
-            resolved_support_names = distinct_support_names(
-                runtime_context.adjacency, support_set)
         else:
             raise ValueError(
-                "ALFGraph requires the final distinct support set; experimental "
-                "inventories are accepted only with candidate_validation_only=true, "
-                f"got support_set={support_set!r}, candidate={candidate_only}")
+                "ALFGraph requires the frozen unified BASE support set, got "
+                f"support_set={support_set!r}")
         model = cls(configs, resolved_support_names=resolved_support_names)
         identity = runtime_context.static_asset_identity()
         model.runtime_context = runtime_context
@@ -188,10 +175,10 @@ class Model(nn.Module):
         self.moge_support_set = str(
             recipe.get("moge_support_set", "")
         )
-        if (self.moge_support_set == DISTINCT_MULTISCALE_SUPPORT_SET
+        if (self.moge_support_set == BASE_SUPPORT_SET
                 and resolved_support_names is None):
             raise ValueError(
-                "distinct_multiscale_v1 must be resolved from a "
+                "the graph support inventory must be resolved from a "
                 "RuntimeDataContext before ALFGraph construction")
         self.resolved_support_names = tuple(resolved_support_names or ())
         self.state_dim = LIFECYCLE_STATE_CHANNELS
