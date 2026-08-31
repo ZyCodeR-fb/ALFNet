@@ -24,8 +24,11 @@ from data_provider.v4_schedule import build_lcbt_schedule, topology_statistics
 from experiments import v4_runner
 from experiments.v4_runner import (
     RunnerRefused,
+    build_model_teacher_mask,
     build_v4_session,
     compute_losses,
+    decoder_training_metadata,
+    decoder_training_policy,
     early_stopping_metric,
     train_one_epoch,
     valid_positions,
@@ -86,6 +89,34 @@ def test_the_ratio_reproduces_the_v3_schedule(epoch, expected):
 def test_free_run_never_reads_future_targets():
     for epoch in (0, 1, 20, 40, 100):
         assert teacher_forcing_ratio(epoch, mode="free_run") == 0.0
+
+
+def test_future_target_access_is_model_specific_not_a_shared_baseline_upgrade():
+    assert decoder_training_policy("ALFNet") == \
+        "lifecycle_masked_autoregressive_teacher_forcing"
+    assert decoder_training_policy("MoGERNN") == \
+        "source_masked_autoregressive_teacher_forcing"
+    assert decoder_training_policy("STFiT") == \
+        "source_future_node_augmentation_not_teacher_forcing"
+    for model in set(v4_runner.MODEL_ENTRY_POINTS) - {"ALFNet", "MoGERNN", "STFiT"}:
+        assert decoder_training_policy(model) == "target_blind_non_autoregressive"
+
+
+def test_non_autoregressive_baseline_gets_no_teacher_mask(train_dataset):
+    batch = next(iter(DataLoader(train_dataset, batch_size=2, shuffle=False)))
+    session = type("Session", (), {
+        "model_name": "GWNET",
+        "seed_contract": {"derived": {"teacher_forcing": 123}},
+        "args": type("Args", (), {
+            "teacher_forcing_mode": "linear_decay",
+            "teacher_forcing_decay_epochs": 40,
+        })(),
+    })()
+    mask = build_model_teacher_mask(session, batch, epoch=0, training=True)
+    assert not bool(mask.any())
+    metadata = decoder_training_metadata(session, 0, True)
+    assert metadata["teacher_forcing_policy"] == "none"
+    assert metadata["ratio"] == 0.0
 
 
 def test_a_declared_decay_length_controls_the_schedule():

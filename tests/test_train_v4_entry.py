@@ -229,6 +229,10 @@ def test_selection_reads_validation_life_avg_and_nothing_else(tmp_path,
                 "aux": None, "batches": 1, "skipped": 0, "ratio": 1.0,
                 "forced_positions": 0, "available_positions": 0,
                 "teacher_forcing_policy": "lcbt_v4_tf_v3_effective_h_minus_1",
+                "teacher_forcing_mode": "linear_decay",
+                "teacher_forcing_decay_epochs": 40,
+                "decoder_training_policy":
+                    "source_masked_autoregressive_teacher_forcing",
                 "run_seed": 32,
                 "epoch": epoch, "training": True}
 

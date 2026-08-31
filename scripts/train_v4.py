@@ -48,6 +48,7 @@ from experiments.v4_runner import (  # noqa: E402
     MANIFEST_DIR,
     RunnerRefused,
     build_v4_session,
+    decoder_training_metadata,
     early_stopping_metric,
     train_one_epoch,
     validate,
@@ -56,12 +57,7 @@ from experiments.v4_validation_collector import (  # noqa: E402
     cell_count,
     collect_validation_table,
 )
-from lib.lcbt_v4 import (  # noqa: E402
-    SHUFFLE_POLICY,
-    SPLIT_FRACTIONS,
-    TEACHER_FORCING_POLICY,
-    teacher_forcing_ratio,
-)
+from lib.lcbt_v4 import SHUFFLE_POLICY, SPLIT_FRACTIONS  # noqa: E402
 from scripts.v4_utils import sha256_file as _plan_sha256_file  # noqa: E402
 
 CHECKPOINT_SCHEMA = 2
@@ -122,6 +118,8 @@ def resolve_run_directory(output_root, session, config_path, config_sha):
 def model_method_contract(session):
     graph = getattr(session.model, "graph_expert", None)
     return {
+        "decoder_training_policy": decoder_training_metadata(
+            session, 0, True)["decoder_training_policy"],
         "graph_support_set": getattr(graph, "moge_support_set", None),
         "graph_support_names": list(getattr(
             graph, "resolved_support_names", ())),
@@ -158,12 +156,12 @@ def checkpoint_payload(session, config_path, config_sha, epoch, best_epoch,
         "validation_exposure_hash": session.validation_context.exposure_hash(),
         "scaler": dict(session.scaler),
         "split_fractions": list(SPLIT_FRACTIONS),
-        "teacher_forcing_policy": TEACHER_FORCING_POLICY,
-        "teacher_forcing_mode": session.args.teacher_forcing_mode,
-        "teacher_forcing_decay_epochs": session.args.teacher_forcing_decay_epochs,
-        "teacher_forcing_ratio": teacher_forcing_ratio(
-            epoch, mode=session.args.teacher_forcing_mode,
-            decay_epochs=session.args.teacher_forcing_decay_epochs),
+        "teacher_forcing_policy": train_report["teacher_forcing_policy"],
+        "teacher_forcing_mode": train_report["teacher_forcing_mode"],
+        "teacher_forcing_decay_epochs": train_report[
+            "teacher_forcing_decay_epochs"],
+        "teacher_forcing_ratio": train_report["ratio"],
+        "decoder_training_policy": train_report["decoder_training_policy"],
         "early_stopping_start_epoch": session.args.early_stopping_start_epoch,
         "loss": getattr(session.args, "loss", "mse"),
         "objective_terms": {
@@ -279,9 +277,10 @@ def run_state_payload(session, config_path, config_sha, epoch, best, wait,
         "validation_exposure_hash": session.validation_context.exposure_hash(),
         "scaler": dict(session.scaler),
         "split_fractions": list(SPLIT_FRACTIONS),
-        "teacher_forcing_policy": TEACHER_FORCING_POLICY,
-        "teacher_forcing_mode": session.args.teacher_forcing_mode,
-        "teacher_forcing_decay_epochs": session.args.teacher_forcing_decay_epochs,
+        **{key: value for key, value in decoder_training_metadata(
+            session, epoch, True).items() if key in {
+                "teacher_forcing_policy", "teacher_forcing_mode",
+                "teacher_forcing_decay_epochs", "decoder_training_policy"}},
         "early_stopping_start_epoch": session.args.early_stopping_start_epoch,
         "shuffle_policy": SHUFFLE_POLICY,
         "loss": getattr(session.args, "loss", "mse"),
@@ -295,7 +294,8 @@ RESUME_IDENTITY_FIELDS = (
     "payload_sha256", "unseen_sha256", "manifest_sha256", "static_asset_hash",
     "train_exposure_hash", "validation_exposure_hash", "split_fractions",
     "teacher_forcing_policy", "teacher_forcing_mode",
-    "teacher_forcing_decay_epochs", "early_stopping_start_epoch",
+    "teacher_forcing_decay_epochs", "decoder_training_policy",
+    "early_stopping_start_epoch",
     "shuffle_policy", "seed_contract", "loss",
     "parameter_count", "model_method_contract",
 )
@@ -444,7 +444,9 @@ def load_plan_authority(plan_path=None):
     candidate = (ROOT / "configs/paper/alfnet_candidate_plan.json").resolve()
     tf_candidate = (ROOT / "configs/paper/teacher_forcing_candidate_plan.json").resolve()
     fixed50 = (ROOT / "configs/paper/teacher_forcing_fixed50_plan.json").resolve()
-    if plan_path.resolve() not in {active, candidate, tf_candidate, fixed50}:
+    alf_tf40 = (ROOT / "configs/paper/alfnet_tf40_candidate_plan.json").resolve()
+    if plan_path.resolve() not in {
+            active, candidate, tf_candidate, fixed50, alf_tf40}:
         raise RunnerRefused(
             f"{plan_path} is neither the active reproduction plan nor the one "
             "registered validation-only ALFNet candidate plan")
@@ -475,6 +477,13 @@ def load_plan_authority(plan_path=None):
         try:
             return build_teacher_forcing_fixed_candidates.assert_plan_still_holds(
                 build_teacher_forcing_fixed_candidates.load_plan(plan_path))
+        except ValueError as error:
+            raise RunnerRefused(f"{plan_path}: {error}") from error
+    if kind == "v4_alfnet_tf40_validation_candidates":
+        from scripts import build_alfnet_tf40_candidates
+        try:
+            return build_alfnet_tf40_candidates.assert_plan_still_holds(
+                build_alfnet_tf40_candidates.load_plan(plan_path))
         except ValueError as error:
             raise RunnerRefused(f"{plan_path}: {error}") from error
     raise RunnerRefused(f"{plan_path} declares unsupported kind={kind!r}")
@@ -647,8 +656,11 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
         "early_stopping_metric": selection_metric_name,
         "tie_rule": TIE_RULE,
         "early_stopping_start_epoch": early_stopping_start_epoch,
-        "teacher_forcing_mode": session.args.teacher_forcing_mode,
-        "teacher_forcing_decay_epochs": session.args.teacher_forcing_decay_epochs,
+        "teacher_forcing_mode": history[-1]["train"]["teacher_forcing_mode"],
+        "teacher_forcing_decay_epochs": history[-1]["train"][
+            "teacher_forcing_decay_epochs"],
+        "decoder_training_policy": history[-1]["train"][
+            "decoder_training_policy"],
         "parameter_count": sum(p.numel() for p in session.model.parameters()),
         "model_method_contract": model_method_contract(session),
         "history": history,

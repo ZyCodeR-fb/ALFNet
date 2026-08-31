@@ -68,6 +68,63 @@ MODEL_ENTRY_POINTS = {
     "MCPST_FSL": "model.comparison_model.MCPST_FSL",
 }
 
+# Future-target access is a model contract, not a convenience inherited from
+# the common runner.  Only the two genuinely autoregressive decoders consume
+# the externally generated lifecycle-safe teacher mask.  ST-FiT owns a
+# different, source-native use of train targets (its node-augmentation VAE) in
+# its wrapper; every other comparison model is target-blind while predicting.
+DECODER_TRAINING_POLICIES = {
+    "ALFNet": "lifecycle_masked_autoregressive_teacher_forcing",
+    "MoGERNN": "source_masked_autoregressive_teacher_forcing",
+    "STFiT": "source_future_node_augmentation_not_teacher_forcing",
+}
+TARGET_BLIND_DECODER_POLICY = "target_blind_non_autoregressive"
+
+
+def decoder_training_policy(model_name):
+    """Return the frozen future-target contract for one registered model."""
+    if model_name not in MODEL_ENTRY_POINTS:
+        raise RunnerRefused(f"{model_name!r} has no registered decoder policy")
+    return DECODER_TRAINING_POLICIES.get(
+        model_name, TARGET_BLIND_DECODER_POLICY)
+
+
+def uses_external_teacher_mask(model_name):
+    return decoder_training_policy(model_name).endswith("teacher_forcing")
+
+
+def decoder_training_metadata(session, epoch, training=True):
+    """Report what the model may read, without calling every future use TF."""
+    policy = decoder_training_policy(session.model_name)
+    if uses_external_teacher_mask(session.model_name):
+        report = teacher_forcing_metadata(
+            session.seed_contract["derived"]["teacher_forcing"], epoch, training,
+            mode=session.args.teacher_forcing_mode,
+            decay_epochs=session.args.teacher_forcing_decay_epochs)
+    else:
+        report = {
+            "teacher_forcing_policy": "none",
+            "teacher_forcing_mode": "not_applicable",
+            "teacher_forcing_decay_epochs": None,
+            "teacher_forcing_seed": None,
+            "epoch": int(epoch),
+            "ratio": 0.0,
+            "training": bool(training),
+        }
+    report["decoder_training_policy"] = policy
+    return report
+
+
+def build_model_teacher_mask(session, batch, epoch, training):
+    """Build a real teacher mask only for a decoder that declares one."""
+    eligible = teacher_forcing_eligible_mask(batch)
+    if not uses_external_teacher_mask(session.model_name):
+        return torch.zeros_like(eligible)
+    return build_v4_teacher_forcing_mask(
+        batch, session.seed_contract["derived"]["teacher_forcing"], epoch,
+        training, mode=session.args.teacher_forcing_mode,
+        decay_epochs=session.args.teacher_forcing_decay_epochs)
+
 
 # The confirmation splits are spent once. A training runner has no business
 # opening one, so the refusal is a named rule rather than the incidental
@@ -433,14 +490,11 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
         if max_batches is not None and index >= max_batches:
             break
         batch = to_device(batch, session.device)
-        teacher_seed = session.seed_contract["derived"]["teacher_forcing"]
-        teacher = build_v4_teacher_forcing_mask(
-            batch, teacher_seed, epoch, True,
-            mode=session.args.teacher_forcing_mode,
-            decay_epochs=session.args.teacher_forcing_decay_epochs)
+        teacher = build_model_teacher_mask(session, batch, epoch, True)
         totals["forced_positions"] += int(teacher.sum())
-        totals["available_positions"] += int(
-            teacher_forcing_eligible_mask(batch).sum())
+        if uses_external_teacher_mask(session.model_name):
+            totals["available_positions"] += int(
+                teacher_forcing_eligible_mask(batch).sum())
         optimizer.zero_grad(set_to_none=True)
         losses = compute_losses(_forward(session, batch, session.train_context,
                                          epoch, teacher), batch, loss_name,
@@ -466,10 +520,7 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
     report.update({"batches": totals["batches"], "skipped": totals["skipped"],
                    "forced_positions": totals["forced_positions"],
                    "available_positions": totals["available_positions"]})
-    report.update(teacher_forcing_metadata(
-        session.seed_contract["derived"]["teacher_forcing"], epoch, True,
-        mode=session.args.teacher_forcing_mode,
-        decay_epochs=session.args.teacher_forcing_decay_epochs))
+    report.update(decoder_training_metadata(session, epoch, True))
     report["run_seed"] = session.run_seed
     return report
 
@@ -498,10 +549,7 @@ def validate(session, epoch=0, max_batches=None, loss_name="mse",
         if max_batches is not None and index >= max_batches:
             break
         batch = to_device(batch, session.device)
-        teacher = build_v4_teacher_forcing_mask(
-            batch, session.seed_contract["derived"]["teacher_forcing"],
-            epoch, False, mode=session.args.teacher_forcing_mode,
-            decay_epochs=session.args.teacher_forcing_decay_epochs)
+        teacher = build_model_teacher_mask(session, batch, epoch, False)
         if bool(teacher.any()):
             raise RunnerRefused("validation produced a non-empty teacher mask")
         prediction, _ = unpack_model_output(
