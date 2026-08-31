@@ -45,6 +45,11 @@ def _add_arguments(parser):
     # Training
     parser.add_argument("--max_epoch", type=int, default=100)
     parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--teacher_forcing_mode",
+                        choices=["linear_decay", "free_run"],
+                        default="linear_decay")
+    parser.add_argument("--teacher_forcing_decay_epochs", type=int, default=40)
+    parser.add_argument("--early_stopping_start_epoch", type=int, default=0)
     parser.add_argument("--stop_based", choices=["val_lifecycle"],
                         default="val_lifecycle")
     parser.add_argument("--batch_size", type=int, default=64)
@@ -118,6 +123,10 @@ def _validate(args):
         raise ValueError("missing v4 config fields: " + ", ".join(missing))
     if min(args.input_len, args.pred_len, args.slide_step) <= 0:
         raise ValueError("input_len, pred_len and slide_step must be positive")
+    if args.teacher_forcing_decay_epochs <= 0:
+        raise ValueError("teacher_forcing_decay_epochs must be positive")
+    if args.early_stopping_start_epoch < 0:
+        raise ValueError("early_stopping_start_epoch must be non-negative")
     if args.input_features != args.target_features:
         raise ValueError("v4 uses one identical input/target variable")
     if args.lifecycle_training_strategy != lcbt_v4.STRATEGY:

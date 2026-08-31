@@ -41,9 +41,14 @@ from torch import nn
 LIFECYCLE_STATE_CHANNELS = 6
 SQRT_HALF = 0.7071067811865476
 BASE_SUPPORT_SET = "unified_base_legacy5_v1"
+MULTISCALE_SUPPORT_SET = "distinct_multiscale5_v2"
 LEGACY_SUPPORT_NAMES = (
     "identity", "mean", "weighted_mean", "forward_diffusion",
     "backward_diffusion",
+)
+MULTISCALE_SUPPORT_NAMES = (
+    "identity", "weighted_diffusion_1", "weighted_diffusion_2",
+    "weighted_diffusion_3", "personalized_pagerank_3",
 )
 
 
@@ -75,6 +80,26 @@ def _candidate_supports(adjacency, forward_support, backward_support,
             "weighted_mean": weighted,
             "forward_diffusion": forward,
             "backward_diffusion": backward,
+        }
+    if support_set == MULTISCALE_SUPPORT_SET:
+        # Five deliberately different operators, with the same expert count
+        # and recurrent-kernel cost as BASE.  BASE labels weighted_mean and
+        # forward_diffusion are the same row-normalisation, and on symmetric
+        # PeMS graphs backward is the same again.  Here the inventory follows
+        # MixHop's neighbourhood-power idea and APPNP's locality-preserving
+        # propagation instead of assigning three names to one matrix.
+        forward_2 = forward @ forward
+        forward_3 = forward_2 @ forward
+        alpha = 0.15
+        ppr = identity
+        for _ in range(3):
+            ppr = (1.0 - alpha) * (forward @ ppr) + alpha * identity
+        return {
+            "identity": identity,
+            "weighted_diffusion_1": forward,
+            "weighted_diffusion_2": forward_2,
+            "weighted_diffusion_3": forward_3,
+            "personalized_pagerank_3": ppr,
         }
     raise ValueError(f"unsupported moge_support_set {support_set!r}")
 

@@ -25,7 +25,7 @@ from lib.runtime_context import build_runtime_context
 from scripts.eval_v4_plan_validation import (
     assert_identity,
     atomic_write_json,
-    expected_identity,
+    expected_identity as expected_plan_identity,
     load_plan,
     resolve_runs,
 )
@@ -37,6 +37,40 @@ OUTPUT_NAMES = {"validation": "v4_low_flow_validation.json",
                 "test": "v4_low_flow_test.json"}
 
 
+def expected_low_flow_identity(run, session, plan):
+    """Resolve checkpoint identity without weakening candidate-plan checks.
+
+    The final-plan schema indexes configs by ``dataset_model``.  The ALFNet
+    development plan instead indexes seven immutable configs by candidate.
+    Both schemas bind the same checkpoint fields; only the authority lookup is
+    different.  Missing candidate metadata is a hard failure, never a fallback
+    to the BASE config.
+    """
+    if plan.get("kind") != "v4_alfnet_validation_candidates":
+        return expected_plan_identity(run, session, plan)
+    candidate = run.entry.get("candidate")
+    if not candidate or candidate not in plan.get("configs", {}):
+        raise ValueError(
+            f"{run.name}: candidate plan has no config authority for "
+            f"{candidate!r}")
+    entry = plan["configs"][candidate]
+    data = plan["data"][run.dataset]
+    return {
+        "dataset": run.dataset,
+        "model": run.model,
+        "model_variant": getattr(session.args, "model_variant", None),
+        "seed": run.seed,
+        "config_sha256": entry["sha256"],
+        "payload_sha256": data["payload_sha256"],
+        "unseen_sha256": data["unseen_sha256"],
+        "manifest_sha256": data["manifest_sha256"],
+        "static_asset_hash": session.train_context.static_asset_hash(),
+        "train_exposure_hash": session.train_context.exposure_hash(),
+        "validation_exposure_hash": session.validation_context.exposure_hash(),
+        "seed_contract": session.seed_contract,
+    }
+
+
 @torch.no_grad()
 def evaluate(run, plan, split="validation", device="cuda:0"):
     if run.dataset not in ("PEMS03", "PEMS04", "PEMS08"):
@@ -44,7 +78,8 @@ def evaluate(run, plan, split="validation", device="cuda:0"):
     checkpoint_path = run.directory / "best.pt"
     checkpoint = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
     session = build_v4_session(run.config, device=device, run_seed=run.seed)
-    assert_identity(checkpoint, expected_identity(run, session, plan), run.name)
+    identity = expected_low_flow_identity(run, session, plan)
+    assert_identity(checkpoint, identity, run.name)
     session.model.load_state_dict(checkpoint["model_state"])
     session.model.to(device).eval()
 

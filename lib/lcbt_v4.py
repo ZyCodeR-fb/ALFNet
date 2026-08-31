@@ -60,7 +60,7 @@ SCENARIO_RATIOS = {
     "lcbt_fault_ratio": 0.25,
 }
 
-TEACHER_FORCING_POLICY = "lcbt_v4_tf_v2_named_subseed"
+TEACHER_FORCING_POLICY = "lcbt_v4_tf_v3_effective_h_minus_1"
 TEACHER_FORCING_DECAY_EPOCHS = 40.0
 
 # The training shuffle, keyed on (run seed, epoch) rather than carried in a
@@ -96,9 +96,17 @@ def assert_v4_strategy(configs, who):
             "population and is not selected per model")
 
 
-def teacher_forcing_ratio(epoch):
-    """The v3 schedule, unchanged: 1 at epoch 0, 0 from epoch 40 on."""
-    return float(min(max(1.0 - float(epoch) / TEACHER_FORCING_DECAY_EPOCHS, 0.0), 1.0))
+def teacher_forcing_ratio(epoch, mode="linear_decay",
+                          decay_epochs=TEACHER_FORCING_DECAY_EPOCHS):
+    """Return the declared decoder-input policy for this training epoch."""
+    if mode == "free_run":
+        return 0.0
+    if mode != "linear_decay":
+        raise ValueError(f"unknown teacher_forcing_mode={mode!r}")
+    decay_epochs = float(decay_epochs)
+    if not np.isfinite(decay_epochs) or decay_epochs <= 0:
+        raise ValueError(f"decay_epochs must be finite and positive, got {decay_epochs}")
+    return float(min(max(1.0 - float(epoch) / decay_epochs, 0.0), 1.0))
 
 
 def _uniform01(policy, teacher_seed, epoch, origin, horizon_step):
@@ -108,21 +116,41 @@ def _uniform01(policy, teacher_seed, epoch, origin, horizon_step):
     return int.from_bytes(digest[:8], "big") / float(1 << 64)
 
 
-def build_v4_teacher_forcing_mask(batch, teacher_seed, epoch, training):
+def teacher_forcing_eligible_mask(batch):
+    """Positions that can affect a later decoder output.
+
+    A horizon-H autoregressive decoder makes only H-1 input choices after an
+    output: the choice made after output H is never consumed.  Keeping that
+    final position false makes both the mask and its reported denominator
+    describe effective teacher-forcing decisions rather than H random draws.
+    """
+    available = batch["decoder_available_mask"].to(torch.bool)
+    if available.ndim != 3 or available.shape[1] < 1:
+        raise ValueError(
+            "decoder_available_mask must have shape [batch, horizon, nodes] "
+            "with a positive horizon")
+    eligible = available.clone()
+    eligible[:, -1, :] = False
+    return eligible
+
+
+def build_v4_teacher_forcing_mask(batch, teacher_seed, epoch, training,
+                                  mode="linear_decay",
+                                  decay_epochs=TEACHER_FORCING_DECAY_EPOCHS):
     """`[B, H, N]` bool: where a decoder may read the real future.
 
     Validation and test get an all-false mask, always. There is no argument that
     turns that off, because a validation metric that depended on the target
     would not be a validation metric.
     """
-    available = batch["decoder_available_mask"].to(torch.bool)
+    available = teacher_forcing_eligible_mask(batch)
     if not training:
         return torch.zeros_like(available)
     if "origin" not in batch:
         raise ValueError(
             f"{TEACHER_FORCING_POLICY} needs the sample's origin; without it the "
             "decision would depend on the position in the batch")
-    ratio = teacher_forcing_ratio(epoch)
+    ratio = teacher_forcing_ratio(epoch, mode=mode, decay_epochs=decay_epochs)
     batch_size, horizon, _ = available.shape
     origins = batch["origin"].reshape(-1).tolist()
     if len(origins) != batch_size:
@@ -140,12 +168,18 @@ def build_v4_teacher_forcing_mask(batch, teacher_seed, epoch, training):
     return decided.unsqueeze(-1).expand_as(available) & available
 
 
-def teacher_forcing_metadata(teacher_seed, epoch, training):
+def teacher_forcing_metadata(teacher_seed, epoch, training,
+                             mode="linear_decay",
+                             decay_epochs=TEACHER_FORCING_DECAY_EPOCHS):
     """What a manifest or checkpoint has to record to reproduce the schedule."""
     return {
         "teacher_forcing_policy": TEACHER_FORCING_POLICY,
+        "teacher_forcing_mode": str(mode),
+        "teacher_forcing_decay_epochs": int(decay_epochs),
         "teacher_forcing_seed": int(teacher_seed),
         "epoch": int(epoch),
-        "ratio": teacher_forcing_ratio(epoch) if training else 0.0,
+        "ratio": (teacher_forcing_ratio(epoch, mode=mode,
+                                         decay_epochs=decay_epochs)
+                  if training else 0.0),
         "training": bool(training),
     }

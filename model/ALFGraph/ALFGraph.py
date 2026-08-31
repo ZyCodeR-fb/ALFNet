@@ -4,8 +4,8 @@ from torch import nn
 from layers.DCRNNCell import DCRNNCell
 from layers.gnn import calculate_random_walk_matrix
 from layers.lifecycle_moge import (
-    BASE_SUPPORT_SET,
-    LEGACY_SUPPORT_NAMES,
+    BASE_SUPPORT_SET, MULTISCALE_SUPPORT_SET,
+    LEGACY_SUPPORT_NAMES, MULTISCALE_SUPPORT_NAMES,
     LIFECYCLE_STATE_CHANNELS,
     LifecycleRoutedGraphConv,
     build_lifecycle_supports,
@@ -140,9 +140,11 @@ class Model(nn.Module):
         support_set = str(recipe.get("moge_support_set", ""))
         if support_set == BASE_SUPPORT_SET:
             resolved_support_names = LEGACY_SUPPORT_NAMES
+        elif support_set == MULTISCALE_SUPPORT_SET:
+            resolved_support_names = MULTISCALE_SUPPORT_NAMES
         else:
             raise ValueError(
-                "ALFGraph requires the frozen unified BASE support set, got "
+                "ALFGraph requires a registered support set, got "
                 f"support_set={support_set!r}")
         model = cls(configs, resolved_support_names=resolved_support_names)
         identity = runtime_context.static_asset_identity()

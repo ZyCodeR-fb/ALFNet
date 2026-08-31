@@ -183,6 +183,21 @@ class Model(nn.Module):
         self.forecast_role_balanced_beta = float(
             recipe.get("forecast_role_balanced_beta", 0.10)
         )
+        self.forecast_scale_loss_mode = recipe.get("forecast_scale_loss_mode")
+        self.forecast_scale_loss_weight = float(
+            recipe.get("forecast_scale_loss_weight", 0.0)
+        )
+        self.forecast_scale_loss_scale_fraction = float(
+            recipe.get("forecast_scale_loss_scale_fraction", 0.05)
+        )
+        if self.forecast_scale_loss_mode not in (None, "signed_log_huber"):
+            raise ValueError(
+                f"unsupported forecast_scale_loss_mode "
+                f"{self.forecast_scale_loss_mode!r}")
+        if not 0.0 <= self.forecast_scale_loss_weight <= 1.0:
+            raise ValueError("forecast_scale_loss_weight must be in [0, 1]")
+        if self.forecast_scale_loss_scale_fraction <= 0.0:
+            raise ValueError("forecast_scale_loss_scale_fraction must be positive")
         self.fusion_mode = str(recipe.get("fusion_mode", "film"))
         if self.fusion_mode != "film":
             raise ValueError("the final ALFNet supports FiLM fusion only")
@@ -397,11 +412,19 @@ class Model(nn.Module):
 
     def _forecast_metadata(self, expert_aux_losses):
         """Training-objective declaration consumed by the shared v4 runner."""
-        return {
+        metadata = {
             "aux_losses": expert_aux_losses,
             "forecast_loss_mode": "role_balanced_mix",
             "forecast_role_balanced_beta": self.forecast_role_balanced_beta,
         }
+        if self.forecast_scale_loss_mode is not None:
+            metadata.update({
+                "forecast_scale_loss_mode": self.forecast_scale_loss_mode,
+                "forecast_scale_loss_weight": self.forecast_scale_loss_weight,
+                "forecast_scale_loss_scale_fraction":
+                    self.forecast_scale_loss_scale_fraction,
+            })
+        return metadata
 
     def forward(
         self,

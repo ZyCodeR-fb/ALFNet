@@ -69,6 +69,18 @@ def test_ordinary_arguments_are_accepted():
          "--output_root", "./o", "--preflight"])
 
 
+def test_patience_gate_delays_termination_not_checkpoint_selection():
+    wait = 7
+    for epoch in (0, 7, 39):
+        wait = train_v4.next_patience_wait(
+            wait, improved=False, epoch=epoch, start_epoch=40)
+        assert wait == 0
+    assert train_v4.next_patience_wait(
+        0, improved=False, epoch=40, start_epoch=40) == 1
+    assert train_v4.next_patience_wait(
+        9, improved=True, epoch=55, start_epoch=40) == 0
+
+
 def test_only_the_generated_v4_configs_are_accepted():
     """Two per dataset, and the count follows the generator rather than a literal.
 
@@ -141,8 +153,10 @@ def test_a_saved_run_carries_its_whole_provenance(tmp_path, who):
     assert checkpoint["payload_sha256"] == manifest["payload"]["sha256"]
     assert checkpoint["unseen_sha256"] == manifest["unseen"]["sha256"]
     assert checkpoint["split_fractions"] == [0.60, 0.20, 0.20]
-    assert checkpoint["teacher_forcing_policy"] == "lcbt_v4_tf_v2_named_subseed"
-    assert checkpoint["early_stopping_metric"] == "validation life_avg_mae"
+    assert checkpoint["teacher_forcing_policy"] == \
+        "lcbt_v4_tf_v3_effective_h_minus_1"
+    assert checkpoint["early_stopping_metric"] == \
+        "partial-smoke micro LifeAvg MAE"
     assert checkpoint["tie_rule"] == "keep_earlier_epoch"
     assert checkpoint["train_exposure_hash"] != checkpoint["validation_exposure_hash"]
     assert checkpoint["scaler"]["fitted_on"] == \
@@ -203,16 +217,19 @@ def test_selection_reads_validation_life_avg_and_nothing_else(tmp_path,
     real_validate = v4_runner.validate
 
     def fake_validate(session, epoch=0, **kwargs):
-        report = dict(real_validate(session, epoch=epoch, max_batches=1))
-        report["life_avg_mae"] = next(sequence)
-        return report
+        report = real_validate(
+            session, epoch=epoch, max_batches=1, return_cell_table=False)
+        table = {"split": "validation",
+                 "main": {"LifeAvg": {"MAE": next(sequence)}}}
+        return report, table
 
     def fake_train(session, optimizer, epoch, **kwargs):
         # Falls as validation rises, so selecting on it would pick epoch 3.
         return {"base": next(train_calls), "optimize": 0.0, "role_mix": None,
                 "aux": None, "batches": 1, "skipped": 0, "ratio": 1.0,
                 "forced_positions": 0, "available_positions": 0,
-                "teacher_forcing_policy": "lcbt_v4_tf_v2_named_subseed", "run_seed": 32,
+                "teacher_forcing_policy": "lcbt_v4_tf_v3_effective_h_minus_1",
+                "run_seed": 32,
                 "epoch": epoch, "training": True}
 
     monkeypatch.setattr(train_v4, "validate", fake_validate)

@@ -159,12 +159,18 @@ def checkpoint_payload(session, config_path, config_sha, epoch, best_epoch,
         "scaler": dict(session.scaler),
         "split_fractions": list(SPLIT_FRACTIONS),
         "teacher_forcing_policy": TEACHER_FORCING_POLICY,
-        "teacher_forcing_ratio": teacher_forcing_ratio(epoch),
+        "teacher_forcing_mode": session.args.teacher_forcing_mode,
+        "teacher_forcing_decay_epochs": session.args.teacher_forcing_decay_epochs,
+        "teacher_forcing_ratio": teacher_forcing_ratio(
+            epoch, mode=session.args.teacher_forcing_mode,
+            decay_epochs=session.args.teacher_forcing_decay_epochs),
+        "early_stopping_start_epoch": session.args.early_stopping_start_epoch,
         "loss": getattr(session.args, "loss", "mse"),
         "objective_terms": {
             "base": (f"masked {str(getattr(session.args, 'loss', 'mse')).upper()} "
                      "over loss_mask & isfinite"),
             "role_balanced_mix": train_report.get("role_mix") is not None,
+            "signed_log_huber_mix": train_report.get("scale_mix") is not None,
             "model_aux_losses": train_report.get("aux") is not None,
         },
         "model_method_contract": model_method_contract(session),
@@ -172,7 +178,8 @@ def checkpoint_payload(session, config_path, config_sha, epoch, best_epoch,
                          if key != "model_state"},
         "validation_report": validation_report,
         "best_validation_life_avg_mae": best_validation,
-        "early_stopping_metric": "validation life_avg_mae",
+        "early_stopping_metric": validation_report.get(
+            "checkpoint_metric_name", "validation 33-cell main/LifeAvg/MAE"),
         "tie_rule": TIE_RULE,
         "parameter_count": sum(p.numel() for p in session.model.parameters()),
         "plan_sha256": None if plan is None else plan["plan_sha256"],
@@ -273,6 +280,9 @@ def run_state_payload(session, config_path, config_sha, epoch, best, wait,
         "scaler": dict(session.scaler),
         "split_fractions": list(SPLIT_FRACTIONS),
         "teacher_forcing_policy": TEACHER_FORCING_POLICY,
+        "teacher_forcing_mode": session.args.teacher_forcing_mode,
+        "teacher_forcing_decay_epochs": session.args.teacher_forcing_decay_epochs,
+        "early_stopping_start_epoch": session.args.early_stopping_start_epoch,
         "shuffle_policy": SHUFFLE_POLICY,
         "loss": getattr(session.args, "loss", "mse"),
         "model_method_contract": model_method_contract(session),
@@ -284,7 +294,9 @@ RESUME_IDENTITY_FIELDS = (
     "protocol", "dataset", "model", "seed", "config_sha256", "plan_sha256",
     "payload_sha256", "unseen_sha256", "manifest_sha256", "static_asset_hash",
     "train_exposure_hash", "validation_exposure_hash", "split_fractions",
-    "teacher_forcing_policy", "shuffle_policy", "seed_contract", "loss",
+    "teacher_forcing_policy", "teacher_forcing_mode",
+    "teacher_forcing_decay_epochs", "early_stopping_start_epoch",
+    "shuffle_policy", "seed_contract", "loss",
     "parameter_count", "model_method_contract",
 )
 
@@ -414,6 +426,13 @@ def build_scheduler(session, optimizer):
     raise RunnerRefused(f"unknown scheduler {setting!r}; none is added here")
 
 
+def next_patience_wait(current, improved, epoch, start_epoch):
+    """Update only the termination counter; checkpoint selection is ungated."""
+    if int(epoch) < int(start_epoch):
+        return 0
+    return 0 if improved else int(current) + 1
+
+
 def load_plan_authority(plan_path=None):
     """Load a supported active plan; archived plans are never authorities."""
     if plan_path is None:
@@ -422,16 +441,40 @@ def load_plan_authority(plan_path=None):
     if not plan_path.exists():
         raise RunnerRefused(f"{plan_path} does not exist")
     active = (ROOT / "configs/paper/final_plan.json").resolve()
-    if plan_path.resolve() != active:
+    candidate = (ROOT / "configs/paper/alfnet_candidate_plan.json").resolve()
+    tf_candidate = (ROOT / "configs/paper/teacher_forcing_candidate_plan.json").resolve()
+    fixed50 = (ROOT / "configs/paper/teacher_forcing_fixed50_plan.json").resolve()
+    if plan_path.resolve() not in {active, candidate, tf_candidate, fixed50}:
         raise RunnerRefused(
-            f"{plan_path} is not the sole active unified-BASE plan; old final "
-            "and candidate plans are archived evidence, not authorities")
+            f"{plan_path} is neither the active reproduction plan nor the one "
+            "registered validation-only ALFNet candidate plan")
     kind = json.loads(plan_path.read_text("utf-8")).get("kind")
     if kind == "v4_unified_base_comparison_plan":
         from scripts import build_final_plan
         try:
             return build_final_plan.assert_plan_still_holds(
                 build_final_plan.load_plan(plan_path))
+        except ValueError as error:
+            raise RunnerRefused(f"{plan_path}: {error}") from error
+    if kind == "v4_alfnet_validation_candidates":
+        from scripts import build_alfnet_candidates
+        try:
+            return build_alfnet_candidates.assert_plan_still_holds(
+                build_alfnet_candidates.load_plan(plan_path))
+        except ValueError as error:
+            raise RunnerRefused(f"{plan_path}: {error}") from error
+    if kind == "v4_teacher_forcing_validation_candidates":
+        from scripts import build_teacher_forcing_candidates
+        try:
+            return build_teacher_forcing_candidates.assert_plan_still_holds(
+                build_teacher_forcing_candidates.load_plan(plan_path))
+        except ValueError as error:
+            raise RunnerRefused(f"{plan_path}: {error}") from error
+    if kind == "v4_teacher_forcing_fixed50_candidates":
+        from scripts import build_teacher_forcing_fixed_candidates
+        try:
+            return build_teacher_forcing_fixed_candidates.assert_plan_still_holds(
+                build_teacher_forcing_fixed_candidates.load_plan(plan_path))
         except ValueError as error:
             raise RunnerRefused(f"{plan_path}: {error}") from error
     raise RunnerRefused(f"{plan_path} declares unsupported kind={kind!r}")
@@ -492,8 +535,13 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
     scheduler = build_scheduler(session, optimizer)
     epochs = int(max_epochs if max_epochs is not None else session.args.max_epoch)
     patience = int(session.args.patience)
+    early_stopping_start_epoch = int(session.args.early_stopping_start_epoch)
 
     history, best, best_table = [], {"epoch": None, "life_avg_mae": None}, None
+    selection_metric_name = ("validation 33-cell main/LifeAvg/MAE"
+                             if max_validation_batches is None
+                             or collect_development_table
+                             else "partial-smoke micro LifeAvg MAE")
     start_epoch, wait = 0, 0
     if resume and run_artefacts(run_directory):
         state = load_run_state(run_directory, session, config_path, config_sha, plan)
@@ -523,15 +571,26 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
         train_report = train_one_epoch(session, optimizer, epoch,
                                        max_batches=max_train_batches,
                                        loss_name=session.args.loss)
+        # A capped validation is a smoke/preflight and may not contain every
+        # scenario/phase required by the 33-cell table. Full production runs
+        # always collect the canonical table in this same forward pass.
+        want_selection_table = (max_validation_batches is None
+                                or collect_development_table)
         validation_result = validate(
             session, epoch=epoch, max_batches=max_validation_batches,
             loss_name=session.args.loss,
-            return_cell_table=collect_development_table)
-        if collect_development_table:
+            return_cell_table=want_selection_table)
+        if isinstance(validation_result, tuple):
             validation_report, candidate_table = validation_result
+            candidate = early_stopping_metric(validation_report, candidate_table)
+            selection_metric_name = "validation 33-cell main/LifeAvg/MAE"
         else:
             validation_report, candidate_table = validation_result, None
-        candidate = early_stopping_metric(validation_report)
+            candidate = float(validation_report["life_avg_mae"])
+            validation_report["micro_life_avg_mae"] = candidate
+            validation_report["checkpoint_life_avg_mae"] = candidate
+            selection_metric_name = "partial-smoke micro LifeAvg MAE"
+        validation_report["checkpoint_metric_name"] = selection_metric_name
         history.append({"epoch": epoch, "train": train_report,
                         "validation": validation_report})
         # One line per epoch, flushed. A multi-day queue with no output is
@@ -546,7 +605,12 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
         # Strictly less than: a tie keeps the earlier epoch, decided before any
         # number existed and recorded in the checkpoint.
         improved = best["life_avg_mae"] is None or candidate < best["life_avg_mae"]
-        wait = 0 if improved else wait + 1
+        # A scheduled-input candidate may protect its declared transition
+        # period without excluding early checkpoints from selection.  Only the
+        # termination counter is gated; every epoch still competes on the same
+        # validation LifeAvg MAE.
+        wait = next_patience_wait(
+            wait, improved, epoch, early_stopping_start_epoch)
         if improved:
             best = {"epoch": epoch, "life_avg_mae": candidate}
             if collect_development_table:
@@ -580,7 +644,11 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
         "config_sha256": config_sha, "run_directory": str(run_directory),
         "epochs_run": len(history), "best_epoch": best["epoch"],
         "best_validation_life_avg_mae": best["life_avg_mae"],
-        "early_stopping_metric": "validation life_avg_mae", "tie_rule": TIE_RULE,
+        "early_stopping_metric": selection_metric_name,
+        "tie_rule": TIE_RULE,
+        "early_stopping_start_epoch": early_stopping_start_epoch,
+        "teacher_forcing_mode": session.args.teacher_forcing_mode,
+        "teacher_forcing_decay_epochs": session.args.teacher_forcing_decay_epochs,
         "parameter_count": sum(p.numel() for p in session.model.parameters()),
         "model_method_contract": model_method_contract(session),
         "history": history,

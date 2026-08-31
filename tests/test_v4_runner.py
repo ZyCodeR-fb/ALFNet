@@ -83,6 +83,16 @@ def test_the_ratio_reproduces_the_v3_schedule(epoch, expected):
         assert 0.0 < teacher_forcing_ratio(epoch) < 1.0
 
 
+def test_free_run_never_reads_future_targets():
+    for epoch in (0, 1, 20, 40, 100):
+        assert teacher_forcing_ratio(epoch, mode="free_run") == 0.0
+
+
+def test_a_declared_decay_length_controls_the_schedule():
+    assert teacher_forcing_ratio(10, decay_epochs=20) == pytest.approx(0.5)
+    assert teacher_forcing_ratio(20, decay_epochs=20) == 0.0
+
+
 def test_the_policy_is_stable_across_processes():
     """SHA256, not Python's per-process salted `hash`.
 
@@ -137,6 +147,8 @@ def test_the_mask_is_a_subset_of_decoder_availability(train_dataset):
         mask = build_v4_teacher_forcing_mask(batch, 32, epoch, True)
         assert not bool((mask & ~available).any())
     assert bool(build_v4_teacher_forcing_mask(batch, 32, 0, True).any())
+    assert not bool(build_v4_teacher_forcing_mask(
+        batch, 32, 0, True)[:, -1, :].any())
 
 
 def test_validation_and_test_masks_are_empty(train_dataset):
@@ -339,7 +351,9 @@ def test_validation_updates_nothing(who):
     assert optimizer.state_dict()["state"] == {}
     assert report["teacher_forcing_ratio"] == 0.0
     assert report["count"] > 0 and report["scenarios_present"] >= 1
-    assert early_stopping_metric(report) == report["life_avg_mae"]
+    table = {"split": "validation", "main": {"LifeAvg": {"MAE": 12.5}}}
+    assert early_stopping_metric(report, table) == 12.5
+    assert report["micro_life_avg_mae"] == report["life_avg_mae"]
     for key in ("mae", "mse", "life_avg_mae"):
         assert report[key] == report[key] and report[key] < float("inf"), key
 

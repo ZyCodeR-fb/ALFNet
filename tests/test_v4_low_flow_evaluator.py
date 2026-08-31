@@ -8,6 +8,7 @@ from experiments.v4_low_flow_evaluator import (
     LowFlowRefused,
     compare_reports,
 )
+from scripts.eval_v4_low_flow import expected_low_flow_identity
 
 
 def _batch():
@@ -70,3 +71,40 @@ def test_model_comparison_checks_counts_and_reports_left_minus_right():
     right["sample_count"] += 1
     with pytest.raises(LowFlowRefused, match="sample_count"):
         compare_reports(left, right)
+
+
+def test_candidate_low_flow_identity_is_bound_to_its_exact_config():
+    class _Context:
+        def __init__(self, static, exposure):
+            self._static, self._exposure = static, exposure
+
+        def static_asset_hash(self):
+            return self._static
+
+        def exposure_hash(self):
+            return self._exposure
+
+    run = SimpleNamespace(
+        name="PEMS03/ALFNet[LOW]/seed32", dataset="PEMS03", model="ALFNet",
+        seed=32, entry={"candidate": "LOW"})
+    session = SimpleNamespace(
+        args=SimpleNamespace(model_variant="LOW"),
+        train_context=_Context("static", "train"),
+        validation_context=_Context("static", "validation"),
+        seed_contract={"run_seed": 32})
+    plan = {
+        "kind": "v4_alfnet_validation_candidates",
+        "configs": {"BASE": {"sha256": "base-config"},
+                    "LOW": {"sha256": "low-config"}},
+        "data": {"PEMS03": {
+            "payload_sha256": "payload", "unseen_sha256": "unseen",
+            "manifest_sha256": "manifest"}},
+    }
+    identity = expected_low_flow_identity(run, session, plan)
+    assert identity["config_sha256"] == "low-config"
+    assert identity["model_variant"] == "LOW"
+    assert identity["validation_exposure_hash"] == "validation"
+
+    run.entry = {"candidate": "MISSING"}
+    with pytest.raises(ValueError, match="no config authority"):
+        expected_low_flow_identity(run, session, plan)

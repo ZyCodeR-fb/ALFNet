@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Sampler
 
 from args import load_args_from_config
@@ -27,13 +28,14 @@ from data_provider.lifecycle_roles import ROLE_CHANNEL_COUNT
 from data_provider.v4_lifecycle_loader import V4LifecycleDataset
 from experiments.v4_losses import (
     element_loss,
-    role_balanced_loss,
+    role_balanced_loss, role_balanced_elements,
 )
 from lib.lcbt_v4 import (
     SHUFFLE_POLICY,
     assert_v4_strategy,
     build_v4_teacher_forcing_mask,
     shuffle_seed,
+    teacher_forcing_eligible_mask,
     teacher_forcing_metadata,
 )
 from lib.runtime_context import build_runtime_context
@@ -312,6 +314,35 @@ def _alfnet_role_mix(prediction, batch, valid, meta, loss_name):
     return role_loss, float(meta.get("forecast_role_balanced_beta", 0.1))
 
 
+def _alfnet_scale_loss(prediction, target, batch, valid, meta, scaler):
+    """Stable low-value emphasis without a target-dependent denominator.
+
+    The signed log transform is smooth on both sides of zero and compresses
+    large flow values.  Its scale is derived only from the training scaler, so
+    neither validation/test values nor ``1/|target|`` weighting can leak into
+    the objective.  Huber limits the influence of a few large transformed
+    residuals; lifecycle roles are aggregated by the same contract as BASE.
+    """
+    if meta.get("forecast_scale_loss_mode") != "signed_log_huber":
+        return None, None
+    if scaler is None:
+        raise RunnerRefused("signed_log_huber requires the train-only scaler")
+    weight = float(meta.get("forecast_scale_loss_weight", 0.0))
+    fraction = float(meta.get("forecast_scale_loss_scale_fraction", 0.05))
+    if not 0.0 <= weight <= 1.0 or not fraction > 0.0:
+        raise RunnerRefused("invalid signed_log_huber weight/scale fraction")
+    scale = max(1.0, abs(float(scaler["std"])) * fraction)
+    mean, std = float(scaler["mean"]), float(scaler["std"])
+    predicted_raw = prediction * std + mean
+    target_raw = target * std + mean
+    transform = lambda value: torch.sign(value) * torch.log1p(value.abs() / scale)
+    elements = F.smooth_l1_loss(
+        transform(predicted_raw), transform(target_raw), reduction="none")
+    last_role = batch["lifecycle_context"][:, -1, :, :ROLE_CHANNEL_COUNT]
+    loss = role_balanced_elements(elements, valid, last_role)
+    return loss, weight
+
+
 def compute_losses(model_output, batch, loss_name="mse", scaler=None):
     """Split the objective into what is shared and what the model declared.
 
@@ -332,18 +363,24 @@ def compute_losses(model_output, batch, loss_name="mse", scaler=None):
     base = base_loss(prediction, target, valid, loss_name)
     if base is None:
         return {"prediction": prediction, "valid": valid, "base": None,
-                "optimize": None, "role_mix": None, "aux": None,
+                "optimize": None, "role_mix": None, "scale_mix": None,
+                "aux": None,
                 "meta": meta}
 
     optimize = base
     role_loss, beta = _alfnet_role_mix(prediction, batch, valid, meta, loss_name)
     if role_loss is not None:
         optimize = (1.0 - beta) * optimize + beta * role_loss
+    scale_loss, scale_weight = _alfnet_scale_loss(
+        prediction, target, batch, valid, meta, scaler)
+    if scale_loss is not None:
+        optimize = (1.0 - scale_weight) * optimize + scale_weight * scale_loss
     aux = sum_aux_losses(meta.get("aux_losses"), device=prediction.device)
     if aux is not None:
         optimize = optimize + aux
     return {"prediction": prediction, "valid": valid, "base": base,
             "optimize": optimize, "role_mix": role_loss,
+            "scale_mix": scale_loss,
             "aux": aux, "meta": meta}
 
 
@@ -384,22 +421,26 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
         epoch_hook(epoch)
     session.set_epoch(epoch)
     totals = {"batches": 0, "skipped": 0, "base": 0.0, "optimize": 0.0,
-              "role_mix": 0.0, "aux": 0.0,
+              "role_mix": 0.0, "scale_mix": 0.0, "aux": 0.0,
               "forced_positions": 0,
               "available_positions": 0}
     # Counted separately from the sums: a model that declares no role-mix term
     # must report `None`, not the 0.0 that an absent term and a zero-valued one
     # would otherwise share. MoGERNN declares none and gets no stand-in.
-    contributed = {"base": 0, "optimize": 0, "role_mix": 0,
+    contributed = {"base": 0, "optimize": 0, "role_mix": 0, "scale_mix": 0,
                    "aux": 0}
     for index, batch in enumerate(session.train_loader):
         if max_batches is not None and index >= max_batches:
             break
         batch = to_device(batch, session.device)
         teacher_seed = session.seed_contract["derived"]["teacher_forcing"]
-        teacher = build_v4_teacher_forcing_mask(batch, teacher_seed, epoch, True)
+        teacher = build_v4_teacher_forcing_mask(
+            batch, teacher_seed, epoch, True,
+            mode=session.args.teacher_forcing_mode,
+            decay_epochs=session.args.teacher_forcing_decay_epochs)
         totals["forced_positions"] += int(teacher.sum())
-        totals["available_positions"] += int(batch["decoder_available_mask"].sum())
+        totals["available_positions"] += int(
+            teacher_forcing_eligible_mask(batch).sum())
         optimizer.zero_grad(set_to_none=True)
         losses = compute_losses(_forward(session, batch, session.train_context,
                                          epoch, teacher), batch, loss_name,
@@ -412,7 +453,7 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
         losses["optimize"].backward()
         optimizer.step()
         totals["batches"] += 1
-        for key in ("base", "optimize", "role_mix", "aux"):
+        for key in ("base", "optimize", "role_mix", "scale_mix", "aux"):
             if losses[key] is not None:
                 totals[key] += float(losses[key].detach())
                 contributed[key] += 1
@@ -421,12 +462,14 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
             f"epoch {epoch} produced no batch with a valid loss position; "
             "refusing to report a zero")
     report = {key: (totals[key] / contributed[key] if contributed[key] else None)
-              for key in ("base", "optimize", "role_mix", "aux")}
+              for key in ("base", "optimize", "role_mix", "scale_mix", "aux")}
     report.update({"batches": totals["batches"], "skipped": totals["skipped"],
                    "forced_positions": totals["forced_positions"],
                    "available_positions": totals["available_positions"]})
     report.update(teacher_forcing_metadata(
-        session.seed_contract["derived"]["teacher_forcing"], epoch, True))
+        session.seed_contract["derived"]["teacher_forcing"], epoch, True,
+        mode=session.args.teacher_forcing_mode,
+        decay_epochs=session.args.teacher_forcing_decay_epochs))
     report["run_seed"] = session.run_seed
     return report
 
@@ -457,7 +500,8 @@ def validate(session, epoch=0, max_batches=None, loss_name="mse",
         batch = to_device(batch, session.device)
         teacher = build_v4_teacher_forcing_mask(
             batch, session.seed_contract["derived"]["teacher_forcing"],
-            epoch, False)
+            epoch, False, mode=session.args.teacher_forcing_mode,
+            decay_epochs=session.args.teacher_forcing_decay_epochs)
         if bool(teacher.any()):
             raise RunnerRefused("validation produced a non-empty teacher mask")
         prediction, _ = unpack_model_output(
@@ -513,6 +557,20 @@ def validate(session, epoch=0, max_batches=None, loss_name="mse",
     return report
 
 
-def early_stopping_metric(validation_report):
-    """The only checkpoint score this runner offers; it never reads test."""
-    return validation_report["life_avg_mae"]
+def early_stopping_metric(validation_report, cell_table):
+    """The reported 33-cell main/LifeAvg/MAE, from this same forward pass."""
+    try:
+        value = float(cell_table["main"]["LifeAvg"]["MAE"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise RunnerRefused(
+            "checkpoint selection requires validation 33-cell "
+            "main/LifeAvg/MAE") from error
+    if not torch.isfinite(torch.tensor(value)):
+        raise RunnerRefused("validation 33-cell main/LifeAvg/MAE is not finite")
+    if cell_table.get("split") != "validation":
+        raise RunnerRefused("checkpoint selection table is not validation")
+    # Retain the raw micro-aggregated diagnostic, but never silently confuse it
+    # with the calendar/k/tau-balanced paper endpoint used for selection.
+    validation_report["micro_life_avg_mae"] = validation_report["life_avg_mae"]
+    validation_report["checkpoint_life_avg_mae"] = value
+    return value
