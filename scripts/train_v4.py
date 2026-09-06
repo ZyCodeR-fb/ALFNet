@@ -120,9 +120,23 @@ def model_method_contract(session):
     return {
         "decoder_training_policy": decoder_training_metadata(
             session, 0, True)["decoder_training_policy"],
+        "decoder_output_mode": getattr(
+            graph, "decoder_output_mode", None),
         "graph_support_set": getattr(graph, "moge_support_set", None),
         "graph_support_names": list(getattr(
             graph, "resolved_support_names", ())),
+        "synthetic_unseen_training_mode": getattr(
+            session.model, "synthetic_unseen_training_mode", None),
+        "synthetic_unseen_fraction": getattr(
+            session.model, "synthetic_unseen_fraction", 0.0),
+        "synthetic_unseen_loss_weight": getattr(
+            session.model, "synthetic_unseen_loss_weight", 0.0),
+        "reliability_polynomial_mode": getattr(
+            session.model, "reliability_polynomial_mode", None),
+        "low_flow_calibration_mode": getattr(
+            session.model, "low_flow_calibration_mode", None),
+        "low_flow_bin_loss_weight": getattr(
+            session.model, "low_flow_bin_loss_weight", 0.0),
     }
 
 
@@ -169,6 +183,10 @@ def checkpoint_payload(session, config_path, config_sha, epoch, best_epoch,
                      "over loss_mask & isfinite"),
             "role_balanced_mix": train_report.get("role_mix") is not None,
             "signed_log_huber_mix": train_report.get("scale_mix") is not None,
+            "synthetic_unseen_reconstruction_mix":
+                train_report.get("synthetic_unseen_mix") is not None,
+            "train_scale_bin_mix":
+                train_report.get("low_flow_bin_mix") is not None,
             "model_aux_losses": train_report.get("aux") is not None,
         },
         "model_method_contract": model_method_contract(session),
@@ -445,8 +463,19 @@ def load_plan_authority(plan_path=None):
     tf_candidate = (ROOT / "configs/paper/teacher_forcing_candidate_plan.json").resolve()
     fixed50 = (ROOT / "configs/paper/teacher_forcing_fixed50_plan.json").resolve()
     alf_tf40 = (ROOT / "configs/paper/alfnet_tf40_candidate_plan.json").resolve()
+    direct_head = (ROOT / "configs/paper/direct_head_candidate_plan.json").resolve()
+    final_structure = (
+        ROOT / "configs/paper/masked_node_candidate_plan.json").resolve()
+    ar_base_transfer = (
+        ROOT / "configs/paper/ar_base_transfer_plan.json").resolve()
+    corrected_baseline = (
+        ROOT / "configs/paper/corrected_baseline_seed32_plan.json").resolve()
+    metrla_nine = (
+        ROOT / "configs/paper/metrla_seed32_nine_models_plan.json").resolve()
     if plan_path.resolve() not in {
-            active, candidate, tf_candidate, fixed50, alf_tf40}:
+            active, candidate, tf_candidate, fixed50, alf_tf40, direct_head,
+            final_structure, ar_base_transfer, corrected_baseline,
+            metrla_nine}:
         raise RunnerRefused(
             f"{plan_path} is neither the active reproduction plan nor the one "
             "registered validation-only ALFNet candidate plan")
@@ -484,6 +513,41 @@ def load_plan_authority(plan_path=None):
         try:
             return build_alfnet_tf40_candidates.assert_plan_still_holds(
                 build_alfnet_tf40_candidates.load_plan(plan_path))
+        except ValueError as error:
+            raise RunnerRefused(f"{plan_path}: {error}") from error
+    if kind == "v4_direct_head_validation_candidates":
+        from scripts import build_direct_head_candidates
+        try:
+            return build_direct_head_candidates.assert_plan_still_holds(
+                build_direct_head_candidates.load_plan(plan_path))
+        except ValueError as error:
+            raise RunnerRefused(f"{plan_path}: {error}") from error
+    if kind == "v4_final_structure_validation_candidates":
+        from scripts import build_masked_node_candidates
+        try:
+            return build_masked_node_candidates.assert_plan_still_holds(
+                build_masked_node_candidates.load_plan(plan_path))
+        except ValueError as error:
+            raise RunnerRefused(f"{plan_path}: {error}") from error
+    if kind == "v4_ar_base_transfer_validation_runs":
+        from scripts import build_ar_base_transfer
+        try:
+            return build_ar_base_transfer.assert_plan_still_holds(
+                build_ar_base_transfer.load_plan(plan_path))
+        except ValueError as error:
+            raise RunnerRefused(f"{plan_path}: {error}") from error
+    if kind == "v4_corrected_baseline_seed32_validation_runs":
+        from scripts import build_corrected_baseline_seed32
+        try:
+            return build_corrected_baseline_seed32.assert_plan_still_holds(
+                build_corrected_baseline_seed32.load_plan(plan_path))
+        except ValueError as error:
+            raise RunnerRefused(f"{plan_path}: {error}") from error
+    if kind == "v4_metrla_seed32_nine_models_validation_runs":
+        from scripts import build_metrla_seed32_nine_models
+        try:
+            return build_metrla_seed32_nine_models.assert_plan_still_holds(
+                build_metrla_seed32_nine_models.load_plan(plan_path))
         except ValueError as error:
             raise RunnerRefused(f"{plan_path}: {error}") from error
     raise RunnerRefused(f"{plan_path} declares unsupported kind={kind!r}")
