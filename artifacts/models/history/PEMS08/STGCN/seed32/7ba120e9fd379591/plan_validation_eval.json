@@ -1,0 +1,191 @@
+{
+ "agrees": false,
+ "best_epoch": 35,
+ "checkpoint_sha256": "e63f845880caf7eb48fef8245bc785919579eabb6187c16e8cce830c4745bcd7",
+ "compared_against_training_table": true,
+ "dataset": "PEMS08",
+ "device": "cuda:0",
+ "differences": [
+  "main/LifeAvg/MAPE: training 37.04943613838918 recomputed 37.049438518829135",
+  "main/Steady/MAPE: training 16.414136024081206 recomputed 16.41413882660179",
+  "main/Unseen/MAE: training 85.33040753456035 recomputed 85.33040925101386",
+  "main/Unseen/MAPE: training 84.6237051869201 recomputed 84.62371269957626",
+  "phase/Decay/RMSE: training 43.915222025370795 recomputed 43.91522368475309",
+  "phase/Onset/MAE: training 23.89001019335685 recomputed 23.890005369549797",
+  "phase/Onset/RMSE: training 32.30701216209806 recomputed 32.30700555960595",
+  "phase/Onset/MAPE: training 15.117248974089675 recomputed 15.117247098610846",
+  "phase/Outage/MAE: training 59.738671981217905 recomputed 59.738670067971476",
+  "phase/Outage/MAPE: training 35.488626551204845 recomputed 35.48862467640061"
+ ],
+ "evaluator_sha256": "5bf5405f2472478765fce13677c38edcaef02804f438a9cec21380ce9dcac796",
+ "execution_action": "train",
+ "identity": {
+  "config_sha256": "b9038efd35b952fc5de89c981cb2722c40ef8822c67acccf83649e62d52adba8",
+  "dataset": "PEMS08",
+  "manifest_sha256": "dbb807c5d344e5594bb901b753d1c0c9ee633202e430f9d7a53aae2fcd5fca16",
+  "model": "STGCN",
+  "model_variant": "stgcn_base_v4",
+  "payload_sha256": "7957e4bedf6d148ea47a2ceb8c7cfdbbffdec1d0082f7bcb6f0278e3e833b8e7",
+  "seed": 32,
+  "seed_contract": {
+   "derived": {
+    "dataloader_worker": 828029746,
+    "model_init": 3629130185,
+    "node_split": 32,
+    "shuffle": 1253112268,
+    "teacher_forcing": 1989104449,
+    "train_schedule": 1041815714,
+    "training_runtime": 2589390587
+   },
+   "evaluation_design_seed": 12026,
+   "policy": "lcbt_v4_named_subseeds_v1_frozen_direct_node_split",
+   "run_seed": 32
+  },
+  "static_asset_hash": "4fa629d659052575382fbdb804ef65a5a76c3e2415436f948ee789ba1569aa77",
+  "train_exposure_hash": "6d7b210e3c9c542afb7b01552619f19afdacf20bb169ef7732fe78ea3e572165",
+  "unseen_sha256": "618aa41a90d659b0435de8ff39b501d112f38eac0517f0893d49c1d809f16b5d",
+  "validation_exposure_hash": "71d142c4ab3d910b33bc912dbbaffd971e0fc7630bb8dbf34b3316c9fd807921"
+ },
+ "max_abs_cell_difference": 7.5126561540628245e-06,
+ "model": "STGCN",
+ "partial_diagnostic_only": false,
+ "plan_sha256": "c8d6b8cab91ece2130171458a718c00be95cba138ec1c6521551933660817cac",
+ "plan_validation_only": true,
+ "recomputed": {
+  "aggregation": {
+   "LifeAvg": "mean(Unseen, Steady, Join, Fault)",
+   "across_k": "equal-weight mean over evidence lengths",
+   "mape_denominator": "clamp(|target|, min=1e-06)",
+   "row_metrics": "sum/count per cell (v4_metrics.row_metrics)",
+   "scale": "original units (normalised * std + mean)",
+   "within_k": "mean inside calendar stratum, then 5/7-2/7 weighted"
+  },
+  "development_validation_only": true,
+  "main": {
+   "Fault": {
+    "MAE": 34.63052339033232,
+    "MAPE": 22.893836578834794,
+    "RMSE": 46.11492511407521,
+    "finite": true,
+    "origin_count": 887,
+    "sample_count": 887,
+    "valid_target_count": 95816
+   },
+   "Join": {
+    "MAE": 32.87576326463094,
+    "MAPE": 24.266065970303696,
+    "RMSE": 44.55553532987846,
+    "finite": true,
+    "origin_count": 887,
+    "sample_count": 887,
+    "valid_target_count": 95944
+   },
+   "LifeAvg": {
+    "MAE": 44.01556789075915,
+    "MAPE": 37.049438518829135,
+    "RMSE": 56.8886102417938,
+    "derived_from": [
+     "Unseen",
+     "Steady",
+     "Join",
+     "Fault"
+    ],
+    "finite": true,
+    "origin_count": 3548,
+    "sample_count": 3548,
+    "valid_target_count": 387506
+   },
+   "Steady": {
+    "MAE": 23.2255756570595,
+    "MAPE": 16.41413882660179,
+    "RMSE": 31.162862987680498,
+    "finite": true,
+    "origin_count": 887,
+    "sample_count": 887,
+    "valid_target_count": 97779
+   },
+   "Unseen": {
+    "MAE": 85.33040925101386,
+    "MAPE": 84.62371269957626,
+    "RMSE": 105.721117535541,
+    "finite": true,
+    "origin_count": 887,
+    "sample_count": 887,
+    "valid_target_count": 97967
+   }
+  },
+  "note": "A development diagnostic on the validation split. Same shape as the reported tables on purpose; not a result.",
+  "phase": {
+   "Cold": {
+    "MAE": 48.774274650897645,
+    "MAPE": 38.96545925585989,
+    "RMSE": 62.489094937635414,
+    "finite": true,
+    "origin_count": 74,
+    "sample_count": 74,
+    "valid_target_count": 7973
+   },
+   "Decay": {
+    "MAE": 33.193760524646656,
+    "MAPE": 22.412016717100606,
+    "RMSE": 43.91522368475309,
+    "finite": true,
+    "origin_count": 740,
+    "sample_count": 740,
+    "valid_target_count": 79977
+   },
+   "Onset": {
+    "MAE": 23.890005369549797,
+    "MAPE": 15.117247098610846,
+    "RMSE": 32.30700555960595,
+    "finite": true,
+    "origin_count": 73,
+    "sample_count": 73,
+    "valid_target_count": 7808
+   },
+   "Outage": {
+    "MAE": 59.738670067971476,
+    "MAPE": 35.48862467640061,
+    "RMSE": 81.91985896176566,
+    "finite": true,
+    "origin_count": 74,
+    "sample_count": 74,
+    "valid_target_count": 8031
+   },
+   "Ready": {
+    "MAE": 27.670498119261598,
+    "MAPE": 19.517649894571818,
+    "RMSE": 38.297690318885685,
+    "finite": true,
+    "origin_count": 73,
+    "sample_count": 73,
+    "valid_target_count": 7827
+   },
+   "Warm": {
+    "MAE": 31.8064386405412,
+    "MAPE": 23.270968249321264,
+    "RMSE": 43.387963870202036,
+    "finite": true,
+    "origin_count": 740,
+    "sample_count": 740,
+    "valid_target_count": 80144
+   }
+  },
+  "schema_version": 1,
+  "split": "validation"
+ },
+ "run": "PEMS08/STGCN/seed32",
+ "run_directory": "outputs_v4/final_comparisons/c8d6b8cab91ece2130171458a718c00be95cba138ec1c6521551933660817cac/PEMS08/STGCN/b9038efd35b952fc/seed32",
+ "run_seed_used": 32,
+ "scaler": {
+  "mean": 236.37462183693214,
+  "refit": false,
+  "source": "checkpoint",
+  "std": 148.29461785344907
+ },
+ "schema_version": 1,
+ "seed": 32,
+ "source_plan_sha256": null,
+ "split": "validation",
+ "tolerance": 1e-06
+}

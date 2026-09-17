@@ -140,6 +140,23 @@ class WindowAttBlock(nn.Module):
             dropout=float(crossformer_dropout),
         )
 
+    def forward_local(self, x):
+        """Same parameters; attention sees one node's temporal patches only.
+
+        Learned routers are shared latent tokens, never sample/node features.
+        Both attention stages and feed-forward layers remain active.
+        """
+        b, t, n, d = x.shape
+        seq = x.permute(0, 2, 1, 3).reshape(b * n, t, d)
+        a = self.tsa
+        seq = a.norm1(seq + a.dropout(a.time_attention(seq, seq, seq)))
+        seq = a.norm2(seq + a.dropout(a.MLP1(seq)))
+        latent = a.router.reshape(1, -1, d).expand(b * n, -1, -1)
+        buffer = a.dim_sender(latent, seq, seq)
+        seq = a.norm3(seq + a.dropout(a.dim_receiver(seq, buffer, buffer)))
+        seq = a.norm4(seq + a.dropout(a.MLP2(seq)))
+        return seq.reshape(b, n, t, d).permute(0, 2, 1, 3).contiguous()
+
     def forward(self, x):
         batch, time_steps, token_count, hidden_dim = x.shape
         if self.num * self.size != token_count:
@@ -247,6 +264,11 @@ class PatchSTG(nn.Module):
 
     def forward(self, x, te):
         embedded_x = self.embedding(x, te)
+        if getattr(self, "local_context_only", False):
+            for block in self.spa_encoder:
+                embedded_x = block.forward_local(embedded_x)
+            return embedded_x.permute(0, 2, 1, 3).reshape(
+                embedded_x.shape[0], self.node_num, -1)
         reordered = embedded_x[:, :, self.reo_all_idx, :]
         for block in self.spa_encoder:
             reordered = block(reordered)

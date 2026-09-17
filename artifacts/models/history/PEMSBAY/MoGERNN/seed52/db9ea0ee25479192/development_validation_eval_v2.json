@@ -1,0 +1,179 @@
+{
+ "agrees": true,
+ "best_epoch": 46,
+ "checkpoint_sha256": "f2634e9bae9019c8c5d371e3237460c6942d8ce650a97619afc3ad44887172e1",
+ "code_sha256": {
+  "experiments/v4_runner.py": "9a0df460fa17205139e43f147bf98eb03080643ffaf8e040e35c3401cda51e29",
+  "experiments/v4_validation_collector.py": "90416de97cc86cd318a442614c28904c40c9394d3e392ee818d26230c5317099",
+  "lib/lcbt_v4.py": "6963b3a3985502adef1d58901094a7940538de576103ebd9f0cf242e14f75e0a",
+  "scripts/train_v4.py": "8d96cf4da260d8800bf3de1c476ec73f03b1909fb0b8fe1319b5f987bf39aa0f"
+ },
+ "correction": "post-registration analysis correction: v1 passed no run seed, so seeds 42 and 52 were scored on seed 32's split",
+ "dataset": "PEMSBAY",
+ "development_validation_only": true,
+ "device": "cuda:0",
+ "differences": [],
+ "evaluator_sha256": "8eef7d52d69616333c7dbab45b6ae8d09cf9ca9dba18d6bed3730c5d39f12515",
+ "identity": {
+  "config_path": "configs/paper/v4/PEMSBAY_MoGERNN.yaml",
+  "config_sha256": "e136dfa2ea11739c6d729a96dac35d7dbbaac621f0640975792976c9c3797974",
+  "dataset": "PEMSBAY",
+  "manifest_sha256": "ec11f32bf5cdd0984a90e14717b9e0a4803bd9381c31a02c2b1587a8332ecaf0",
+  "model": "MoGERNN",
+  "model_variant": "mg_v4",
+  "payload_sha256": "d646d456b26753f708e06b09034a5f30302fb47e5a276072a7c06d20d4fcb69b",
+  "plan_sha256": "deec6445a1d58cb4efb6dad9198c4e4bcc00a3646315234094751ecf16698a6f",
+  "seed": 52,
+  "static_asset_hash": "534b80ce48517fca3d10449c5850fb75d4ece992c343d347bbaa1a601208186b",
+  "train_exposure_hash": "496e3d85ccb2103e1fc36768bd0f6df33356a2573b3629142538a1dd5b87d7f8",
+  "unseen_sha256": "832288f54155e1fa67eeb13f1dc3ef87d46b445ac8321eef54586820da9cbef7",
+  "validation_exposure_hash": "67d4e3f32b67f779abead3d1c886c15a9222bf637da10826ec55972560d3b2ed"
+ },
+ "max_abs_cell_difference": 0.0,
+ "model": "MoGERNN",
+ "partial_diagnostic_only": false,
+ "recomputed": {
+  "aggregation": {
+   "LifeAvg": "mean(Unseen, Steady, Join, Fault)",
+   "WorstGroup": "max(Unseen, Steady, Join, Fault)",
+   "across_k": "equal-weight mean over evidence lengths",
+   "mape_denominator": "clamp(|target|, min=1e-06)",
+   "row_metrics": "sum/count per cell (ples_protocol._row_metrics_v2)",
+   "scale": "original units (normalised * std + mean)",
+   "within_k": "mean inside calendar stratum, then 5/7-2/7 weighted"
+  },
+  "development_validation_only": true,
+  "main": {
+   "Fault": {
+    "MAE": 2.901064672149585,
+    "MAPE": 7.485214691232382,
+    "RMSE": 4.45949840379777,
+    "finite": true,
+    "origin_count": 2600,
+    "sample_count": 2600,
+    "valid_target_count": 560228
+   },
+   "Join": {
+    "MAE": 2.689762380582703,
+    "MAPE": 6.676117339019824,
+    "RMSE": 4.3448662469763635,
+    "finite": true,
+    "origin_count": 2600,
+    "sample_count": 2600,
+    "valid_target_count": 560197
+   },
+   "LifeAvg": {
+    "MAE": 3.127983932455994,
+    "MAPE": 7.834542863441567,
+    "RMSE": 4.757704617423777,
+    "derived_from": [
+     "Unseen",
+     "Steady",
+     "Join",
+     "Fault"
+    ],
+    "finite": true,
+    "origin_count": 10400,
+    "sample_count": 10400,
+    "valid_target_count": 2241419
+   },
+   "Steady": {
+    "MAE": 2.2954367889595186,
+    "MAPE": 5.557382626970842,
+    "RMSE": 3.636663664828926,
+    "finite": true,
+    "origin_count": 2600,
+    "sample_count": 2600,
+    "valid_target_count": 560515
+   },
+   "Unseen": {
+    "MAE": 4.62567188813217,
+    "MAPE": 11.619456796543217,
+    "RMSE": 6.58979015409205,
+    "finite": true,
+    "origin_count": 2600,
+    "sample_count": 2600,
+    "valid_target_count": 560479
+   },
+   "WorstGroup": {
+    "MAE": 4.62567188813217,
+    "MAPE": 11.619456796543217,
+    "RMSE": 6.58979015409205,
+    "derived_from": [
+     "Unseen",
+     "Steady",
+     "Join",
+     "Fault"
+    ],
+    "finite": true,
+    "origin_count": 10400,
+    "sample_count": 10400,
+    "valid_target_count": 2241419
+   }
+  },
+  "note": "A development diagnostic on the validation split. Same shape as the reported tables on purpose; not a result.",
+  "phase": {
+   "Cold": {
+    "MAE": 2.900190107930804,
+    "MAPE": 7.066415081325711,
+    "RMSE": 4.576310142219954,
+    "finite": true,
+    "origin_count": 217,
+    "sample_count": 217,
+    "valid_target_count": 46841
+   },
+   "Decay": {
+    "MAE": 2.812094207320877,
+    "MAPE": 7.218889124399375,
+    "RMSE": 4.337845957353613,
+    "finite": true,
+    "origin_count": 2168,
+    "sample_count": 2168,
+    "valid_target_count": 467111
+   },
+   "Onset": {
+    "MAE": 2.63332731199728,
+    "MAPE": 7.478324924599526,
+    "RMSE": 4.275867614804374,
+    "finite": true,
+    "origin_count": 216,
+    "sample_count": 216,
+    "valid_target_count": 46560
+   },
+   "Outage": {
+    "MAE": 4.058506680588973,
+    "MAPE": 10.155360126195298,
+    "RMSE": 5.85965365723274,
+    "finite": true,
+    "origin_count": 216,
+    "sample_count": 216,
+    "valid_target_count": 46557
+   },
+   "Ready": {
+    "MAE": 2.873088949247322,
+    "MAPE": 6.669903620052281,
+    "RMSE": 4.55398933414318,
+    "finite": true,
+    "origin_count": 216,
+    "sample_count": 216,
+    "valid_target_count": 46553
+   },
+   "Warm": {
+    "MAE": 2.6503869509814315,
+    "MAPE": 6.637708936685991,
+    "RMSE": 4.300809548735321,
+    "finite": true,
+    "origin_count": 2167,
+    "sample_count": 2167,
+    "valid_target_count": 466803
+   }
+  },
+  "schema_version": 1,
+  "split": "validation"
+ },
+ "run": "PEMSBAY/MoGERNN/seed52",
+ "run_seed_used": 52,
+ "schema_version": 2,
+ "seed": 52,
+ "tolerance": 1e-06
+}

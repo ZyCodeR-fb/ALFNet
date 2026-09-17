@@ -1,0 +1,74 @@
+runtime:
+  model: STFiT
+  model_variant: metrla_STFiT_completion32
+  model_recipe: source_architecture_v4_adapter
+  mode: train
+  t_mark: false
+dataset:
+  dloader_name: METRLA
+  data_path: ./data_v4/METR-LA/raw_data.pkl
+  unknown_nodes_path: ./data_v4/METR-LA/unknown_nodes.npy
+  input_len: 12
+  pred_len: 12
+  look_back: 0
+  slide_step: 1
+  input_features: v
+  target_features: v
+  freq: min
+training:
+  device: cuda:0
+  seed: 32
+  max_epoch: 100
+  patience: 10
+  stop_based: val_lifecycle
+  batch_size: 16
+  num_workers: 0
+  loss: mae
+  optimizer: adam
+  scheduler: None
+  scheduler_patience: 1
+  lr: 0.002
+  weight_decay: 0.0001
+  d_model: 64
+  e_layers: 2
+  d_layers: 1
+  k_hop: 1
+  early_stopping_start_epoch: 0
+lifecycle:
+  train_for_async_lifecycle: false
+  lifecycle_role_features: false
+  lifecycle_history_age_feature: false
+  lifecycle_observation_mask_feature: false
+  lifecycle_age_mode: state_duration
+  lifecycle_training_strategy: lcbt_v4
+  lcbt_validation_seed: 12026
+  lcbt_train_end_ratio: 0.6
+  lcbt_val_end_ratio: 0.8
+  lcbt_test_start_ratio: 0.8
+  lcbt_scaler_end_ratio: 0.6
+  lcbt_zero_history_ratio: 0.25
+  lcbt_steady_ratio: 0.25
+  lcbt_join_ratio: 0.25
+  lcbt_fault_ratio: 0.25
+family:
+  model:
+    hidden_channels: 64
+    kernel_size: 3
+    K: 3
+    normalization: sym
+    bias: true
+  recipe:
+    graph_learning: true
+    dynamic_graph: true
+    dynamic_mix: true
+    aug_node: true
+    sim_loss: true
+    fst_loss: true
+    is_vae: false
+    anchor_lambda: 0.5
+    sparse_threshold: 0.9
+    gumbel_softmax: true
+    gumbel_tau: 1.0
+    vae_loss_weight: 2.0
+    legal_synthesis_donors: true
+    dense_cheb: true

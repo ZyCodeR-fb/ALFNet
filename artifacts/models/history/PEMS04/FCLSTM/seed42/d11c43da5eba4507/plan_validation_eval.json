@@ -1,0 +1,180 @@
+{
+ "agrees": true,
+ "best_epoch": 16,
+ "checkpoint_sha256": "87aab8298136a7f81e408e0f04b2c921fa6c3c36bb6a432ee6a4dba202bba24f",
+ "compared_against_training_table": true,
+ "dataset": "PEMS04",
+ "device": "cuda:0",
+ "differences": [],
+ "evaluator_sha256": "5bf5405f2472478765fce13677c38edcaef02804f438a9cec21380ce9dcac796",
+ "execution_action": "train",
+ "identity": {
+  "config_sha256": "85368f26a775ec562280dcc27b886b5596b41bb78f804c713967921e674a1478",
+  "dataset": "PEMS04",
+  "manifest_sha256": "57798fafc40ff10cd83fda40206004b59918f47248db069965c7825b65b56ac3",
+  "model": "FCLSTM",
+  "model_variant": "fclstm_base_v4",
+  "payload_sha256": "2eb914f2a18cbd5a15f47fde28b16affb1cda85bfaf6369b9b06c4382a9de6c8",
+  "seed": 42,
+  "seed_contract": {
+   "derived": {
+    "dataloader_worker": 2148868906,
+    "model_init": 1844306249,
+    "node_split": 42,
+    "shuffle": 2977765377,
+    "teacher_forcing": 1564268512,
+    "train_schedule": 3103046191,
+    "training_runtime": 2733585228
+   },
+   "evaluation_design_seed": 12026,
+   "policy": "lcbt_v4_named_subseeds_v1_frozen_direct_node_split",
+   "run_seed": 42
+  },
+  "static_asset_hash": "8452ac3a96bf3703ea94265ed6ca6cf2037c0b14f4738f69632ab03410f832f6",
+  "train_exposure_hash": "d60470a3937e72db4fbba3f9af986f871064ff38de6b2affb3216548a9d146c6",
+  "unseen_sha256": "15a8cfc0dfa93b1371dddd91080a161ead8dee045b077c4fcf9440f2d552acdc",
+  "validation_exposure_hash": "415984fdb6c07c7242d805a0c6bb291dee98ce73c1d0b69fd9b120439816674d"
+ },
+ "max_abs_cell_difference": 0.0,
+ "model": "FCLSTM",
+ "partial_diagnostic_only": false,
+ "plan_sha256": "c8d6b8cab91ece2130171458a718c00be95cba138ec1c6521551933660817cac",
+ "plan_validation_only": true,
+ "recomputed": {
+  "aggregation": {
+   "LifeAvg": "mean(Unseen, Steady, Join, Fault)",
+   "across_k": "equal-weight mean over evidence lengths",
+   "mape_denominator": "clamp(|target|, min=1e-06)",
+   "row_metrics": "sum/count per cell (v4_metrics.row_metrics)",
+   "scale": "original units (normalised * std + mean)",
+   "within_k": "mean inside calendar stratum, then 5/7-2/7 weighted"
+  },
+  "development_validation_only": true,
+  "main": {
+   "Fault": {
+    "MAE": 48.246245947016,
+    "MAPE": 43.79623553158917,
+    "RMSE": 62.48880006752123,
+    "finite": true,
+    "origin_count": 843,
+    "sample_count": 843,
+    "valid_target_count": 169315
+   },
+   "Join": {
+    "MAE": 33.225174232496855,
+    "MAPE": 29.67658257951753,
+    "RMSE": 47.42545582104319,
+    "finite": true,
+    "origin_count": 844,
+    "sample_count": 844,
+    "valid_target_count": 168651
+   },
+   "LifeAvg": {
+    "MAE": 61.24662317254007,
+    "MAPE": 64.8342016623205,
+    "RMSE": 78.51671582479126,
+    "derived_from": [
+     "Unseen",
+     "Steady",
+     "Join",
+     "Fault"
+    ],
+    "finite": true,
+    "origin_count": 3375,
+    "sample_count": 3375,
+    "valid_target_count": 679222
+   },
+   "Steady": {
+    "MAE": 27.754360050030044,
+    "MAPE": 18.635485946630187,
+    "RMSE": 38.70337829317971,
+    "finite": true,
+    "origin_count": 844,
+    "sample_count": 844,
+    "valid_target_count": 171627
+   },
+   "Unseen": {
+    "MAE": 135.76071246061736,
+    "MAPE": 167.2285025915451,
+    "RMSE": 165.44922911742094,
+    "finite": true,
+    "origin_count": 844,
+    "sample_count": 844,
+    "valid_target_count": 169629
+   }
+  },
+  "note": "A development diagnostic on the validation split. Same shape as the reported tables on purpose; not a result.",
+  "phase": {
+   "Cold": {
+    "MAE": 38.06322927248673,
+    "MAPE": 48.19638156205199,
+    "RMSE": 54.69403324367466,
+    "finite": true,
+    "origin_count": 71,
+    "sample_count": 71,
+    "valid_target_count": 14023
+   },
+   "Decay": {
+    "MAE": 42.688984028669,
+    "MAPE": 32.88934865338627,
+    "RMSE": 56.19701611491779,
+    "finite": true,
+    "origin_count": 703,
+    "sample_count": 703,
+    "valid_target_count": 141955
+   },
+   "Onset": {
+    "MAE": 29.635315637004375,
+    "MAPE": 23.186116587989748,
+    "RMSE": 42.204032561511,
+    "finite": true,
+    "origin_count": 70,
+    "sample_count": 70,
+    "valid_target_count": 13675
+   },
+   "Outage": {
+    "MAE": 122.42979544049768,
+    "MAPE": 173.4752232572176,
+    "RMSE": 145.691407099566,
+    "finite": true,
+    "origin_count": 70,
+    "sample_count": 70,
+    "valid_target_count": 13685
+   },
+   "Ready": {
+    "MAE": 31.955319369955408,
+    "MAPE": 17.957737578527034,
+    "RMSE": 46.44653970438003,
+    "finite": true,
+    "origin_count": 70,
+    "sample_count": 70,
+    "valid_target_count": 13656
+   },
+   "Warm": {
+    "MAE": 32.86835421475201,
+    "MAPE": 28.996487181363136,
+    "RMSE": 46.79648969044635,
+    "finite": true,
+    "origin_count": 703,
+    "sample_count": 703,
+    "valid_target_count": 140972
+   }
+  },
+  "schema_version": 1,
+  "split": "validation"
+ },
+ "run": "PEMS04/FCLSTM/seed42",
+ "run_directory": "outputs_v4/final_comparisons/c8d6b8cab91ece2130171458a718c00be95cba138ec1c6521551933660817cac/PEMS04/FCLSTM/85368f26a775ec56/seed42",
+ "run_seed_used": 42,
+ "scaler": {
+  "mean": 207.8630694443483,
+  "refit": false,
+  "source": "checkpoint",
+  "std": 153.76584441826205
+ },
+ "schema_version": 1,
+ "seed": 42,
+ "source_plan_sha256": null,
+ "split": "validation",
+ "tolerance": 1e-06
+}

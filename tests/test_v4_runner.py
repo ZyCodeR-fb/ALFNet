@@ -59,6 +59,9 @@ def train_dataset(train_context):
 
 
 def _session(model_name, batch_size=2, **kwargs):
+    # These bounded CPU tests do not test multiprocessing. Forking workers
+    # after model/BLAS warmup can deadlock and is unrelated to their contract.
+    kwargs.setdefault('num_workers', 0)
     return build_v4_session(CONFIGS[model_name], batch_size=batch_size, **kwargs)
 
 

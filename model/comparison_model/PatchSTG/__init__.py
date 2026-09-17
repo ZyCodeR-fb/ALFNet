@@ -145,4 +145,4 @@ class Model(SourceNativeV4Mixin, nn.Module):
         pred = self.backbone(full_x, full_te).contiguous()
         if x_enc.shape[2] != self.full_num_nodes:
             pred = pred[..., current_node_ids, :]
-        return {"pred": pred}
+        return {"pred": pred, "source_raw_mae": True}

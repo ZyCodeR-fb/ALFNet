@@ -318,6 +318,11 @@ class STConv(nn.Module):
         """
         T_0 = self._temporal_conv1(X)
 
+        if self.cfg.get('dense_cheb', False):
+            from .dense_cheb import dense_cheb
+            T = dense_cheb(self._graph_conv,T_0,edge_index,edge_weight,self.cfg['dynamic_graph'])
+            return self._finish_graph_block(T)
+
         if self.cfg["dynamic_graph"]:
             T_0 = T_0.permute(1, 0, 2, 3).reshape(T_0.size(1), -1, T_0.size(3))
         else:
@@ -330,6 +335,9 @@ class STConv(nn.Module):
         else:
             T = T.reshape(X.size(0), -1, T.size(1), T.size(2))
 
+        return self._finish_graph_block(T)
+
+    def _finish_graph_block(self, T):
         T = F.relu(T)
         T = self._temporal_conv2(T)
         T = T.permute(0, 2, 1, 3)

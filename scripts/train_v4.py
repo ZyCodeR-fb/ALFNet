@@ -426,6 +426,10 @@ def _table_from_best(session, run_directory, best_epoch):
 def build_optimizer(session):
     """The common AdamW training policy, with model-declared parameter groups."""
     args = session.args
+    if session.model_name in ('GinAR', 'UIGNN'):
+        return torch.optim.Adam(session.model.parameters(), lr=args.lr, weight_decay=0.)
+    if session.model_name in ('STFiT', 'STGCN', 'STID', 'GWNET', 'SLPF'):
+        return torch.optim.Adam(session.model.parameters(),lr=args.lr,weight_decay=float(args.weight_decay))
     groups = (session.model.get_optimizer_param_groups(args.lr)
               if hasattr(session.model, "get_optimizer_param_groups")
               else [{"params": list(session.model.parameters()), "lr": args.lr}])
@@ -434,6 +438,10 @@ def build_optimizer(session):
 
 
 def build_scheduler(session, optimizer):
+    if session.model_name == 'GinAR':
+        return torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[1,15,40,70,90], gamma=.5)
+    if session.model_name == 'STID':
+        return torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[1,50,80], gamma=.5)
     setting = str(getattr(session.args, "scheduler", "None"))
     if setting in ("None", "none", ""):
         return None
@@ -452,105 +460,27 @@ def next_patience_wait(current, improved, epoch, start_epoch):
 
 
 def load_plan_authority(plan_path=None):
-    """Load a supported active plan; archived plans are never authorities."""
-    if plan_path is None:
-        plan_path = ROOT / "configs/paper/final_plan.json"
-    plan_path = Path(plan_path)
+    """Check an explicit registered plan; discarded candidate plans are retired.
+
+    Prepared final-model configs are deliberately not a training plan. A new
+    retraining plan must freeze their code/config identities before registration.
+    """
+    plan_path = Path(plan_path or ROOT / "configs/paper/final_plan.json").resolve()
     if not plan_path.exists():
         raise RunnerRefused(f"{plan_path} does not exist")
-    active = (ROOT / "configs/paper/final_plan.json").resolve()
-    candidate = (ROOT / "configs/paper/alfnet_candidate_plan.json").resolve()
-    tf_candidate = (ROOT / "configs/paper/teacher_forcing_candidate_plan.json").resolve()
-    fixed50 = (ROOT / "configs/paper/teacher_forcing_fixed50_plan.json").resolve()
-    alf_tf40 = (ROOT / "configs/paper/alfnet_tf40_candidate_plan.json").resolve()
-    direct_head = (ROOT / "configs/paper/direct_head_candidate_plan.json").resolve()
-    final_structure = (
-        ROOT / "configs/paper/masked_node_candidate_plan.json").resolve()
-    ar_base_transfer = (
-        ROOT / "configs/paper/ar_base_transfer_plan.json").resolve()
-    corrected_baseline = (
-        ROOT / "configs/paper/corrected_baseline_seed32_plan.json").resolve()
-    metrla_nine = (
-        ROOT / "configs/paper/metrla_seed32_nine_models_plan.json").resolve()
-    if plan_path.resolve() not in {
-            active, candidate, tf_candidate, fixed50, alf_tf40, direct_head,
-            final_structure, ar_base_transfer, corrected_baseline,
-            metrla_nine}:
+    # Historical training plans and launchers are archived after model lock.
+    # Test authorization is separate and must never authorize more training.
+    registered = {}
+    if plan_path not in registered:
         raise RunnerRefused(
-            f"{plan_path} is neither the active reproduction plan nor the one "
-            "registered validation-only ALFNet candidate plan")
-    kind = json.loads(plan_path.read_text("utf-8")).get("kind")
-    if kind == "v4_unified_base_comparison_plan":
-        from scripts import build_final_plan
-        try:
-            return build_final_plan.assert_plan_still_holds(
-                build_final_plan.load_plan(plan_path))
-        except ValueError as error:
-            raise RunnerRefused(f"{plan_path}: {error}") from error
-    if kind == "v4_alfnet_validation_candidates":
-        from scripts import build_alfnet_candidates
-        try:
-            return build_alfnet_candidates.assert_plan_still_holds(
-                build_alfnet_candidates.load_plan(plan_path))
-        except ValueError as error:
-            raise RunnerRefused(f"{plan_path}: {error}") from error
-    if kind == "v4_teacher_forcing_validation_candidates":
-        from scripts import build_teacher_forcing_candidates
-        try:
-            return build_teacher_forcing_candidates.assert_plan_still_holds(
-                build_teacher_forcing_candidates.load_plan(plan_path))
-        except ValueError as error:
-            raise RunnerRefused(f"{plan_path}: {error}") from error
-    if kind == "v4_teacher_forcing_fixed50_candidates":
-        from scripts import build_teacher_forcing_fixed_candidates
-        try:
-            return build_teacher_forcing_fixed_candidates.assert_plan_still_holds(
-                build_teacher_forcing_fixed_candidates.load_plan(plan_path))
-        except ValueError as error:
-            raise RunnerRefused(f"{plan_path}: {error}") from error
-    if kind == "v4_alfnet_tf40_validation_candidates":
-        from scripts import build_alfnet_tf40_candidates
-        try:
-            return build_alfnet_tf40_candidates.assert_plan_still_holds(
-                build_alfnet_tf40_candidates.load_plan(plan_path))
-        except ValueError as error:
-            raise RunnerRefused(f"{plan_path}: {error}") from error
-    if kind == "v4_direct_head_validation_candidates":
-        from scripts import build_direct_head_candidates
-        try:
-            return build_direct_head_candidates.assert_plan_still_holds(
-                build_direct_head_candidates.load_plan(plan_path))
-        except ValueError as error:
-            raise RunnerRefused(f"{plan_path}: {error}") from error
-    if kind == "v4_final_structure_validation_candidates":
-        from scripts import build_masked_node_candidates
-        try:
-            return build_masked_node_candidates.assert_plan_still_holds(
-                build_masked_node_candidates.load_plan(plan_path))
-        except ValueError as error:
-            raise RunnerRefused(f"{plan_path}: {error}") from error
-    if kind == "v4_ar_base_transfer_validation_runs":
-        from scripts import build_ar_base_transfer
-        try:
-            return build_ar_base_transfer.assert_plan_still_holds(
-                build_ar_base_transfer.load_plan(plan_path))
-        except ValueError as error:
-            raise RunnerRefused(f"{plan_path}: {error}") from error
-    if kind == "v4_corrected_baseline_seed32_validation_runs":
-        from scripts import build_corrected_baseline_seed32
-        try:
-            return build_corrected_baseline_seed32.assert_plan_still_holds(
-                build_corrected_baseline_seed32.load_plan(plan_path))
-        except ValueError as error:
-            raise RunnerRefused(f"{plan_path}: {error}") from error
-    if kind == "v4_metrla_seed32_nine_models_validation_runs":
-        from scripts import build_metrla_seed32_nine_models
-        try:
-            return build_metrla_seed32_nine_models.assert_plan_still_holds(
-                build_metrla_seed32_nine_models.load_plan(plan_path))
-        except ValueError as error:
-            raise RunnerRefused(f"{plan_path}: {error}") from error
-    raise RunnerRefused(f"{plan_path} declares unsupported kind={kind!r}")
+            f"{plan_path}: retired or unregistered plan; use its frozen historical "
+            "workspace for reproduction, or register a new independent retraining plan")
+    import importlib
+    builder = importlib.import_module("scripts." + registered[plan_path])
+    try:
+        return builder.assert_plan_still_holds(builder.load_plan(plan_path))
+    except (ValueError, FileNotFoundError) as error:
+        raise RunnerRefused(f"{plan_path}: {error}") from error
 
 
 def resolve_plan(config_path, plan=None):
@@ -622,6 +552,7 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
         session.model.to(device)
         optimizer = build_optimizer(session)
         optimizer.load_state_dict(state["optimizer_state"])
+        scheduler = build_scheduler(session, optimizer)
         if scheduler is not None and state.get("scheduler_state") is not None:
             scheduler.load_state_dict(state["scheduler_state"])
         restore_rng_state(state.get("rng_state"))
@@ -682,8 +613,9 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
         # period without excluding early checkpoints from selection.  Only the
         # termination counter is gated; every epoch still competes on the same
         # validation LifeAvg MAE.
-        wait = next_patience_wait(
-            wait, improved, epoch, early_stopping_start_epoch)
+        if session.model_name != 'STFiT' or epoch % 2 == 1 or improved:
+            wait = next_patience_wait(
+                wait, improved, epoch, early_stopping_start_epoch)
         if improved:
             best = {"epoch": epoch, "life_avg_mae": candidate}
             if collect_development_table:
@@ -698,7 +630,10 @@ def train(config_path, output_root, device="cuda:0", seed=None, resume=False,
                                        validation_report, plan),
                     run_directory / "best.pt")
         if scheduler is not None:
-            scheduler.step(candidate)
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(candidate)
+            else:
+                scheduler.step()
         if save:
             # The epoch boundary, written after best.pt so a crash between the
             # two leaves last.pt describing the older, already-durable state.

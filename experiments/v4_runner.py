@@ -15,22 +15,21 @@ The confirmation splits are spent once; nothing in a training runner has any
 business opening one.
 """
 
-import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, Sampler
 
 from args import load_args_from_config
-from data_provider.lifecycle_roles import ROLE_CHANNEL_COUNT, ROLE_VS
+from data_provider.lifecycle_roles import ROLE_CHANNEL_COUNT
 from data_provider.v4_lifecycle_loader import V4LifecycleDataset
 from experiments.v4_losses import (
     element_loss,
     role_balanced_loss, role_balanced_elements,
 )
+from experiments.focal_loss import NAME as FOCAL_NAME, focal_elements
 from lib.lcbt_v4 import (
     SHUFFLE_POLICY,
     assert_v4_strategy,
@@ -54,6 +53,8 @@ CONFIG_DIR = ROOT / "configs"
 
 SCENARIOS = ("zero_history", "steady", "join", "fault")
 MODEL_ENTRY_POINTS = {
+    "GinAR": "model.comparison_model.GinAR",
+    "UIGNN": "model.comparison_model.UIGNN",
     "ALFNet": "model.ALFNet.ALFNet",
     "MoGERNN": "model.comparison_model.MoGERNN.MoGERNN",
     "HA": "model.comparison_model.HA",
@@ -91,9 +92,7 @@ def decoder_training_policy(model_name, model=None):
         if model_name != "ALFNet":
             raise RunnerRefused(
                 f"{model_name} may not override its registered decoder policy")
-        if declared not in {
-                "lifecycle_masked_autoregressive_teacher_forcing",
-                "target_blind_direct_multi_horizon"}:
+        if declared != "lifecycle_masked_autoregressive_teacher_forcing":
             raise RunnerRefused(
                 f"ALFNet declared unsupported decoder policy {declared!r}")
         return declared
@@ -385,86 +384,6 @@ def _alfnet_role_mix(prediction, batch, valid, meta, loss_name):
     return role_loss, float(meta.get("forecast_role_balanced_beta", 0.1))
 
 
-def _alfnet_scale_loss(prediction, target, batch, valid, meta, scaler):
-    """Stable low-value emphasis without a target-dependent denominator.
-
-    The signed log transform is smooth on both sides of zero and compresses
-    large flow values.  Its scale is derived only from the training scaler, so
-    neither validation/test values nor ``1/|target|`` weighting can leak into
-    the objective.  Huber limits the influence of a few large transformed
-    residuals; lifecycle roles are aggregated by the same contract as BASE.
-    """
-    if meta.get("forecast_scale_loss_mode") != "signed_log_huber":
-        return None, None
-    if scaler is None:
-        raise RunnerRefused("signed_log_huber requires the train-only scaler")
-    weight = float(meta.get("forecast_scale_loss_weight", 0.0))
-    fraction = float(meta.get("forecast_scale_loss_scale_fraction", 0.05))
-    if not 0.0 <= weight <= 1.0 or not fraction > 0.0:
-        raise RunnerRefused("invalid signed_log_huber weight/scale fraction")
-    scale = max(1.0, abs(float(scaler["std"])) * fraction)
-    mean, std = float(scaler["mean"]), float(scaler["std"])
-    predicted_raw = prediction * std + mean
-    target_raw = target * std + mean
-    transform = lambda value: torch.sign(value) * torch.log1p(value.abs() / scale)
-    elements = F.smooth_l1_loss(
-        transform(predicted_raw), transform(target_raw), reduction="none")
-    last_role = batch["lifecycle_context"][:, -1, :, :ROLE_CHANNEL_COUNT]
-    loss = role_balanced_elements(elements, valid, last_role)
-    return loss, weight
-
-
-def _alfnet_synthetic_unseen_loss(
-        prediction, target, batch, meta, loss_name):
-    """Forecast loss on train-only nodes hidden from the entire input window."""
-    if meta.get("synthetic_unseen_training_mode") is None:
-        return None, None
-    if meta.get("synthetic_unseen_training_mode") != \
-            "observed_node_mask_reconstruction":
-        raise RunnerRefused("unsupported synthetic-unseen loss mode")
-    if "synthetic_unseen_aux_mask" not in batch:
-        raise RunnerRefused(
-            "model declared synthetic-unseen training without an augmented batch")
-    weight = float(meta.get("synthetic_unseen_loss_weight", 0.0))
-    if not 0.0 < weight < 1.0:
-        raise RunnerRefused("synthetic-unseen loss weight must be in (0, 1)")
-    valid = (batch["synthetic_unseen_aux_mask"].unsqueeze(-1)
-             & torch.isfinite(prediction) & torch.isfinite(target))
-    if not bool(valid.any()):
-        return None, weight
-    return element_loss(prediction, target, loss_name)[valid].mean(), weight
-
-
-def _alfnet_train_scale_bin_loss(
-        prediction, target, valid, meta, scaler):
-    """Equal-weight fixed train-scale magnitude bins without 1/target weights."""
-    if meta.get("low_flow_calibration_mode") is None:
-        return None, None
-    if meta.get("low_flow_calibration_mode") != \
-            "role_horizon_residual_train_scale_bins":
-        raise RunnerRefused("unsupported low-flow calibration mode")
-    if scaler is None:
-        raise RunnerRefused("train-scale bin loss requires the training scaler")
-    weight = float(meta.get("low_flow_bin_loss_weight", 0.0))
-    if not 0.0 < weight < 1.0:
-        raise RunnerRefused("low-flow bin loss weight must be in (0, 1)")
-    mean, std = float(scaler["mean"]), abs(float(scaler["std"]))
-    target_raw = (target * std + mean).abs()
-    # Fixed from the training standard deviation, never from validation/test or
-    # the current target denominator.  Every populated magnitude band gets the
-    # same influence instead of a near-zero example receiving unbounded weight.
-    boundaries = prediction.new_tensor(
-        [0.0, 0.05 * std, 0.10 * std, 0.20 * std, 0.50 * std,
-         float("inf")])
-    elements = F.smooth_l1_loss(prediction, target, reduction="none")
-    terms = []
-    for lower, upper in zip(boundaries[:-1], boundaries[1:]):
-        selected = valid & (target_raw >= lower) & (target_raw < upper)
-        if bool(selected.any()):
-            terms.append(elements[selected].mean())
-    return (torch.stack(terms).mean() if terms else None), weight
-
-
 def compute_losses(model_output, batch, loss_name="mse", scaler=None):
     """Split the objective into what is shared and what the model declared.
 
@@ -482,42 +401,56 @@ def compute_losses(model_output, batch, loss_name="mse", scaler=None):
         valid = torch.isfinite(prediction) & torch.isfinite(target)
     else:
         valid = valid_positions(batch, prediction)
-    base = base_loss(prediction, target, valid, loss_name)
+    if meta.get('source_objective') == 'slpf_aggregation':
+        if loss_name != 'mae':
+            raise RunnerRefused('SLPF aggregation requires its source MAE')
+        # Source aggregation predicts only unsensed locations. Intersect with
+        # the common legal cohort, never enlarge the loader's supervision.
+        valid = valid & meta['source_forecast_mask'].expand_as(valid)
+    custom_elements = None
+    if loss_name == 'uignn_quantile':
+        if meta.get('source_objective') != 'uignn_quantile':
+            raise RunnerRefused('UIGNN source objective requires declared quantile outputs')
+        q = meta['source_quantiles']
+        error = torch.nan_to_num(target) - q
+        levels = q.new_tensor([.05, .5, .95])
+        base = torch.maximum(levels * error, (levels - 1) * error)[valid.expand_as(q)].mean() if valid.any() else None
+    elif loss_name == FOCAL_NAME:
+        if meta.get('forecast_loss_mode') != 'role_balanced_mix':
+            raise RunnerRefused('Focal requires the Full role-balanced contract')
+        custom_elements = focal_elements(prediction, target, scaler)
+        base = custom_elements[valid].mean() if valid.any() else None
+    else:
+        base = base_loss(prediction, target, valid, loss_name)
     if base is None:
         return {"prediction": prediction, "valid": valid, "base": None,
                 "optimize": None, "role_mix": None, "scale_mix": None,
                 "synthetic_unseen_mix": None, "low_flow_bin_mix": None,
-                "aux": None,
+                "aux": None, "spectral_mix": None,
                 "meta": meta}
 
+    if meta.get('source_raw_mae'):
+        if loss_name != 'mae' or scaler is None:
+            raise RunnerRefused('source raw-MAE requires MAE and the common scaler')
+        base = base * float(scaler['std'])
     optimize = base
-    role_loss, beta = _alfnet_role_mix(prediction, batch, valid, meta, loss_name)
+    if custom_elements is None:
+        role_loss, beta = _alfnet_role_mix(prediction, batch, valid, meta, loss_name)
+    else:
+        last_role = batch['lifecycle_context'][:, -1, :, :ROLE_CHANNEL_COUNT]
+        role_loss = role_balanced_elements(custom_elements, valid, last_role)
+        beta = float(meta.get('forecast_role_balanced_beta', .1))
     if role_loss is not None:
         optimize = (1.0 - beta) * optimize + beta * role_loss
-    scale_loss, scale_weight = _alfnet_scale_loss(
-        prediction, target, batch, valid, meta, scaler)
-    if scale_loss is not None:
-        optimize = (1.0 - scale_weight) * optimize + scale_weight * scale_loss
-    synthetic_unseen_loss, synthetic_unseen_weight = \
-        _alfnet_synthetic_unseen_loss(
-            prediction, target, batch, meta, loss_name)
-    if synthetic_unseen_loss is not None:
-        optimize = ((1.0 - synthetic_unseen_weight) * optimize
-                    + synthetic_unseen_weight * synthetic_unseen_loss)
-    low_flow_bin_loss, low_flow_bin_weight = _alfnet_train_scale_bin_loss(
-        prediction, target, valid, meta, scaler)
-    if low_flow_bin_loss is not None:
-        optimize = ((1.0 - low_flow_bin_weight) * optimize
-                    + low_flow_bin_weight * low_flow_bin_loss)
     aux = sum_aux_losses(meta.get("aux_losses"), device=prediction.device)
     if aux is not None:
         optimize = optimize + aux
     return {"prediction": prediction, "valid": valid, "base": base,
             "optimize": optimize, "role_mix": role_loss,
-            "scale_mix": scale_loss,
-            "synthetic_unseen_mix": synthetic_unseen_loss,
-            "low_flow_bin_mix": low_flow_bin_loss,
-            "aux": aux, "meta": meta}
+            "scale_mix": None,
+            "synthetic_unseen_mix": None,
+            "low_flow_bin_mix": None,
+            "aux": aux, "spectral_mix": None, "meta": meta}
 
 
 # --- the two passes ------------------------------------------------------------
@@ -544,96 +477,6 @@ def to_device(batch, device):
     return moved
 
 
-def _synthetic_unseen_seed(run_seed, epoch, sample_index):
-    """Stable per-sample stream, independent of batch order and CUDA RNG."""
-    key = (f"lcbt_v4_observed_node_mask_v1|{int(run_seed)}|{int(epoch)}|"
-           f"{int(sample_index)}")
-    return int.from_bytes(
-        hashlib.sha256(key.encode("utf-8")).digest()[:8], "big") % (2 ** 63)
-
-
-def apply_synthetic_unseen_training(session, batch, epoch, training=True):
-    """Hide observed K nodes and expose their future only to an auxiliary loss.
-
-    This is ALFNet-only, train-only augmentation.  Selection uses the run seed,
-    epoch, sample id, input availability and the already-visible K scope; it
-    never reads a future target value.  The original lifecycle cohort/loss mask
-    is preserved, so the paper objective remains identifiable beside the
-    synthetic reconstruction term.
-    """
-    model = getattr(session, "model", None)
-    mode = getattr(model, "synthetic_unseen_training_mode", None)
-    if not training or mode is None:
-        return batch
-    if session.model_name != "ALFNet":
-        raise RunnerRefused("synthetic-unseen training is an ALFNet method term")
-    if mode != "observed_node_mask_reconstruction":
-        raise RunnerRefused(f"unsupported synthetic-unseen mode {mode!r}")
-    fraction = float(model.synthetic_unseen_fraction)
-    if not 0.0 < fraction < 1.0:
-        raise RunnerRefused("synthetic-unseen fraction must be in (0, 1)")
-
-    required = {
-        "base_visible_input", "input_available_mask",
-        "decoder_available_mask", "target_available_mask",
-        "target_cohort_mask", "lifecycle_role_ids",
-        "lifecycle_state_age", "lifecycle_context", "sample_index",
-    }
-    missing = sorted(required - set(batch))
-    if missing:
-        raise RunnerRefused(
-            f"synthetic-unseen batch is missing fields {missing}")
-    augmented = dict(batch)
-    mutable = (
-        "base_visible_input", "input_available_mask",
-        "decoder_available_mask", "lifecycle_role_ids",
-        "lifecycle_state_age", "lifecycle_context",
-    )
-    for key in mutable:
-        augmented[key] = batch[key].clone()
-    batch_size, _, node_count = batch["input_available_mask"].shape
-    selected = torch.zeros((batch_size, node_count), dtype=torch.bool)
-    scope = torch.zeros(node_count, dtype=torch.bool)
-    scope[torch.as_tensor(
-        session.train_context.signal_scope, dtype=torch.long)] = True
-    target_count = max(1, int(round(fraction * int(scope.sum()))))
-
-    for position in range(batch_size):
-        input_seen = batch["input_available_mask"][position].any(dim=0)
-        original_cohort = batch["target_cohort_mask"][position] > 0.5
-        eligible = torch.nonzero(
-            scope & input_seen & ~original_cohort, as_tuple=False).flatten()
-        if eligible.numel() == 0:
-            continue
-        generator = torch.Generator(device="cpu")
-        generator.manual_seed(_synthetic_unseen_seed(
-            session.run_seed, epoch, batch["sample_index"][position]))
-        take = min(target_count, int(eligible.numel()))
-        nodes = eligible[torch.randperm(
-            int(eligible.numel()), generator=generator)[:take]]
-        selected[position, nodes] = True
-
-    if not bool(selected.any()):
-        raise RunnerRefused("synthetic-unseen training selected no observed node")
-    node_mask = selected[:, None, :]
-    augmented["base_visible_input"].masked_fill_(
-        node_mask.unsqueeze(-1), 0.0)
-    augmented["input_available_mask"].masked_fill_(node_mask, False)
-    augmented["decoder_available_mask"].masked_fill_(node_mask, False)
-    augmented["lifecycle_role_ids"].masked_fill_(node_mask, ROLE_VS)
-    augmented["lifecycle_state_age"].masked_fill_(node_mask, 0.0)
-    lifecycle = augmented["lifecycle_context"]
-    lifecycle[..., :ROLE_CHANNEL_COUNT].masked_fill_(
-        node_mask.unsqueeze(-1), 0.0)
-    lifecycle[..., ROLE_VS].masked_fill_(node_mask, 1.0)
-    lifecycle[..., ROLE_CHANNEL_COUNT:].masked_fill_(
-        node_mask.unsqueeze(-1), 0.0)
-    augmented["synthetic_unseen_node_mask"] = selected
-    augmented["synthetic_unseen_aux_mask"] = (
-        batch["target_available_mask"] & selected[:, None, :])
-    return augmented
-
-
 def _forward(session, batch, context, epoch, teacher_forcing_mask):
     return session.model.forward_v4(batch, context, epoch=epoch,
                                     teacher_forcing_mask=teacher_forcing_mask)
@@ -649,7 +492,7 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
     totals = {"batches": 0, "skipped": 0, "base": 0.0, "optimize": 0.0,
               "role_mix": 0.0, "scale_mix": 0.0,
               "synthetic_unseen_mix": 0.0, "low_flow_bin_mix": 0.0,
-              "aux": 0.0,
+              "aux": 0.0, "spectral_mix": 0.0,
               "forced_positions": 0,
               "available_positions": 0,
               "synthetic_unseen_positions": 0}
@@ -658,15 +501,10 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
     # would otherwise share. MoGERNN declares none and gets no stand-in.
     contributed = {"base": 0, "optimize": 0, "role_mix": 0, "scale_mix": 0,
                    "synthetic_unseen_mix": 0, "low_flow_bin_mix": 0,
-                   "aux": 0}
+                   "aux": 0, "spectral_mix": 0}
     for index, batch in enumerate(session.train_loader):
         if max_batches is not None and index >= max_batches:
             break
-        batch = apply_synthetic_unseen_training(
-            session, batch, epoch, training=True)
-        if "synthetic_unseen_aux_mask" in batch:
-            totals["synthetic_unseen_positions"] += int(
-                batch["synthetic_unseen_aux_mask"].sum())
         batch = to_device(batch, session.device)
         teacher = build_model_teacher_mask(session, batch, epoch, True)
         totals["forced_positions"] += int(teacher.sum())
@@ -683,10 +521,12 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
             optimizer.zero_grad(set_to_none=True)
             continue
         losses["optimize"].backward()
+        if session.model_name in ('GinAR', 'GWNET', 'STID'):
+            torch.nn.utils.clip_grad_norm_(session.model.parameters(), 5.)
         optimizer.step()
         totals["batches"] += 1
         for key in ("base", "optimize", "role_mix", "scale_mix",
-                    "synthetic_unseen_mix", "low_flow_bin_mix", "aux"):
+                    "synthetic_unseen_mix", "low_flow_bin_mix", "aux", "spectral_mix"):
             if losses[key] is not None:
                 totals[key] += float(losses[key].detach())
                 contributed[key] += 1
@@ -696,7 +536,7 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
             "refusing to report a zero")
     report = {key: (totals[key] / contributed[key] if contributed[key] else None)
               for key in ("base", "optimize", "role_mix", "scale_mix",
-                          "synthetic_unseen_mix", "low_flow_bin_mix", "aux")}
+                          "synthetic_unseen_mix", "low_flow_bin_mix", "aux", "spectral_mix")}
     report.update({"batches": totals["batches"], "skipped": totals["skipped"],
                    "forced_positions": totals["forced_positions"],
                    "available_positions": totals["available_positions"],

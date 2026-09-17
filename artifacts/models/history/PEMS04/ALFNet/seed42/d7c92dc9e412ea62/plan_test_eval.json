@@ -1,0 +1,164 @@
+{
+ "best_epoch": 29,
+ "cells": {
+  "aggregation": {
+   "LifeAvg": "mean(Unseen, Steady, Join, Fault)",
+   "WorstGroup": "max(Unseen, Steady, Join, Fault)",
+   "across_k": "equal-weight mean over evidence lengths",
+   "mape_denominator": "clamp(|target|, min=1e-06)",
+   "row_metrics": "sum/count per cell (ples_protocol._row_metrics_v2)",
+   "scale": "original units (normalised * std + mean)",
+   "within_k": "mean inside calendar stratum, then 5/7-2/7 weighted"
+  },
+  "development_validation_only": true,
+  "main": {
+   "Fault": {
+    "MAE": 32.62390857160751,
+    "MAPE": 24.097211897106874,
+    "RMSE": 43.372690353946496,
+    "finite": true,
+    "origin_count": 844,
+    "sample_count": 844,
+    "valid_target_count": 164095
+   },
+   "Join": {
+    "MAE": 29.62545711423066,
+    "MAPE": 30.953484076620814,
+    "RMSE": 40.790045658345264,
+    "finite": true,
+    "origin_count": 844,
+    "sample_count": 844,
+    "valid_target_count": 162674
+   },
+   "LifeAvg": {
+    "MAE": 40.36476758120543,
+    "MAPE": 38.275107165563,
+    "RMSE": 53.88342757107735,
+    "derived_from": [
+     "Unseen",
+     "Steady",
+     "Join",
+     "Fault"
+    ],
+    "finite": true,
+    "origin_count": 3376,
+    "sample_count": 3376,
+    "valid_target_count": 670658
+   },
+   "Steady": {
+    "MAE": 26.02627564659413,
+    "MAPE": 17.375004689237098,
+    "RMSE": 35.95954029060653,
+    "finite": true,
+    "origin_count": 844,
+    "sample_count": 844,
+    "valid_target_count": 172697
+   },
+   "Unseen": {
+    "MAE": 73.18342899238942,
+    "MAPE": 80.67472799928721,
+    "RMSE": 95.41143398141111,
+    "finite": true,
+    "origin_count": 844,
+    "sample_count": 844,
+    "valid_target_count": 171192
+   },
+   "WorstGroup": {
+    "MAE": 73.18342899238942,
+    "MAPE": 80.67472799928721,
+    "RMSE": 95.41143398141111,
+    "derived_from": [
+     "Unseen",
+     "Steady",
+     "Join",
+     "Fault"
+    ],
+    "finite": true,
+    "origin_count": 3376,
+    "sample_count": 3376,
+    "valid_target_count": 670658
+   }
+  },
+  "note": "A development diagnostic on the validation split. Same shape as the reported tables on purpose; not a result.",
+  "phase": {
+   "Cold": {
+    "MAE": 39.37374325036468,
+    "MAPE": 46.458994857326154,
+    "RMSE": 52.43872381745368,
+    "finite": true,
+    "origin_count": 71,
+    "sample_count": 71,
+    "valid_target_count": 13681
+   },
+   "Decay": {
+    "MAE": 31.82235608226058,
+    "MAPE": 23.192940583899443,
+    "RMSE": 42.256388227395874,
+    "finite": true,
+    "origin_count": 704,
+    "sample_count": 704,
+    "valid_target_count": 136814
+   },
+   "Onset": {
+    "MAE": 28.101228086905824,
+    "MAPE": 18.287677135482294,
+    "RMSE": 38.2272892699541,
+    "finite": true,
+    "origin_count": 70,
+    "sample_count": 70,
+    "valid_target_count": 13709
+   },
+   "Outage": {
+    "MAE": 45.16211394977851,
+    "MAPE": 38.94945979080576,
+    "RMSE": 59.68111270344508,
+    "finite": true,
+    "origin_count": 70,
+    "sample_count": 70,
+    "valid_target_count": 13572
+   },
+   "Ready": {
+    "MAE": 27.74491256244789,
+    "MAPE": 26.00134749339356,
+    "RMSE": 38.79617053559716,
+    "finite": true,
+    "origin_count": 70,
+    "sample_count": 70,
+    "valid_target_count": 13493
+   },
+   "Warm": {
+    "MAE": 28.838682955795537,
+    "MAPE": 29.898146656873017,
+    "RMSE": 39.82456535470923,
+    "finite": true,
+    "origin_count": 703,
+    "sample_count": 703,
+    "valid_target_count": 135500
+   }
+  },
+  "schema_version": 1,
+  "split": "validation"
+ },
+ "checkpoint_sha256": "1bc9009a019a01b6b9dea02d01b9031ee1bfb835610e061710c0acdd6330017e",
+ "dataset": "PEMS04",
+ "evaluator_sha256": "ffd0bd7aabf5213dd6bbde393895e14e36a7ce1d03c91cfabf6b0b9975dde51c",
+ "execution_action": "train",
+ "exposure_status": "confirmatory",
+ "model": "ALFNet",
+ "plan_sha256": "946d0b450bb10e3e0e5bc5ee066694bce13b3bdcc29c1c5e5a7e0702b2f4d0c8",
+ "read_once": true,
+ "run": "PEMS04/ALFNet/seed42",
+ "run_seed_used": 42,
+ "scaler": {
+  "mean": 207.8630694443483,
+  "refit": false,
+  "source": "checkpoint",
+  "std": 153.76584441826205
+ },
+ "schema_version": 1,
+ "seed": 42,
+ "split": "test",
+ "teacher_forcing_positions": 0,
+ "test_exposure_hash": "91ee73cc56469802f38e0baa31d5d56048d583fb84d0f3d3c2e48f00c5c19171",
+ "unit": "veh_per_5min"
+}

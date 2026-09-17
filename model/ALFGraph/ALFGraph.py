@@ -4,8 +4,8 @@ from torch import nn
 from layers.DCRNNCell import DCRNNCell
 from layers.gnn import calculate_random_walk_matrix
 from layers.lifecycle_moge import (
-    BASE_SUPPORT_SET, MULTISCALE_SUPPORT_SET,
-    LEGACY_SUPPORT_NAMES, MULTISCALE_SUPPORT_NAMES,
+    BASE_SUPPORT_SET,
+    LEGACY_SUPPORT_NAMES,
     LIFECYCLE_STATE_CHANNELS,
     LifecycleRoutedGraphConv,
     build_lifecycle_supports,
@@ -118,44 +118,6 @@ class ResidualDeltaDecoder(nn.Module):
         return torch.stack(outputs, dim=1)
 
 
-class DirectMultiHorizonHead(nn.Module):
-    """Predict the whole horizon once from the encoded graph state.
-
-    This is deliberately a decoder ablation, not a second forecasting branch:
-    the encoder, routed supports, FiLM condition, shared imputer and the outer
-    graph refiner are unchanged.  It consumes every encoder layer's final
-    state and never consumes a future target or an earlier prediction.
-    """
-
-    def __init__(self, output_size, hidden_size, num_layers, out_steps, scale):
-        super().__init__()
-        self.output_size = int(output_size)
-        self.hidden_size = int(hidden_size)
-        self.num_layers = int(num_layers)
-        self.out_steps = int(out_steps)
-        self.scale = float(scale)
-        input_size = self.hidden_size * self.num_layers
-        self.norm = nn.LayerNorm(input_size)
-        self.projection = nn.Sequential(
-            nn.Linear(input_size, self.hidden_size),
-            nn.GELU(),
-            nn.Linear(self.hidden_size, self.out_steps * self.output_size),
-        )
-
-    def forward(self, initial_input, hidden):
-        if hidden.ndim != 4 or hidden.size(0) != self.num_layers:
-            raise ValueError(
-                "direct head expects [layers,batch,nodes,hidden], got "
-                f"{tuple(hidden.shape)}")
-        state = hidden.permute(1, 2, 0, 3).reshape(
-            hidden.size(1), hidden.size(2), -1)
-        delta = self.projection(self.norm(state)).reshape(
-            hidden.size(1), hidden.size(2), self.out_steps, self.output_size)
-        delta = delta.permute(0, 2, 1, 3).contiguous()
-        anchor = initial_input[..., :self.output_size].unsqueeze(1)
-        return anchor + self.scale * delta
-
-
 class Model(nn.Module):
 
     @classmethod
@@ -178,8 +140,6 @@ class Model(nn.Module):
         support_set = str(recipe.get("moge_support_set", ""))
         if support_set == BASE_SUPPORT_SET:
             resolved_support_names = LEGACY_SUPPORT_NAMES
-        elif support_set == MULTISCALE_SUPPORT_SET:
-            resolved_support_names = MULTISCALE_SUPPORT_NAMES
         else:
             raise ValueError(
                 "ALFGraph requires a registered support set, got "
@@ -280,15 +240,6 @@ class Model(nn.Module):
                 conv_factory,
             )
             self.uses_external_teacher_forcing = True
-        elif self.decoder_output_mode == "direct_multi_horizon":
-            self.decoder = DirectMultiHorizonHead(
-                configs.c_out,
-                configs.d_model,
-                configs.e_layers,
-                output_steps,
-                decoder_scale,
-            )
-            self.uses_external_teacher_forcing = False
         else:
             raise ValueError(
                 "unsupported ALFGraph decoder_output_mode: "
@@ -378,23 +329,20 @@ class Model(nn.Module):
             gamma, beta = film
             hidden = hidden * gamma.unsqueeze(0) + beta.unsqueeze(0)
         initial_input = x_enc[:, -1, :, :self.output_dim]
-        if self.decoder_output_mode == "direct_multi_horizon":
-            prediction = self.decoder(initial_input, hidden)
-        else:
-            teacher_forcing_ratio = 1.0 - float(epoch) / 40.0
-            prediction = self.decoder(
-                initial_input,
-                hidden,
-                forward_support,
-                backward_support,
-                x_dec,
-                teacher_forcing_ratio,
-                supports,
-                # No lifecycle state exists beyond the input window, so the decoder
-                # holds the last observed one rather than inventing a future.
-                None if state_sequence is None else state_sequence[:, -1],
-                teacher_mask,
-            )
+        teacher_forcing_ratio = 1.0 - float(epoch) / 40.0
+        prediction = self.decoder(
+            initial_input,
+            hidden,
+            forward_support,
+            backward_support,
+            x_dec,
+            teacher_forcing_ratio,
+            supports,
+            # No lifecycle state exists beyond the input window, so the decoder
+            # holds the last observed one rather than inventing a future.
+            None if state_sequence is None else state_sequence[:, -1],
+            teacher_mask,
+        )
         # The last encoder layer's state, detached: the residual branch reads
         # the anchor's summary without pushing gradients back into it.
         output = {

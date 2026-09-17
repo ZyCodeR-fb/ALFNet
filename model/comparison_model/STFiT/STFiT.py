@@ -9,6 +9,7 @@ from model.comparison_model.stgcn_n.stgcn import STGCN_n
 
 
 STFIT_FULL_DEFAULTS = {
+    "dense_cheb": True,
     "graph_learning": True,
     "dynamic_graph": True,
     "dynamic_mix": True,
@@ -62,8 +63,10 @@ class Model(SourceNativeV4Mixin, nn.Module):
             batch, runtime_context, self.static_asset_hash, self.raw_enc_in,
             self.__class__.__module__, self._v4_adjacency_cache,
             require_target=True)
-        future = batch["target"] if self.training else torch.zeros_like(
-            batch["target"])
+        future = torch.where(batch['loss_mask'].unsqueeze(-1),batch['target'],0.) if self.training else torch.zeros_like(batch['target'])
+        self.backbone.legal_donor_mask = (
+            batch['loss_mask'].all(1)
+            & torch.isfinite(batch['target']).all(1).squeeze(-1)) if self.training else None
         return self.forward(
             common["adjacency"], common["base_visible_input"],
             common["encoder_time_marks"], None, future,
@@ -111,7 +114,7 @@ class Model(SourceNativeV4Mixin, nn.Module):
         else:
             pred = pred[:, :, :original_num_nodes, :]
 
-        output = {"pred": pred}
+        output = {"pred": pred, "source_raw_mae": True}
         if target_override is not None:
             output["target"] = target_override
         if aux_losses:

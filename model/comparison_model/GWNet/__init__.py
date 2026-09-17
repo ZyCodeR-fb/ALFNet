@@ -4,7 +4,7 @@ import torch.nn as nn
 from model.comparison_model.family_utils import (
     SourceNativeV4Mixin, build_gwnet_cfg, normalize_adj_mx,
     source_native_input)
-from .gwnet import GWNET as GWNETBackbone
+from .source_adapter import GWNET as GWNETBackbone
 
 
 class Model(SourceNativeV4Mixin, nn.Module):
@@ -58,4 +58,4 @@ class Model(SourceNativeV4Mixin, nn.Module):
         if pred.shape[-1] != 1:
             pred = pred[..., -1:]
         pred = pred.squeeze(-1).reshape(pred.shape[0], self.output_dim, self.pred_len, pred.shape[2]).permute(0, 2, 3, 1).contiguous()
-        return {"pred": pred}
+        return {"pred": pred, "source_raw_mae": True}

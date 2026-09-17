@@ -290,7 +290,24 @@ class STGCN_n(nn.Module):
             # vae(history_data)
             full_data = torch.cat([history_data, future_data], dim=3)
             B, N, C, W = full_data.shape
-            transformed_input = full_data.transpose(-1, -2).reshape(-1, W, C)
+            # Only complete, legally supervised training donors enter the VAE.
+            # Full-N original topology remains present in the forecast graph.
+            donors = getattr(self, 'legal_donor_mask', None)
+            if donors is not None:
+                donor_data=[]
+                batch_pool=full_data[donors]
+                if batch_pool.shape[0]==0:
+                    raise ValueError('ST-FiT batch has no complete legal training donor')
+                for b in range(B):
+                    pool=full_data[b,donors[b]]
+                    # An incomplete episode may borrow only supervised donors
+                    # already present in this training batch, never hidden labels.
+                    if pool.shape[0]==0:pool=batch_pool
+                    donor_data.append(pool[torch.randint(pool.shape[0],(N,),device=pool.device)])
+                synthesis_data=torch.stack(donor_data)
+            else:
+                synthesis_data=full_data
+            transformed_input = synthesis_data.transpose(-1, -2).reshape(-1, W, C)
             mu, logvar = self.vae.encoder(transformed_input)
             embedding = self.vae.reparameterize(mu, logvar)
 
@@ -317,10 +334,10 @@ class STGCN_n(nn.Module):
             if self.cfg.get('sim_loss', False):
                 if self.cfg.get("aug_loss", "MSE") == "MSE":
                     vae_loss += torch.nn.functional.mse_loss(
-                        full_data[:, self.mix_pair[0]], aug_node
+                        synthesis_data[:, self.mix_pair[0]], aug_node
                     )
                     vae_loss += torch.nn.functional.mse_loss(
-                        full_data[:, self.mix_pair[1]], aug_node
+                        synthesis_data[:, self.mix_pair[1]], aug_node
                     )
                 elif self.cfg.get("aug_loss", "MSE") == "Contrastive":
                     vae_loss += torch.nn.functional.cosine_similarity(
@@ -356,7 +373,8 @@ class STGCN_n(nn.Module):
             if self.cfg["dynamic_graph"]:
                 batch, row, col = (self.graph > 0).nonzero().t()
 
-                self.edge_index = torch.stack([row + batch * N, col + batch * N], dim=0)
+                graph_nodes = history_data.shape[1]
+                self.edge_index = torch.stack([row + batch * graph_nodes, col + batch * graph_nodes], dim=0)
                 self.edge_weight = self.graph[batch, row, col]
             else:
                 row, col = (self.graph > 0).nonzero().t()

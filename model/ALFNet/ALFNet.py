@@ -91,64 +91,8 @@ class GraphOutputRefiner(nn.Module):
         return prediction + self.scale * scale.unsqueeze(1) * torch.tanh(residual)
 
 
-class ReliabilityPolynomialAdapter(nn.Module):
-    """A compact I/A/A2 residual that excludes unavailable senders."""
-
-    def __init__(self, channels, hidden_dim=8, scale=0.1):
-        super().__init__()
-        self.scale = float(scale)
-        self.input_proj = nn.Linear(3 * int(channels), int(hidden_dim))
-        self.output_proj = nn.Linear(int(hidden_dim), int(channels))
-        nn.init.zeros_(self.output_proj.weight)
-        nn.init.zeros_(self.output_proj.bias)
-
-    @staticmethod
-    def _propagate(adjacency, value, reliability):
-        weights = torch.nan_to_num(adjacency.to(value), nan=0.0).clamp_min(0.0)
-        numerator = torch.einsum(
-            "nm,btmd->btnd", weights,
-            value * reliability.unsqueeze(-1))
-        denominator = torch.einsum(
-            "nm,btm->btn", weights, reliability).unsqueeze(-1)
-        propagated = numerator / denominator.clamp_min(1e-6)
-        return torch.where(denominator > 1e-6, propagated, value)
-
-    def forward(self, value, adjacency, reliability):
-        hop1 = self._propagate(adjacency, value, reliability)
-        hop2 = self._propagate(adjacency, hop1, reliability)
-        hidden = self.input_proj(torch.cat([value, hop1, hop2], dim=-1))
-        delta = self.output_proj(torch.nn.functional.gelu(hidden))
-        return value + self.scale * torch.tanh(delta)
 
 
-class ForecastCalibrationHead(nn.Module):
-    """Target-blind role/horizon-conditioned residual calibration."""
-
-    def __init__(self, output_dim, pred_len, hidden_dim=16, scale=0.1):
-        super().__init__()
-        self.scale = float(scale)
-        horizon_dim = 4
-        self.horizon_embedding = nn.Parameter(
-            torch.zeros(int(pred_len), horizon_dim))
-        self.mlp = nn.Sequential(
-            nn.Linear(int(output_dim) + AVAILABILITY_COUNT + horizon_dim,
-                      int(hidden_dim)),
-            nn.GELU(),
-            nn.Linear(int(hidden_dim), int(output_dim)),
-        )
-        nn.init.normal_(self.horizon_embedding, std=0.02)
-        nn.init.zeros_(self.mlp[-1].weight)
-        nn.init.zeros_(self.mlp[-1].bias)
-
-    def forward(self, prediction, last_availability):
-        batch, horizon, nodes, _ = prediction.shape
-        roles = last_availability.unsqueeze(1).expand(-1, horizon, -1, -1)
-        horizon_features = self.horizon_embedding[:horizon].view(
-            1, horizon, 1, -1).expand(batch, -1, nodes, -1)
-        delta = self.mlp(torch.cat(
-            [prediction, roles.to(prediction), horizon_features.to(prediction)],
-            dim=-1))
-        return prediction + self.scale * torch.tanh(delta)
 
 
 def _expert_module_name(model_name):
@@ -222,11 +166,7 @@ class Model(nn.Module):
         self.graph_input_dim = int(self.graph_args.enc_in)
         self.decoder_output_mode = str(getattr(
             self.graph_expert, "decoder_output_mode", "residual_delta"))
-        self.decoder_training_policy = (
-            "target_blind_direct_multi_horizon"
-            if not bool(getattr(
-                self.graph_expert, "uses_external_teacher_forcing", True))
-            else "lifecycle_masked_autoregressive_teacher_forcing")
+        self.decoder_training_policy = "lifecycle_masked_autoregressive_teacher_forcing"
         # The patch expert declares how much lifecycle context it consumes, so
         # its ablation switch lives in the ALFTemporal config and needs no
         # duplicated wiring here.
@@ -240,6 +180,9 @@ class Model(nn.Module):
             )
 
         recipe = family.get("recipe", {})
+        self.observation_state_mode = str(recipe.get("observation_state_mode", "full"))
+        if self.observation_state_mode not in {"full", "mask_only"}:
+            raise ValueError("invalid observation_state_mode")
         model_cfg = family.get("model", {})
         self.raw_enc_in = int(configs.raw_enc_in)
         self.output_dim = int(configs.c_out)
@@ -250,66 +193,13 @@ class Model(nn.Module):
         self.forecast_role_balanced_beta = float(
             recipe.get("forecast_role_balanced_beta", 0.10)
         )
-        self.forecast_scale_loss_mode = recipe.get("forecast_scale_loss_mode")
-        self.forecast_scale_loss_weight = float(
-            recipe.get("forecast_scale_loss_weight", 0.0)
-        )
-        self.forecast_scale_loss_scale_fraction = float(
-            recipe.get("forecast_scale_loss_scale_fraction", 0.05)
-        )
-        self.synthetic_unseen_training_mode = recipe.get(
-            "synthetic_unseen_training_mode")
-        self.synthetic_unseen_fraction = float(
-            recipe.get("synthetic_unseen_fraction", 0.0)
-        )
-        self.synthetic_unseen_loss_weight = float(
-            recipe.get("synthetic_unseen_loss_weight", 0.0)
-        )
-        self.reliability_polynomial_mode = recipe.get(
-            "reliability_polynomial_mode")
-        self.low_flow_calibration_mode = recipe.get(
-            "low_flow_calibration_mode")
-        self.low_flow_bin_loss_weight = float(
-            recipe.get("low_flow_bin_loss_weight", 0.0)
-        )
-        if self.forecast_scale_loss_mode not in (None, "signed_log_huber"):
-            raise ValueError(
-                f"unsupported forecast_scale_loss_mode "
-                f"{self.forecast_scale_loss_mode!r}")
-        if not 0.0 <= self.forecast_scale_loss_weight <= 1.0:
-            raise ValueError("forecast_scale_loss_weight must be in [0, 1]")
-        if self.forecast_scale_loss_scale_fraction <= 0.0:
-            raise ValueError("forecast_scale_loss_scale_fraction must be positive")
-        if self.synthetic_unseen_training_mode not in (
-                None, "observed_node_mask_reconstruction"):
-            raise ValueError(
-                "unsupported synthetic_unseen_training_mode "
-                f"{self.synthetic_unseen_training_mode!r}")
-        if self.synthetic_unseen_training_mode is None:
-            if (self.synthetic_unseen_fraction != 0.0
-                    or self.synthetic_unseen_loss_weight != 0.0):
-                raise ValueError(
-                    "synthetic-unseen fraction/weight require an enabled mode")
-        elif not (0.0 < self.synthetic_unseen_fraction < 1.0
-                  and 0.0 < self.synthetic_unseen_loss_weight < 1.0):
-            raise ValueError(
-                "synthetic-unseen fraction and loss weight must be in (0, 1)")
-        if self.reliability_polynomial_mode not in (
-                None, "sender_gated_i_a_a2_residual"):
-            raise ValueError(
-                "unsupported reliability_polynomial_mode "
-                f"{self.reliability_polynomial_mode!r}")
-        if self.low_flow_calibration_mode not in (
-                None, "role_horizon_residual_train_scale_bins"):
-            raise ValueError(
-                "unsupported low_flow_calibration_mode "
-                f"{self.low_flow_calibration_mode!r}")
-        if self.low_flow_calibration_mode is None:
-            if self.low_flow_bin_loss_weight != 0.0:
-                raise ValueError(
-                    "low-flow bin loss weight requires calibration mode")
-        elif not 0.0 < self.low_flow_bin_loss_weight < 1.0:
-            raise ValueError("low-flow bin loss weight must be in (0, 1)")
+        retired = ("reliability_polynomial_mode", "low_flow_calibration_mode",
+                   "synthetic_unseen_training_mode", "forecast_scale_loss_mode",
+                   "bounded_mae_weight", "history_linear_correction",
+                   "synthetic_unseen_fraction", "synthetic_unseen_loss_weight",
+                   "forecast_scale_loss_weight", "low_flow_bin_loss_weight")
+        if any(recipe.get(key) for key in retired):
+            raise ValueError("Retired candidate: use its archived source snapshot")
         self.fusion_mode = str(recipe.get("fusion_mode", "film"))
         if self.fusion_mode != "film":
             raise ValueError("the final ALFNet supports FiLM fusion only")
@@ -335,12 +225,6 @@ class Model(nn.Module):
             "recipe", {}
         )
         self.shared_input_imputer = GRINInputImputer(configs, graph_recipe)
-        self.reliability_polynomial_adapter = (
-            ReliabilityPolynomialAdapter(
-                self.raw_enc_in,
-                int(recipe.get("reliability_polynomial_hidden_dim", 8)),
-                float(recipe.get("reliability_polynomial_scale", 0.1)))
-            if self.reliability_polynomial_mode is not None else None)
 
         state_hidden_dim = int(model_cfg.get("state_hidden_dim", 32))
         state_dim = int(model_cfg.get("state_dim", 32))
@@ -374,12 +258,6 @@ class Model(nn.Module):
             bool(recipe.get("graph_diffusion_use_backward", True)),
             bool(recipe.get("graph_diffusion_add_self_loop", True)),
         )
-        self.forecast_calibration_head = (
-            ForecastCalibrationHead(
-                self.output_dim, int(configs.pred_len),
-                int(recipe.get("low_flow_calibration_hidden_dim", 16)),
-                float(recipe.get("low_flow_calibration_scale", 0.1)))
-            if self.low_flow_calibration_mode is not None else None)
 
         self.runtime_context = runtime_context
         self.static_asset_hash = runtime_context.static_asset_hash()
@@ -462,23 +340,10 @@ class Model(nn.Module):
                 f"assembled input has {x_enc.shape[-1]} channels, the lifecycle "
                 f"layout ends at {self.mask_index}")
 
-        if self.decoder_training_policy == "target_blind_direct_multi_horizon":
-            if (teacher_forcing_mask is not None
-                    and bool(teacher_forcing_mask.any())):
-                raise ValueError(
-                    "DIRECT_HEAD is target-blind and refuses a non-empty "
-                    "teacher-forcing mask")
-            shape = (
-                base.size(0), int(self.graph_expert.output_steps),
-                base.size(2), self.output_dim)
-            teacher_input = base.new_zeros(shape)
-            teacher_mask = torch.zeros(
-                shape[:-1], dtype=torch.bool, device=base.device)
-        else:
-            teacher_input, teacher_mask = masked_teacher_forcing(
-                batch["target"][..., :self.output_dim],
-                batch["decoder_available_mask"], teacher_forcing_mask,
-                self.training, "ALFNet")
+        teacher_input, teacher_mask = masked_teacher_forcing(
+            batch["target"][..., :self.output_dim],
+            batch["decoder_available_mask"], teacher_forcing_mask,
+            self.training, "ALFNet")
         return (common["adjacency"], x_enc, common["encoder_time_marks"],
                 common["decoder_time_marks"], teacher_input, teacher_mask)
 
@@ -486,8 +351,7 @@ class Model(nn.Module):
         """Run one v4 named batch. Full N everywhere, and no unmasked future.
 
         The autoregressive decoder can receive targets only through the
-        lifecycle-safe teacher mask.  DIRECT_HEAD is stricter: it constructs no
-        target-derived decoder input and refuses every non-empty teacher mask.
+        lifecycle-safe teacher mask.
         """
         (adjacency, x_enc, marks, horizon, teacher_input,
          teacher_mask) = self._v4_inputs(batch, runtime_context, teacher_forcing_mask)
@@ -522,12 +386,6 @@ class Model(nn.Module):
             raise ValueError(
                 f"the shared imputer returned {filled.size(2)} nodes, the context "
                 f"has {self.full_num_nodes}")
-        if self.reliability_polynomial_adapter is not None:
-            adapted_raw = self.reliability_polynomial_adapter(
-                filled[..., :self.raw_enc_in], adjacency,
-                filled[..., self.mask_index])
-            filled = torch.cat(
-                [adapted_raw, filled[..., self.raw_enc_in:]], dim=-1)
         # filled is [imputed_raw, availability(4), state_age, observation_mask];
         # each expert takes the prefix it declares.
         graph_input = filled[..., :self.graph_input_dim]
@@ -559,26 +417,6 @@ class Model(nn.Module):
             "forecast_role_balanced_beta": self.forecast_role_balanced_beta,
             "decoder_output_mode": self.decoder_output_mode,
         }
-        if self.forecast_scale_loss_mode is not None:
-            metadata.update({
-                "forecast_scale_loss_mode": self.forecast_scale_loss_mode,
-                "forecast_scale_loss_weight": self.forecast_scale_loss_weight,
-                "forecast_scale_loss_scale_fraction":
-                    self.forecast_scale_loss_scale_fraction,
-            })
-        if self.synthetic_unseen_training_mode is not None:
-            metadata.update({
-                "synthetic_unseen_training_mode":
-                    self.synthetic_unseen_training_mode,
-                "synthetic_unseen_fraction": self.synthetic_unseen_fraction,
-                "synthetic_unseen_loss_weight":
-                    self.synthetic_unseen_loss_weight,
-            })
-        if self.low_flow_calibration_mode is not None:
-            metadata.update({
-                "low_flow_calibration_mode": self.low_flow_calibration_mode,
-                "low_flow_bin_loss_weight": self.low_flow_bin_loss_weight,
-            })
         return metadata
 
     def forward(
@@ -593,6 +431,13 @@ class Model(nn.Module):
         full_node_axis=False,
         teacher_mask=None,
     ):
+        if self.observation_state_mode == "mask_only":
+            # Keep the complete mask and channel dimensions, but no role/age.
+            # Repeated mask features keep downstream projections trainable.
+            mask = x_enc[..., self.mask_index:self.mask_index + 1]
+            x_enc = torch.cat([x_enc[..., :self.raw_enc_in],
+                               mask.expand(*mask.shape[:-1], AVAILABILITY_COUNT + 1),
+                               mask], dim=-1)
         y_graph, y_patch, expert_aux_losses = self._run_experts(
             adjacency,
             x_enc,
@@ -605,10 +450,10 @@ class Model(nn.Module):
             teacher_mask,
         )
         _, last_availability = self._state(x_enc)
+        if self.observation_state_mode == "mask_only":
+            # Preserve the refinement network, remove its role-dependent scale.
+            last_availability = torch.full_like(last_availability, 1.0 / AVAILABILITY_COUNT)
         y_graph = self.graph_refiner(y_graph, adjacency, last_availability)
-        if self.forecast_calibration_head is not None:
-            y_graph = self.forecast_calibration_head(
-                y_graph, last_availability)
         return {
             "pred": y_graph,
             **self._forecast_metadata(expert_aux_losses),

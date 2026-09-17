@@ -96,6 +96,7 @@ class Model(nn.Module):
                    if name in model_cfg and model_cfg[name] not in (False, "crossformer", "kdtree")]
         if retired:
             raise ValueError(f"retired ALFTemporal options are not supported: {retired}")
+        self.local_context_only = bool(model_cfg.get("local_context_only", False))
         self.expert_input_dim = int(configs.raw_enc_in) + (
             LIFECYCLE_CHANNELS if self.lifecycle_input else 0
         )
@@ -164,6 +165,7 @@ class Model(nn.Module):
             ),
             crossformer_dropout=float(model_cfg.get("crossformer_dropout", 0.1)),
         )
+        self.backbone.local_context_only = self.local_context_only
         self.feature_dim = self.backbone.feature_dim
 
     @staticmethod

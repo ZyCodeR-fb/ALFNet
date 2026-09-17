@@ -9,6 +9,8 @@ from .SLPF import SLPF as SLPFBackbone
 
 class Model(SourceNativeV4Mixin, nn.Module):
 
+    method_variant = 'source_forecast_single_stage_v1'
+
     def __init__(self, configs, runtime_context=None):
         super().__init__()
         self.cfg = build_slpf_cfg(configs, runtime_context)

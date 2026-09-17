@@ -59,7 +59,7 @@ class STID(BaseModel):
         # self.time_series_emb_layer = nn.Conv2d(in_channels=1 * self.input_len, out_channels=self.embed_dim, kernel_size=(1, 1), bias=True)
 
         # encoding
-        self.hidden_dim = self.embed_dim + self.node_dim * int(self.if_spatial) + self.temp_dim_tid * int(self.if_day_in_week) + self.temp_dim_diw * int(self.if_time_in_day)
+        self.hidden_dim = self.embed_dim + self.node_dim * int(self.if_spatial) + self.temp_dim_tid * int(self.if_time_in_day) + self.temp_dim_diw * int(self.if_day_in_week)
         self.encoder = nn.Sequential(*[MultiLayerPerceptron(self.hidden_dim, self.hidden_dim) for _ in range(self.num_layer)])
 
         # regression

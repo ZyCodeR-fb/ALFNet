@@ -53,4 +53,4 @@ class Model(SourceNativeV4Mixin, nn.Module):
                 future_data = torch.cat([future_data, pad], dim=2)
         pred, _, _, _ = self.backbone(history_data, future_data)
         pred = pred.permute(0, 2, 1).unsqueeze(-1)
-        return {"pred": pred}
+        return {"pred": pred, "source_raw_mae": True}

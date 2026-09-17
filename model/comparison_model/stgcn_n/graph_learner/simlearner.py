@@ -56,12 +56,12 @@ class SimLearner(nn.Module):
                 # count how many elements are larger than threshold
                 if self.cfg["aug_node"] == True:
                     aug_sim_matrix = (similarity_matrix - similarity_matrix.min()) / (
-                        similarity_matrix.max() - similarity_matrix.min()
+                        (similarity_matrix.max() - similarity_matrix.min()).clamp_min(1e-12)
                     )
                     similarity_matrix = similarity_matrix - self.cfg["sparse_threshold"]
 
                 similarity_matrix = (similarity_matrix - similarity_matrix.min()) / (
-                    similarity_matrix.max() - similarity_matrix.min()
+                    (similarity_matrix.max() - similarity_matrix.min()).clamp_min(1e-12)
                 )
                 similarity_matrix = similarity_matrix - self.cfg["sparse_threshold"]
 

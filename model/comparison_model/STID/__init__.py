@@ -61,7 +61,9 @@ class Model(SourceNativeV4Mixin, nn.Module):
                 raise ValueError("STID requires x_t_mark with at least minute/hour features when if_T_i_D=True")
             minute = x_t_mark[..., 0].to(x_enc.device, dtype=x_enc.dtype)
             hour = x_t_mark[..., 1].to(x_enc.device, dtype=x_enc.dtype)
-            tod = ((hour * 60.0) + minute) / float(self.time_of_day_size)
+            # Calendar marks are raw minutes/hours. Normalize by minutes/day,
+            # then the source core maps [0,1) into its 288 five-minute bins.
+            tod = ((hour * 60.0) + minute) / 1440.0
             tod = tod.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, x_enc.shape[2], -1)
             features.append(tod)
         if self.use_day_of_week:
@@ -76,4 +78,4 @@ class Model(SourceNativeV4Mixin, nn.Module):
         model_input = self._build_stid_input(x_enc, x_t_mark)
         self.backbone.current_node_ids = self._resolve_current_node_ids(model_input.shape[2])
         pred = self.backbone(model_input)
-        return {"pred": pred.contiguous()}
+        return {"pred": pred.contiguous(), "source_raw_mae": True}
