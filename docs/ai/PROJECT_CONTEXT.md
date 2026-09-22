@@ -2,6 +2,92 @@
 
 ## Purpose and current scope
 
+2026-09-22 LATEST: manuscript reorganized by RQ1–4. Main Figures3/4/6 focus
+known-node paired validation windows;held-out full views remain appendixA.13.
+Mask-only moved intact toA.14;w/o names unified. Source predictions unchanged.
+New offline views and mapping:paper/rq_experiments_20260922/. Verified108points,
+9216residualcells,12unchanged final-table hashes. No new inference/test/training.
+
+2026-09-22 LATEST: intervention/metric audit complete. Mask-only changes both
+role/age inputs and role-dependent refinement scale (0/1/1/.25 to mean.5625);
+not isolated role ablation. LocalTemporalContext reorganizes same modules pernode,
+not standalone TSA deletion;GRIN ablation uses train-mean fill. Regression Focal
+is (e/std)*tanh(.1e),not classification Focal or MAPE. Keep UIGNN and consistent
+MAE inFigures3/4;MAPE does not reverse held-out weakness. Figure6 now all64-window
+residual atlas,old individualcases appendixA.11. Newaudit/figures:
+paper/support_metric_audit_20260922/. No training/inference/newtest/modelchange.
+
+2026-09-22 CURRENT presentation: user accepted cohort-specific design. Paper4.5
+uses held-out arrival versus known-node interruption;4.6 shows both cohorts
+separately. Final predictions reused offline, no new inference/test. Figures in
+paper/support_cohorts_20260922/. Main ablation table has7structural variants;
+2objective variants moved to appendixA.12 with findings retained in main prose.
+Case centers selected from truth mean/std/change,post-hoc descriptive,not wins.
+Original figures/failures remain archived and linked. Model/main tables unchanged.
+
+2026-09-22 LATEST COMPLETE: manuscript revised to academic experiment prose.
+Final-checkpoint validation mechanism plan1dcdf704 complete:ALFNet,UIGNN,MoGERNN,
+STBP;representatives selected by prior validation LifeAvg MAE in three classes.
+128 paired windows,20 arms,10240 predictions audited. Figures3/4/6 and main-text
+cases:paper/final_support_20260922/. All9 ablations retained,including unfavorable
+results. Test-feedback history moved to appendixA.10,mechanism protocolA.11.
+No architecture/training/main-table change or new test.
+
+2026-09-21 LATEST COMPLETE: authorized nine METRLA ablation tests finished under
+plan08f0a1b1 after all9 validation gates reproduced exactly. Paper4.4 now test;
+prior validation retained in appendixA.9; hyperparameter curves stay validation.
+Full reuses identical main-table record. Mask-only and no_role_balance improve
+all three test LifeAvg metrics, with early-stage tradeoffs; no blanket claim that
+every module helps. Final model/main tables unchanged, no test-based pruning.
+Reports: paper/ablations_metrla_test_20260921/. No evaluation workers remain.
+Older dated state statements below are historical and superseded by this entry.
+
+2026-09-21 COMPLETED: all9 final-Focal METRLA ablations audited, paper4.4 now
+validation results (not test). Removing temporal-FiLM/context/imputer increases
+MAE15.10/7.37/5.11%; removing refiner improves all LifeAvg metrics; role balancing
+has condition tradeoffs. Final model unchanged. Recommended final-paper layout:
+main comparison and fixed ablations test, hyperparameters validation. Nine ablation
+test evaluations are NOT yet done/authorized by this analysis request; no retraining
+needed if later authorized. No active workers observed. See latest task handoff.
+
+2026-09-20 LATEST: user explicitly authorized two METRLA candidate tests and
+test-based comparison, superseding earlier no-test/validation-only selection scope
+for lr_double and patch12 only. Both tests completed (planaefefd7c), original
+retained:32 first cells vs25/27; both candidates worsen MAE/RMSE. This is exploratory
+test reuse, not independent confirmation. Nine final-Focal METRLA ablations now
+running under plan196607d5, max5; full9 real preflight passed. Original core model
+and train_v4 unchanged; study-only adapter required to rebuild ablation checkpoints.
+Paper main LifeAvg table retains both datasets; other displays METRLA, BAY retained
+in appendix. No more test or final model replacement automatically authorized.
+
+2026-09-20 COMPLETED: METRLA9/9 hparameter runs audited, including capacity7/10/12;
+capacity8 reused. lr_double best LifeAvg, patch12 most improved cells29/33, wd_high
+also improves three LifeAvg metrics; all fail frozen early-stage constraint, lr_double
+also fails Unseen limit. Keep final METRLA Focal8 and BAY Focal16; paper4.7 now
+contains completed validation sensitivity. No new test, no final-table replacement.
+Analysis/audit:paper/hparams_metrla_20260920/. No active task workers observed.
+
+2026-09-20 NEW AUTHORITY: final model/results fixed; update paper to final test
+and run METRLA sensitivity, maximum5 parallel. Plan f45c7f30: nine new seed32
+single-factor runs (capacity, all-group LR, dropout, weight decay), reused Focal
+baseline. Train/validation only; no architecture/loss change, automatic final-model
+replacement, or new test. See latest task handoff for actual execution state.
+
+2026-09-20 COMPLETED: user authorized candidate test/table update. Only PEMSBAY
+patch16 passed the frozen validation screen; its prior-session validation/test
+finished. Current session repaired offline table publication, without new inference.
+Use Focal capacity16 for PEMSBAY updated tables, capacity8 unchanged for METRLA.
+New tables: paper/{validation,test}_seed32_hparam_patch16_20260918; old release
+tables/weights preserved. No active task training/evaluation. See latest handoff.
+
+2026-09-17 NEW AUTHORITY: user requests PEMSBAY-only hyperparameter sensitivity
+with final Focal architecture unchanged, permits4–5 concurrent training runs.
+First independent plan1ec318e9: seed32 patch capacity12/14/16 and effective optimizer
+LR multipliers0.5/2 (all three groups). Reuse current Focal32 as baseline; no new test,
+METRLA training, architecture/loss change, or automatic final-model replacement.
+Plan/report: `paper/hparams_pemsbay_20260917/`; inspect active handoff/queue status.
+Current user-committed HEAD783cbf7 supersedes older Git-state descriptions below.
+
 2026-09-17 COMPLETED: cleanup verified; all20 seed32 release tests finished under
 plan63b50760. Results: `paper/test_seed32/`; provenance: `artifacts/release_completion.json`.
 Focal remains locked. It ranks first for LifeAvg MAE/RMSE/MAPE on both datasets,

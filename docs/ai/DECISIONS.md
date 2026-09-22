@@ -1,5 +1,31 @@
 # Decision log
 
+## D-20260922-FINAL-MECHANISM-PRESENTATION
+
+User requested final-weight three-class comparisons and academic writing. Select representatives by existing validation LifeAvg MAE within each related-work class:UIGNN,MoGERNN,STBP. Run fixed-checkpoint validation interventions only;cases selected independently of prediction errors. Keep all9 ablation results rather than remove adverse rows to manufacture Full superiority. Move execution narrative and test-feedback history to supplementary documentation without erasing it. Architecture,final recipe and main tables remain unchanged.
+
+## D-20260920-TWO-TESTS-AND-FINAL-ABLATIONS
+
+New user authorization permits two specified METRLA tests and explicit test-informed
+comparison. Freeze planaefefd7c before opening: require nonworse three LifeAvg
+metrics with strict improvement and no loss of first-place count versus original,
+then prefer first/second counts and MAE. Both fail;original retained. Disclose
+exploratory test reuse,not independent confirmation. No continuing test search.
+
+Four hparameter axes suffice;soft router ignores top_k (k1/k5 numerical identity
+tested). Replace extra meaningless sweep with expanded nine-variant ablation study
+under final originalFocal. Separate structural/input controls and loss controls;
+METRLA-only train/validation,max5. Dedicated adapter preserves clean core model.
+
+## D-20260920-FIXED-MODEL-SENSITIVITY
+
+User fixes final model and authorizes METRLA hparameter training at max5 parallel.
+Nine single-factor seed32 runs plus reused baseline cover spatial token capacity,
+effective group learning rates, existing dropout, and AdamW decay. No depth, width,
+module or loss changes. This post-test validation study measures sensitivity; it
+does not reopen final selection or test. Paper separates final test evidence from
+historical Full-validation ablations. Primary-source design references:paper/hparams_metrla_20260920/PLAN.md.
+
 ## D-20260917-FROZEN-RELEASE-AND-TEST
 
 用户明确授权整理并清理历史产物后，用整理后的最终20权重（双速度数据集seed32）执行test。模型保持Focal，不再选择/优化。保留293份最佳权重及正文附录分析，旧源码/配置/日志/报告压缩按原路径归档并逐SHA核验，清理重复last.pt和旧目录。训练计划退休，test独立身份，不因整理伪造原训练配置哈希。
@@ -230,3 +256,14 @@ plan63b50760. Historical maximum differences0.0443968527 (METRLA) and0.023969459
 (PEMSBAY) are recorded separately. The other18 checkpoints retain historical-table
 validation gates. Test sampling uses the same fixed declared runtime subseed,
 with unchanged evaluation-design seed12026 and checkpoint scaler.
+# 2026-09-17 — bounded post-test PEMSBAY hyperparameter study
+
+User authorizes hyperparameter sensitivity with unchanged Focal architecture,
+first PEMSBAY only, maximum5 concurrent runs. Plan1ec318e9 fixes five seed32
+conditions: capacity12/14/16 versus existing11, or all three effective optimizer
+group LRs×0.5/2 versus existing1. Counts/layout remain32 parts; capacity changes
+real adjacency padding, not partition membership or learned parameter count.
+Do not vary architecture/target loss, do not edit original release sources/results.
+Use validation LifeAvg MAE selection and preregistered secondary guards in PLAN.md.
+Disclose this is a post-test exploratory follow-up, not untouched-test confirmation.
+No automatic expansion, new test, or replacement of already published local tables.

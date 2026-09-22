@@ -1,5 +1,42 @@
 # Experiment evidence index
 
+## 2026-09-22 Metric audit and all-window residual visualization
+
+Offline plan1dcdf704 reuse: all3metric rankings audited;MAE/RMSE/MAPE held-out best4/3/3of14. Keep originalMAE andUIGNN. Figure6replaced by4condition×4model residualatlas over64windows×12steps,12288cellsverified;allvalues/rawpredictions unchanged. `paper/support_metric_audit_20260922/` report,CSV,NPZ,PNG/PDF,provenance,audit. CorrectedMask-only/LocalContext/GRIN/Focaldefinitions;paperpositiveevidence-focused,limitationsretained;appendixA.13metrics. No training/newtest/modelchanges.
+
+## 2026-09-22 Cohort-specific reanalysis and presentation
+
+Offline reuse ofplan1dcdf704. Paper4.5 held-outarrival/knowninterruption;4.6 separatecohorts;4.8truth-centerpairedcases. `paper/support_cohorts_20260922/` contains3PNG/PDFfigures,188verifiedplotrows,16unchangedcasepredictions,selectionandaudit. Sevenstructuralvariantsremainmain;twoobjectivevariantsappendixA.12,allnineoutcomespreserved. No newinference/training/test/modelchange.
+
+## 2026-09-22 Final-model mechanisms and academic revision
+
+Plan1dcdf704 complete:ALFNet/UIGNN/MoGERNN/STBP,validation only,128windows×20arms×4models=10240 predictions. Representatives fixed by prior validation LifeAvg MAE per class;first4 held-out cases fixed before predictions. Updated Figures3/4/6,240 grouped rows,provenance and verification in `paper/final_support_20260922/`. Three intervention tests passed;main tables unchanged. All9 test ablations retained,exploratory-test history appendixA.10,mechanism protocolA.11. No training/newtest/modelchange.
+
+## 2026-09-21 Nine fixed ablation tests complete
+
+Plan08f0a1b1: all9 validation gates exactly reproduce training reports, then all9 tests complete. Full reused from final main table. `paper/ablations_metrla_test_20260921/` contains full330 cells, ranked Markdown/Excel, independent verification and analysis. Paper4.4 uses test; previous validation retained appendixA.9. Mask-only/no_role_balance improve all test LifeAvg metrics but have early-stage costs; final model unchanged, no blanket module-benefit claim. Source/config archive189 files verified;8 targeted tests passed; no active evaluation workers. This supersedes the pending-test status below.
+
+## 2026-09-21 Final-Focal ablations complete
+
+Plan196607d5 all9/9 audited; results/analysis/checkpoint hashes in paper/ablations_metrla_20260920. Paper4.4 updated to complete validation results, including no_refiner aggregate improvement and no_role_balance tradeoffs. No ablationtest run; recommended final-paper test table pending separate authorization. Final model unchanged.
+
+## 2026-09-20 Two candidate tests and expanded final ablations
+
+Test planaefefd7c complete:original retained,32first vs lr_double25/patch1227;both candidates MAE/RMSE regress. All raw33-cell tables and provenance in artifacts/evaluation/metrla_two_candidate_20260920; summary paper/hparams_metrla_20260920/TWO_CANDIDATE_TEST_20260920.md. Explicit test-informed comparison disclosed.
+
+Ablation plan196607d5:9newMETRLAseed32,Full reused,9/9 realbatch64 preflight passed,max5. Study-only adapter,corecode unchanged. Design/primary sources paper/ablations_metrla_20260920/PLAN.md;auto-outputresults/CSV/summary aftercomplete. Paper4.4 pending;BAY appendixA.7,oldFull ablationsA.8.
+
+## 2026-09-20 METRLA sensitivity completed and analyzed
+
+Plan f45c7f30 all9 complete, checkpoint/history/table identities audited. Capacity7/10/12 present;8 reused. lr_double/patch12/wd_high improve all LifeAvg metrics but none passes full frozen constraints. `paper/hparams_metrla_20260920/RESULTS_ANALYSIS_20260920.md` and completion_audit_20260920.json contain exact changes/checkpoint SHA. Manuscript4.7 now completed, all10 points and plot included; main tables/model remain fixed. No new test/inference.
+
+## 2026-09-20 METRLA sensitivity and final-test manuscript
+
+- Plan `configs/paper/metrla_hparams_20260920/plan.json`, SHA `f45c7f30e7027542a81b100ff49d445e8d12672ce8026d6236eaa02fdcf23d0a`:9 new seed32 single-factor runs, reused Focal baseline, max5 workers, validation only.
+- Real batch64 preflight9/9 passed, each2train+2validation, no skipped batches. Same parameter shapes/initial values/exposure/scaler, actual LR/dropout/decay checked.16 targeted tests passed; synthetic plot completion smoke passed;159-file source/config snapshot verified.
+- Paper `experiments_draft_cn.md` updated to final10-model test LifeAvg and condition analysis;60 numeric/rank cells checked; final_test_condition_gains_20260920 PNG/PDF generated from existing reports. Historical Full ablations/interventions remain explicitly validation evidence.
+- Results auto-write to `paper/hparams_metrla_20260920/`:results.json, sensitivity_cells.csv, sensitivity PNG/PDF, summary.md. Consult live queue; no automatic final-model replacement or paper conclusions.
+
 ## E-FINAL-SEED32-TABLES-20260916 — completed, nine-baseline pool
 
 Six valid reruns complete/exit0;14 historical rows reused. Both execution plan
@@ -354,3 +391,28 @@ time and must be rechecked before operational decisions.
 - Cleanup evidence: `artifacts/cleanup_verification.json`, `release_completion.json`;
   293 best weights and1259 metadata files SHA-verified.156-file evaluated source/config
   snapshot retained alongside run results; original research history separately archived.
+# 2026-09-17 — PEMSBAY Focal hyperparameter round1 (running)
+
+User-authorized architecture-preserving validation-only sensitivity, five seed32
+runs under plan1ec318e9: capacity12/14/16 or actual three-group LR×0.5/2.
+Existing capacity11/LR1 Focal validation reused; same32 partitions, no repartition.
+All five batch64 two-train/two-validation preflights passed; parameter count1,037,529,
+initial parameter hashes/shapes identical, actual LRs and data identities checked.
+Peak reserved15.74–15.87GiB;7 targeted tests passed. Model/trainer sources unchanged.
+Plan and literature: `paper/hparams_pemsbay_20260917/PLAN.md`.
+Queue/artifacts: `artifacts/experiments/pemsbay_hparams_20260917/<plan_sha>/`;
+tmux pemsbay-hparams-20260917, max5,45-second stagger. No current final accuracy claim.
+Post-test exploratory chronology explicitly disclosed; no new test or automatic model
+replacement. After completion, auto-collect validation results.json/sensitivity_cells.csv.
+# 2026-09-20 — patch16 validation/test update complete
+
+Five PEMSBAY runs audited; onlypatch16 passes frozen screen (best epoch77/88 epochs).
+Validation LifeAvg improvements1.75/1.67/2.56%; test1.81/2.28/3.09% MAE/RMSE/MAPE.
+Evaluation planeb8096d2 already completed validation(maxdelta0) and test in prior
+session. Offline publication had KeyError and omitted Excel labels; repaired through
+new collect_patch16_update.py without changing frozen evaluator or repeating test.
+Versioned tables paper/{validation,test}_seed32_hparam_patch16_20260918 contain
+1320 independently ranked cells total,80 verified labels,38 unchanged reused records.
+9 targeted tests passed, git diff --check and frozen candidate-plan check passed.
+Analysis: paper/hparams_pemsbay_20260917/RESULTS_ANALYSIS_20260920.md.
+Post-test exploratory chronology and Onset/Outage regressions disclosed; no new runs.

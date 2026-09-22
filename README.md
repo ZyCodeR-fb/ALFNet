@@ -1,6 +1,10 @@
 # MoGERNN / ALFNet 实验仓库
 
+2026-09-20结果更新：PEMS-BAY采用Focal容量16（patch16），METR-LA保持Focal容量8。新[validation表](paper/validation_seed32_hparam_patch16_20260918/validation_seed32_tables.xlsx)与[test表](paper/test_seed32_hparam_patch16_20260918/test_seed32_tables.xlsx)已完成；原权重与原表保留。见[完整分析及后验探索说明](paper/hparams_pemsbay_20260917/RESULTS_ANALYSIS_20260920.md)。
+
 当前最终模型是 **ALFNet（Focal）**：原Full架构＋MAE-Focal。模型已锁定，不依据test调参或重新选择。
+
+2026-09-17新增授权：[PEMS-BAY超参数敏感性实验](paper/hparams_pemsbay_20260917/README.md)。固定Focal架构与损失，首批仅5项seed32容量/学习率实验，validation选参；原最终权重及test表保持独立，不自动替换。运行状态见该实验索引。
 
 ## 工件与论文
 

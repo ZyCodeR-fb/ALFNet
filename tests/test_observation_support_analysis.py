@@ -10,7 +10,7 @@ from data_provider.lifecycle_roles import ROLE_VS, ROLE_NAS, ROLE_FS, ROLE_AAS
 def data():
     from experiments.v4_runner import build_v4_session
     torch.set_num_threads(2)
-    s=build_v4_session('configs/paper/metrla_seed32_nine_models/METRLA_ALFNet.yaml',
+    s=build_v4_session('configs/paper/final_seed32/METRLA_ALFNet.yaml',
                        device='cpu',batch_size=1,num_workers=0)
     return s.validation_loader.dataset
 
