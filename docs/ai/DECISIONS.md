@@ -1,5 +1,33 @@
 # Decision log
 
+## D-20261006-FOUR-DATASET-FINAL-SCHEME
+
+User accepts old speed and enhanced flow configurations as one parameterized
+ALFNet scheme and stops further scheme exploration. Exact four checkpoint hashes
+are frozen in paper/final_scheme_20261006/selected_configuration_manifest.json.
+Describe shared backbone with dataset-specific interpolation switch, residual
+scale and centering strength; alpha0 is identity. Do not disguise flow's
+mask-dependent input processing as universal offline preprocessing. Flow node-level
+heterogeneity motivates the treatment but does not establish isolated interpolation
+benefit; paired ablations will test that. Final-anchor ablation/OFAT design is in
+ACCEPTED_SCHEME_AND_STUDIES.md; execution identity and preflight remain pending.
+No new GPU/test was performed for this decision. Historical test-informed selection
+remains disclosed; preserve negative results and all prior checkpoints.
+
+## D-20261004-PARAMETERIZED-SUPPORT-SCHEME
+
+User explicitly clarifies that consistency means the same parameterized method,
+not identical numeric hyperparameters. Adopt visible-history interpolation,
+decoder residual scale and alpha times last-visible centering as one family;
+alpha=0 means no centering, .5 means partial centering. Keep teacher/output
+transformations consistent and use zero center for no history. This identifies
+04 alpha0 and08 alpha.5 as configurations of one method, not proof every module
+benefits every dataset. Disclose dataset-specific values and selection history.
+Interpolation is a rule with parameters/switches, not itself a scalar parameter.
+Authorize PEMS03 six-run alpha x LR validation matrix with unchanged protocols
+and eight reused baselines; no new test in this frozen training plan. Preserve
+unfavorable PEMS03 records regardless of main-paper dataset decision.
+
 ## D-20260922-FINAL-MECHANISM-PRESENTATION
 
 User requested final-weight three-class comparisons and academic writing. Select representatives by existing validation LifeAvg MAE within each related-work class:UIGNN,MoGERNN,STBP. Run fixed-checkpoint validation interventions only;cases selected independently of prediction errors. Keep all9 ablation results rather than remove adverse rows to manufacture Full superiority. Move execution narrative and test-feedback history to supplementary documentation without erasing it. Architecture,final recipe and main tables remain unchanged.

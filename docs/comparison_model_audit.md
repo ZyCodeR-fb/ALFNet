@@ -1,6 +1,58 @@
 # Comparison-model source and v4 adaptation audit
 
-## Current final-code repair — 2026-09-16
+## 2026-09-27: flow GinAR numerical recovery
+
+Original flow transfer LR.006 fails on PEMS03 at training batch4 (zero-based):
+loss1.907654016e9 and gradient normInf. A two-batch finite-value preflight missed
+this instability. The independent recovery plan uses LR.001 on all three flow
+datasets, retaining architecture, objective, optimizer/scheduler, seed32 and
+max100/patience10. Each dataset passed a full train epoch plus full33-cell
+validation, finite gradients and matching canonical counts, before freezing.
+Speed recipes remain unchanged; disclose this dataset-family LR difference.
+Evidence: paper/baseline_extension_20260927/RECOVERY.md and diagnosis JSONs;
+authority: configs/paper/baseline_recovery_20260927/plan.json. No test tuning.
+
+## 2026-09-27: Merlin model adapter and GenCast feasibility
+
+Merlin source STID teacher/student, MLP and loss files copied byte-identically
+from references/Merlin; see model/comparison_model/Merlin/SOURCE_MANIFEST.json.
+Adapter retains source node embeddings and four-view KD/CL, with explicit
+train-K supervision/projection masking and common scaler/calendar/input handling.
+CPU synthetic source forward and additive-loss parity, staged gradients, leakage
+refusal and target blindness tested. No ALFNet-specific modules/objectives used.
+Dedicated staged training is now implemented in scripts/train_merlin_v4.py,
+using common max100/patience10 per stage and source scheduler boundaries.
+Each stage has its own optimizer, scheduler, best/last checkpoints and RNG;
+stage/teacher SHA enter resume identity. The model is registered for evaluation,
+but generic training still refuses to discard KD/CL. Formal run authority and
+actual preflight/completion state are recorded in the independent
+configs/paper/baseline_extension_20260927/plan.json and task handoff.
+
+GenCast-L/H require genuine aligned weather/position assets and speed physical
+constraints; flow datasets lack positions and current common protocol has no
+weather/road-description inputs. Minimal faithful adaptation is not presently
+feasible across the five datasets. No fake zero weather or replacement physics;
+not registered/copied as an executable adapted model. Reason recorded in
+model/comparison_model/GenCast/README.md; source remains in references/GenCast.
+
+## Current authority — 2026-09-26 integrity recheck
+
+The executable SLPF wrapper is `source_forecast_single_stage_v1`; it does NOT
+execute the historical three-stage pipeline described below. Those paragraphs
+are retained historical records, superseded by the 2026-09-17 decision.
+STBP is a structural-pattern offline adaptation: its source per-node expandable
+pattern bank is replaced by `StructuralNodeEncoder`, in addition to omitting
+continual expansion/training. Thus neither current result represents the entire
+original method. This distinction is more specific than “fixed-graph adapter”.
+
+Local source comparison and synthetic CPU parity checks found exact forward
+agreement for SLPF's three cores and STBP's backbone when supplied identical
+node embeddings/patterns. This does not validate training-pipeline equivalence.
+Restoring complete methods is not a small interface repair under the frozen
+protocol. See [integrity recheck](../paper/SLPF_STBP_INTEGRITY_20260926.md).
+No runtime code, checkpoints, experiments, or evaluation settings were changed.
+
+## Historical final-code repair — 2026-09-16 (superseded for SLPF)
 
 Final Focal is locked; no further ALFNet optimization. See
 [final code audit](../paper/final_code_audit_20260915/README.md) for exact scope,

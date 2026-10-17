@@ -1,0 +1,9 @@
+# 两个speed迁移候选固定test
+
+2026-10-06用户明确授权对前次列出的两个较优新配置做test，不要求先满足validation27格。固定METRLA_center_zero_lr2_wd0.0001与PEMSBAY_center_zero_lr2_wd0.0001，均alpha0、decoder scale1、启用可见历史插值；容量分别7/16，dropout.1。
+
+独立评估计划引用训练计划0172f26946126daad874b19a2c0d1e43bc7216e643697b13f5d2b1c4235b8b4b。使用已按validation LifeAvg MAE选择的best.pt，先恢复对应训练adapter并检查method contract及CP/config/scaler/static/exposure/seed哈希，完整33格validation复核通过才打开test。最多2评估并发，无训练；现有GPU其他任务不干预。
+
+两项之外不新增候选，原METRLA_patch7/05_PEMSBAY_combo2与八基线test直接复用。报告全部33格、LifeAvg三指标、相对旧配置取舍；不得把历史test参与优化的结果描述为首次独立确认。结果不自动覆盖正式历史表，未达目标也完整保留。
+
+并行核查实际代码：插值发生于imputer输出后专家输入前，只替换有可见历史节点的缺失原始通道；倍率为ALFGraph递推残差scale而非LR或最终输出乘法；中心化使用标准化输入空间的最后可见值，teacher同变换，专家融合输出后加回。网络层与learnable参数不新增，但前向计算/模型方法契约变化，不能称整个算法完全未改。

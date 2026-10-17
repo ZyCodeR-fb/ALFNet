@@ -1,5 +1,140 @@
 # Project context
 
+2026-10-17 CLEANUP: advisor-accepted experiments frozen. Current entry
+`docs/FINAL_PROJECT_INDEX.md`; research lessons `docs/RESEARCH_LESSONS.md`.
+Final ALFNet and eight baselines retained; all final-family ablation/HP weights
+preserved. Cleanup inventory `archive/cleanup_20261017/plan.json`: 587 retained
+checkpoints, 222 obsolete/excluded checkpoints deleted; old catalog is historical.
+Registry now excludes retired baselines. Frozen historical plan hashes are not
+new-run authority. Source/evidence archive excludes deleted checkpoint binaries.
+
+
+2026-10-17 FINAL FIGURES: `paper/final_figures_20261017` has final-checkpoint
+validation/test figures2–6 and CSV evidence. PEMS08 mechanism now WD=.001;
+other final weights unchanged. Main mechanism figures consistently validation,
+test companions retained; not per-figure split cherry-picking. Four displayed
+ablations exclude GraphRefinement at user request; complete five-item evidence
+retained. v5 manuscript, experiments draft and advisor script updated.14 missing
+flow OFAT tests complete with exact validation replay; no training/reselection.
+
+2026-10-12 COMPLETION: all5 new WD=.001 PEMS08 ablations trained and tested,
+all validation replays exact. Test4/5 worsen all3LifeAvg; across4datasets3/5
+(AdaptiveRouting/SpatialContext/TemporalFiLM) worsen all12. StateAge11/12
+(PEMS04RMSE exception); GraphRefinement10/12(PEMS08MAE/RMSE improve).
+Current paired tables: paper/pems08_wd_ablation_test_20261012; manuscript
+table2 now uses new WD=.001 Full+5ablations. No new training queued.
+
+2026-10-12 UPDATE: PEMS08 final selection is now `13_PEMS08_weight_decay_0.001`.
+New authority: `paper/pems08_wd_test_20261012/selected_configuration_manifest.json`;
+other three datasets unchanged. Full validation replay exact; test LifeAvg
+36.779822/46.566932/42.999878,30/33first. Five paired ablations at WD=.001 are
+queued/running under independent plan `2c86d208...`, max5. Old paired ablations
+and mechanism figures remain explicitly labeled historical WD=.0001 anchors.
+Earlier dated frozen plans/results remain historical evidence, not current selection.
+
+2026-10-10 TEST COMPLETE: all48 ablations tested,48validationreplays exact.
+Two types worsen all4datasets×3LifeAvg ontest: SpatialContext andTemporal–FiLM;
+validation remains0types. Full1716celltesttables andsplitcomparison audited under
+paper/all_ablations_test_20261010. Retain all12types andsingle-seed/selection
+limitations. No model changes,newtraining orfurthersearch this analysis turn.
+
+2026-10-10 NEW TEST AUTHORITY: user explicitly requests test all48 completed
+ablations (12types×4main datasets). Plan35f30008 launched,max3eval; exact frozen
+weights/adapter contract,completevalidationreplaygate beforetest each.4Full tests
+reused bycheckpointidentity. All outcomes retained; no model reselection,training,
+baseline rerun orPEMS03. Detailed live-state pointers in activehandoff.
+
+2026-10-10 COMPLETED: all48 ablation runs (12types×4datasets) finished and
+audited with4 fixedFull references.0types worsen all12LifeAvg metrics; closest
+ALFRecon/TemporalFiLM11of12. Full complete1716-cell results/analysis under
+paper/ablations_complete_20261010. All counterexamples retained, no model or
+test-table changes and no further experiments launched/queued this turn.
+
+2026-10-09 LATEST: mechanism15/16 complete, combined10 ablation types currently
+0 with all4datasets×3LifeAvg worse; completedcounterexamples alreadyruleoutlast
+pendingtype. All findings published in paper/ablation_progress_20261009, no
+outcome-based suppression. User-authorized bounded8 gradient-path controls queued
+under29df497b after current16; samefinalanchors,max5,validationonly. No model
+reselection or claim that every component is universally beneficial.
+
+2026-10-08 CURRENT: BAY retry training finished but report export failed due to
+missing recovery-plan status. Repaired report from saved history + full best-weight
+validation replay, no train steps/checkpoint edits/test. All24 original ablations
+now packaged924cells. Mechanism16 queue unblocked and first GPU preflight started;
+formal training begins after all preflights. Exact details in active handoff.
+
+2026-10-08 LATEST: user authorizes more mechanistic ablations after flow
+noRefiner/noAge improvements.16 controls (four per frozen main dataset) queued
+under3b52de24 behind single OOM recovery. No production architecture or final
+configuration change. Report all prior/new results, never filter solely to make
+Full win every metric. New controls separate expert lifecycle input, FiLM gain,
+FiLM shift and neighbor mixing in output refinement. No PEMS03/newtest.
+
+2026-10-08 RESULTS: OFAT14/14 complete; ablation23/24 complete, BAY Spatial
+Context failed from GPU OOM. Existing results audited and packaged under
+paper/final_supplements_20261008. Single identical retry a5ab583c launched in
+independent root; automatic offline table refresh scheduled. No newtest or
+final-model replacement. Flow WD improvements and non-universal ablation
+benefits documented; preserve all outcomes, do not hide better ablated variants.
+
+2026-10-06 LATEST: user authorizes six named component ablations AFTER current
+OFAT completion, explicitly corrects scope to FOUR datasets (no PEMS03).
+Plan27c243b2 final_ablations_20261006 schedules24 new+4 frozenFull reuses, seed32,
+max5. Waiting tmux starts no GPU until predecessor success; preflight then formal
+training. No test, new model selection or baseline rerun. Other-userPID2546461
+protected. Prior five-dataset draft plan withdrawn before launch.
+
+2026-10-06 CURRENT RUN: user accepts completed speed fixed-anchor OFAT and
+authorizes only PEMS04/08 completion, max5. Study flow_ofat_20261006 uses final
+flow anchors, reuses4 exact configs and trains14 missing single-factor settings
+for capacity/LR/temporal dropout/weight decay. Plan3000c818; queue launched into
+preflight, then automatic formal training. No ablations/new test/model reselection
+in this immediate scope. Full runtime status in active handoff.
+
+2026-10-06 LATEST ACCEPTED FINAL: user ends scheme search and accepts one
+parameterized ALFNet backbone with dataset-specific input handling. Freeze
+METRLA capacity7/LR1/b0/s.3/alpha0, PEMSBAY capacity16/LR2/WD1e-5/b0/s.3/alpha0,
+PEMS04 capacity10/LR1/b1/s1/alpha0, PEMS08 capacity6/LR1/b1/s1/alpha.5.
+All dropout.1, other WD1e-4, seed32. Exact weights/configs and planned paired
+ablation/OFAT studies: paper/final_scheme_20261006/. No further method search.
+Interpolation is current-visible-window model input handling, not offline complete
+data preprocessing. Alpha0 disables centering. Current turn froze identities and
+analyzed saved results; new study configurations/preflight/queue not yet launched.
+Max5 training persists; no baseline retraining or PEMS03 reopening.
+
+2026-10-04 NEW AUTHORITY: transfer accepted support scheme to METR-LA and
+PEMS-BAY with dataset-specific hyperparameters, max5 concurrent. Frozen16-run
+speed_support_20261004 study: selected capacities7/16, dropout.1; center0/.5
+x LR.5/1/2 plus center1/LR1 each, and two PEMSBAY WD1e-4 controls against
+selectedWD1e-5. Preserve old speed configuration unless new scheme meets goals
+and shows improvement. No automatictest/baseline training; PEMS03 remains stopped.
+
+2026-10-04 LATEST RESULT/STOP: all six PEMS03 support-family configurations
+now have authorized test results. Best coverage remains alpha.5/LR1 at20/33;
+none meets27/33. Five additional fullvalidation replays are exact, no evaluation
+adapter bug found. User instructed to stop if repair is complex: stop PEMS03
+optimization, keep METR-LA/PEMS-BAY/PEMS04/PEMS08 main scope and retain complete
+PEMS03 evidence for appendix/limitations. No dataset/weight deletion. New evidence
+in paper/pems03_remaining_test_20261004; descriptive node/time shift analysis
+must not be presented as isolated causal proof or a prespecified benchmark choice.
+
+2026-10-04 LATEST AUTHORITY: user accepts one parameterized support scheme
+(visible interpolation + decoder residual scale + centering strength), with
+dataset-specific hyperparameters. PEMS04 alpha0/LR1 and PEMS08 alpha.5/LR1
+are accepted as the same scheme; identical fixed numerical values are not
+required. Reopen PEMS03 evaluation under this scheme: six validation trainings
+alpha{0,.5,1} x LR{1,2}, max5 concurrent. Retain existing PEMS03 evidence;
+main-paper reinstatement depends on reviewed results, not yet decided.
+Baseline/speed training and new test are outside this immediate run scope.
+
+2026-10-03 NEW AUTHORITY: main-paper dataset scope is METR-LA, PEMS-BAY,
+PEMS04 and PEMS08; retain PEMS03 as archived/appendix evidence, no raw/weight
+deletion. User reopened ALFNet optimization after two flow repair rounds failed
+to reach80% first cells. First evaluate new04/08 candidates, max5 concurrent;
+speed ALFNet transfer is authorized if promising, baselines must not retrain.
+Current study plan and live status are in the active handoff. Prior locked-model
+and last-round-stop statements are superseded for this authorized research only.
+
 ## Purpose and current scope
 
 2026-09-22 LATEST: manuscript reorganized by RQ1–4. Main Figures3/4/6 focus

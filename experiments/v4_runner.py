@@ -57,28 +57,20 @@ MODEL_ENTRY_POINTS = {
     "UIGNN": "model.comparison_model.UIGNN",
     "ALFNet": "model.ALFNet.ALFNet",
     "MoGERNN": "model.comparison_model.MoGERNN.MoGERNN",
-    "HA": "model.comparison_model.HA",
-    "FCLSTM": "model.comparison_model.FCLSTM",
     "STGCN": "model.comparison_model.STGCN",
-    "STGODE": "model.comparison_model.stgode",
-    "GWNET": "model.comparison_model.GWNet",
     "STID": "model.comparison_model.STID",
-    "STFiT": "model.comparison_model.STFiT",
     "SLPF": "model.comparison_model.SLPF",
     "PatchSTG": "model.comparison_model.PatchSTG",
     "STBP": "model.comparison_model.STBP",
-    "MCPST_FSL": "model.comparison_model.MCPST_FSL",
 }
 
 # Future-target access is a model contract, not a convenience inherited from
 # the common runner.  Only the two genuinely autoregressive decoders consume
-# the externally generated lifecycle-safe teacher mask.  ST-FiT owns a
-# different, source-native use of train targets (its node-augmentation VAE) in
-# its wrapper; every other comparison model is target-blind while predicting.
+# the externally generated lifecycle-safe teacher mask. Every other retained
+# comparison model is target-blind while predicting.
 DECODER_TRAINING_POLICIES = {
     "ALFNet": "lifecycle_masked_autoregressive_teacher_forcing",
     "MoGERNN": "source_masked_autoregressive_teacher_forcing",
-    "STFiT": "source_future_node_augmentation_not_teacher_forcing",
 }
 TARGET_BLIND_DECODER_POLICY = "target_blind_non_autoregressive"
 
@@ -521,7 +513,7 @@ def train_one_epoch(session, optimizer, epoch, max_batches=None, loss_name="mse"
             optimizer.zero_grad(set_to_none=True)
             continue
         losses["optimize"].backward()
-        if session.model_name in ('GinAR', 'GWNET', 'STID'):
+        if session.model_name in ('GinAR', 'STID'):
             torch.nn.utils.clip_grad_norm_(session.model.parameters(), 5.)
         optimizer.step()
         totals["batches"] += 1

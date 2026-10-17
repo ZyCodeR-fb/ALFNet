@@ -1,0 +1,9 @@
+# Support-transfer 候选测试计划
+
+用户本轮授权分析并测试值得保留的方案；此前同一任务已明确同意不足80%仍可测试探索性候选。此次04桥接＋倍率达到27/33且三项LifeAvg均优于八个基线；08同方案26/33且三项LifeAvg均优于基线，属于接近目标、值得核验的共同机制。
+
+固定四项seed32：02_PEMS04_center、06_PEMS04_bridge_delta1、07_PEMS08_bridge_delta1、09_PEMS08_bridge_center。04center为25/33且本轮三项LifeAvg最低；08bridge_center为23/33且本轮MAPE最低，相比bridge_delta1三项平均均低，作为平均误差与覆盖的取舍。无其他候选自动追加。
+
+复用两个原版及八个基线的现有test。准确加载experiments.flow_support_transfer.adapter，核对checkpoint方法合同及配置/数据/scaler/暴露哈希。完整33格validation重放一致才打开test。最多三个并发评估，不训练，不改掩码/指标/超参数。所有历史test曾参与研究设计，本轮属于探索性评估，不是未接触test的独立确认。
+
+输出完整validation和test主表/阶段表及权重审计、相对八基线胜数。初步成功目标为每数据集至少27/33与LifeAvg三指标领先基线；与原ALFNet的取舍单独披露，不捏造新退化门槛。正式四表暂不覆盖；若同一机制在两个flow上值得保留，后续speed ALFNet迁移已有用户授权，但需单独冻结范围和身份。PEMS03不在本轮范围，基线不得重训。

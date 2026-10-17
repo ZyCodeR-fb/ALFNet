@@ -1,5 +1,9 @@
 # 实验工件索引
 
+2026-10-17清理后请以 `../docs/FINAL_PROJECT_INDEX.md` 和
+`../archive/cleanup_20261017/plan.json` 为准。旧 catalog 包含已删除的早期权重，
+下文的“20个最终模型／293份权重”属于历史快照，不代表当前保留范围。
+
 2026-09-20新增结果：PEMS-BAY Focal容量16更新版权重仍位于`experiments/pemsbay_hparams_20260917/1ec318e96fdff89dc664ac66868a0d5a34d2d0e0c5ef75d158381a3f4d8b1bc4/runs/patch16/PEMSBAY/ALFNet/bddd477b2c565e53/seed32/best.pt`，原main目录容量11权重不覆盖。精确配置与权重SHA见`configs/paper/pemsbay_patch16_test_20260918.json`和新表provenance。评估结果在`evaluation/pemsbay_patch16/eb8096d22272680525d340befde297d10ab87c6d91186bdc798dd5371f3f400d/`；validation/test/TABLES_COMPLETE均完成。
 
 - `models/main/<dataset>/<model>/seed32/`：最终20个模型；ALFNet就是锁定的Focal。包含原样best.pt、运行配置config.yaml、原始配置config.original.yaml、validation表及provenance.json。

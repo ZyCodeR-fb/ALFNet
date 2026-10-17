@@ -2,7 +2,7 @@
 
 | Task ID | Status | Handoff | Summary |
 |---|---|---|---|
-| `T-20260908-support-ablations` | COMPLETE: ablation/metric audit and residual visualization | [task handoff](handoffs/T-20260908-support-ablations/HANDOFF.md) | Corrected intervention explanations;MAE retained consistently,three metrics audited;Figure6 all-window residual atlas,12288 cells verified. Model/main tables unchanged,offline only. |
+| `T-20260908-support-ablations` | COMPLETE: advisor-accepted experiments and repository cleanup | [task handoff](handoffs/T-20260908-support-ablations/HANDOFF.md) | Final architectures and587 checkpoints retained;222 obsolete/excluded weights removed with inventory. Sources/evidence archived, research lessons and current project index written;62 targeted tests passed. |
 
 There is one active research handoff. The shared-context initialization itself is a
 completed documentation operation, not a research task.

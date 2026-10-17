@@ -1,0 +1,63 @@
+runtime:
+  model: STID
+  model_variant: baseline_extension_20260927_PEMS04_STID
+  model_recipe: source_architecture_v4_adapter
+  mode: train
+  t_mark: true
+dataset:
+  dloader_name: PEMS04
+  data_path: ./data_v4/PEMS04/raw_data.pkl
+  unknown_nodes_path: ./data_v4/PEMS04/unknown_nodes.npy
+  input_len: 12
+  pred_len: 12
+  look_back: 0
+  slide_step: 1
+  input_features: q
+  target_features: q
+  freq: min
+training:
+  device: cuda:0
+  seed: 32
+  max_epoch: 100
+  patience: 10
+  stop_based: val_lifecycle
+  batch_size: 16
+  num_workers: 0
+  loss: mae
+  optimizer: adam
+  scheduler: MultiStepLR
+  scheduler_patience: 1
+  lr: 0.002
+  weight_decay: 0.0001
+  d_model: 64
+  e_layers: 2
+  d_layers: 1
+  k_hop: 1
+lifecycle:
+  train_for_async_lifecycle: false
+  lifecycle_role_features: false
+  lifecycle_history_age_feature: false
+  lifecycle_observation_mask_feature: false
+  lifecycle_age_mode: state_duration
+  lifecycle_training_strategy: lcbt_v4
+  lcbt_validation_seed: 12026
+  lcbt_train_end_ratio: 0.6
+  lcbt_val_end_ratio: 0.8
+  lcbt_test_start_ratio: 0.8
+  lcbt_scaler_end_ratio: 0.6
+  lcbt_zero_history_ratio: 0.25
+  lcbt_steady_ratio: 0.25
+  lcbt_join_ratio: 0.25
+  lcbt_fault_ratio: 0.25
+family:
+  model:
+    node_dim: 32
+    embed_dim: 32
+    num_layer: 3
+    temp_dim_tid: 32
+    temp_dim_diw: 32
+    time_of_day_size: 288
+    day_of_week_size: 7
+    if_T_i_D: true
+    if_D_i_W: true
+    if_node: true

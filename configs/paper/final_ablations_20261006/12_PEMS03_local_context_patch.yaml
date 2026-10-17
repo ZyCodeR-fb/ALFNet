@@ -1,0 +1,73 @@
+runtime:
+  model: ALFTemporal
+  model_variant: alftemporal_ar_base_metrla_patch8_v1
+  model_recipe: filtered_patch
+  mode: train
+  t_mark: true
+dataset:
+  dloader_name: PEMS03
+  data_path: ./data_v4/PEMS03/raw_data.pkl
+  unknown_nodes_path: ./data_v4/PEMS03/unknown_nodes.npy
+  input_len: 12
+  pred_len: 12
+  look_back: 0
+  slide_step: 1
+  input_features: q
+  target_features: q
+  freq: min
+training:
+  device: cuda:0
+  seed: 32
+  max_epoch: 100
+  patience: 10
+  stop_based: val_lifecycle
+  batch_size: 64
+  num_workers: 8
+  loss: mse
+  optimizer: adamw
+  scheduler: None
+  scheduler_patience: 1
+  lr: 5.0e-05
+  weight_decay: 0.0001
+  d_model: 64
+  e_layers: 2
+  d_layers: 1
+  k_hop: 1
+  teacher_forcing_mode: linear_decay
+  teacher_forcing_decay_epochs: 40
+  early_stopping_start_epoch: 40
+lifecycle:
+  train_for_async_lifecycle: true
+  lifecycle_role_features: true
+  lifecycle_history_age_feature: true
+  lifecycle_observation_mask_feature: true
+  lifecycle_age_mode: state_duration
+  lifecycle_training_strategy: lcbt_v4
+  lcbt_validation_seed: 12026
+  lcbt_train_end_ratio: 0.6
+  lcbt_val_end_ratio: 0.8
+  lcbt_test_start_ratio: 0.8
+  lcbt_scaler_end_ratio: 0.6
+  lcbt_zero_history_ratio: 0.25
+  lcbt_steady_ratio: 0.25
+  lcbt_join_ratio: 0.25
+  lcbt_fault_ratio: 0.25
+family:
+  model:
+    lifecycle_input: true
+    emit: features
+    layers: 1
+    tem_patchsize: 12
+    tem_patchnum: 1
+    recur_times: 5
+    spa_patchsize: 16
+    factors: 1
+    crossformer_router_factor: 4
+    crossformer_dropout: 0.1
+    input_dims: 64
+    node_dims: 32
+    tod_dims: 32
+    dow_dims: 32
+    tod: 288
+    dow: 7
+    local_context_only: true

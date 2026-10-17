@@ -99,16 +99,14 @@ def test_future_target_access_is_model_specific_not_a_shared_baseline_upgrade():
         "lifecycle_masked_autoregressive_teacher_forcing"
     assert decoder_training_policy("MoGERNN") == \
         "source_masked_autoregressive_teacher_forcing"
-    assert decoder_training_policy("STFiT") == \
-        "source_future_node_augmentation_not_teacher_forcing"
-    for model in set(v4_runner.MODEL_ENTRY_POINTS) - {"ALFNet", "MoGERNN", "STFiT"}:
+    for model in set(v4_runner.MODEL_ENTRY_POINTS) - {"ALFNet", "MoGERNN"}:
         assert decoder_training_policy(model) == "target_blind_non_autoregressive"
 
 
 def test_non_autoregressive_baseline_gets_no_teacher_mask(train_dataset):
     batch = next(iter(DataLoader(train_dataset, batch_size=2, shuffle=False)))
     session = type("Session", (), {
-        "model_name": "GWNET",
+        "model_name": "STID",
         "seed_contract": {"derived": {"teacher_forcing": 123}},
         "args": type("Args", (), {
             "teacher_forcing_mode": "linear_decay",

@@ -1,5 +1,12 @@
 # MoGERNN / ALFNet 实验仓库
 
+## 当前入口（2026-10-17）
+
+实验已定稿。当前四数据集、ALFNet 和八个对比模型以
+[整理索引](docs/FINAL_PROJECT_INDEX.md)为准；下方 September 记录是历史状态。
+最终参数不由 `artifacts/models/main` 目录名决定。
+
+
 2026-09-20结果更新：PEMS-BAY采用Focal容量16（patch16），METR-LA保持Focal容量8。新[validation表](paper/validation_seed32_hparam_patch16_20260918/validation_seed32_tables.xlsx)与[test表](paper/test_seed32_hparam_patch16_20260918/test_seed32_tables.xlsx)已完成；原权重与原表保留。见[完整分析及后验探索说明](paper/hparams_pemsbay_20260917/RESULTS_ANALYSIS_20260920.md)。
 
 当前最终模型是 **ALFNet（Focal）**：原Full架构＋MAE-Focal。模型已锁定，不依据test调参或重新选择。

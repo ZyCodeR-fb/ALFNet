@@ -1,5 +1,8 @@
 # 论文文件
 
+当前定稿入口见 `../docs/FINAL_PROJECT_INDEX.md`。最终主表与参数来源为
+`pems08_wd_test_20261012/`，最终图为 `final_figures_20261017/`；以下为历史记录。
+
 2026-09-20当前更新版：`validation_seed32_hparam_patch16_20260918/`与`test_seed32_hparam_patch16_20260918/`。仅PEMS-BAY Focal改为容量16；METR-LA和九基线复用。原表保留。结论及适配/后验探索限制见`hparams_pemsbay_20260917/RESULTS_ANALYSIS_20260920.md`。
 
 - `validation_seed32/`：最终Focal＋九基线、两速度数据集seed32的已核验validation表。

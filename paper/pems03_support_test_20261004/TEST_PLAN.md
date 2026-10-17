@@ -1,0 +1,7 @@
+# PEMS03近门槛单候选test
+
+2026-10-04最新明确授权：用户允许最接近要求的候选进行test，检查test胜格是否增加。固定唯一候选PEMS03_center_half_lr1（中心化0.5、学习率×1），其validation26/33未达到27格，但三项LifeAvg均领先八基线且本轮最低。本次是授权例外，不改写validation结果或原训练计划门槛。
+
+使用训练时完整validation LifeAvg MAE选择的best.pt（epoch57），不根据test重新选epoch。先检查训练计划753d86e9161d5fe12b89765f00da4293cedfc024739b12c51719623af125efa6及配置/权重hash/方法契约，再完整复核33格validation。通过后执行一次完整test，不改变划分、输入、掩码、指标、loss或模型，不重训基线或其他模型。
+
+测试判定仍报告至少27/33第一和三项LifeAvg分别领先八基线。历史原版/修复test直接复用；保留新旧结果，全部主表/阶段表输出。不自动追加其他候选test或训练，不自动改正文数据集和正式历史表。单seed且历史test影响研究方向，不能称为未观察过的独立holdout确认。
