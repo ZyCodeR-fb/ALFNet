@@ -2,6 +2,15 @@
 
 任务说明：[PROMPT_ARS_PAPER_CN.md](../../../../paper/writing_20261020/PROMPT_ARS_PAPER_CN.md)。用 ARS（academic-research-skills 3.23.1）补写方法、摘要、结论 → NeurIPS LaTeX → 模拟评审 → 修改。实验已冻结；不训练、不评估、不访问测试集、不改模型/配置/权重/结果；不 commit/push。
 
+## 作者第二批意见修改 — 2026-10-25（已获授权提交 git，不推送）
+
+- **用户指令**：引言不写模块来自他人工作，必要时只写“借鉴其思想”；方法章删 3.6、删文献编号；实验 4.1 删未比较方法理由与基线细节，训练与实现精简，不写测试结果参与配置决策；表 2 图注删 PEMS08 权重衰减说明；结论删“贡献不在于基础算子”、局限只留一两点；同类问题一并修改；不存快照，适当时提交 git。
+- **Completed**：脚本 30 处替换 + 5 段删除（逐条见 `paper/latex_neurips_20261020/notes/V6_CHANGELOG_CN.md` 第四轮）；重新生成 sections/*.tex；README、CHANGES_FOR_ADVISOR 更新。
+- **Verified**：texlint 0 问题；`make_tables.py --check` 一致；方法章 `\citep` 为 0；无 `sec:3_6` 引用残留。
+- **Facts**：`.gitignore` 的 `figures/` 规则使 `paper/latex_neurips_20261020/figures/` 未进入 aa277c7；本次用 `git add -f` 加入。cho2014learning、shazeer2017outrageously、wang2023graph 不再被引用。
+- **Modified but unverified**：未编译 PDF（本机无 TeX）。
+- **Next**：作者上传 sections/*.tex 覆盖 Overleaf 并编译；自行重绘图 1。
+
 ## 作者意见修改 — 2026-10-25（md 与 LaTeX 同步；不再打包 zip）
 
 - **用户指令**：按作者列出的摘要/引言/方法问题（一.1–一.4、二.1–二.7、三.1–三.3）及同类问题修改；参考 `references/paper/{MoGERNN,SIML-MSIGN}.md` 的写法；`manuscript_v6_cn.md` 与 LaTeX 同时修改；Overleaf 项目已分享导师，作者自行上传覆盖，不再生成 zip。

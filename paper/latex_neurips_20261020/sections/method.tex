@@ -1,11 +1,11 @@
 \section{方法}\label{sec:method}
-图\ref{fig:arch}给出 ALFNet 的总体架构。\ref{sec:3_1}节定义问题与 OS 的表示，对应图中左列的输入；\ref{sec:3_2}–\ref{sec:3_4}节依次介绍 SAHC、ALFTemporal 与 ALFGraph，分别对应图中第二列、右上与右下部分；\ref{sec:3_5}节与\ref{sec:3_6}节说明训练目标与数据集特定设置。
+图\ref{fig:arch}给出 ALFNet 的总体架构。\ref{sec:3_1}节定义问题与 OS 的表示，对应图中左列的输入；\ref{sec:3_2}–\ref{sec:3_4}节依次介绍 SAHC、ALFTemporal 与 ALFGraph，分别对应图中第二列、右上与右下部分；\ref{sec:3_5}节给出训练目标。
 
 \begin{figure}[t]
 \centering
 % 图1：PPT 版架构图，模块标注待与正文统一；图中 Restore 之后的 Y0 对应正文的 Ỹ。
 \includegraphics[width=\textwidth]{figures/alfnet.png}
-\caption{\textbf{ALFNet 总体架构。}左列为输入：可见历史 $\mathbf{X}$、生命周期上下文 $\mathbf{S}=[\mathbf{R},\mathbf{a},\mathbf{M}]$ 与静态路网（\ref{sec:3_1}节）；第二列为 SAHC（\ref{sec:3_2}节）；右上为 ALFTemporal 及其 FiLM 参数头（\ref{sec:3_3}节）；右下为 ALFGraph，包括 OS 条件化的图编码器、FiLM 调制、残差自回归解码、参考恢复与角色缩放图修正（\ref{sec:3_4}节）。带*的步骤只在部分数据集上启用（\ref{sec:3_6}节）。图中省略批量维度，曲线与矩阵元素为示意。}
+\caption{\textbf{ALFNet 总体架构。}左列为输入：可见历史 $\mathbf{X}$、生命周期上下文 $\mathbf{S}=[\mathbf{R},\mathbf{a},\mathbf{M}]$ 与静态路网（\ref{sec:3_1}节）；第二列为 SAHC（\ref{sec:3_2}节）；右上为 ALFTemporal 及其 FiLM 参数头（\ref{sec:3_3}节）；右下为 ALFGraph，包括 OS 条件化的图编码器、FiLM 调制、残差自回归解码、参考恢复与角色缩放图修正（\ref{sec:3_4}节）。带*的步骤只在部分数据集上启用（\ref{sec:4_1}节）。图中省略批量维度，曲线与矩阵元素为示意。}
 \label{fig:arch}
 \end{figure}
 
@@ -22,7 +22,7 @@ a_{t,n}=\begin{cases}1, & \text{节点 } n \text{ 在第 } t \text{ 步为 AAS},
 \mathbf{S}_t=[\mathbf{R}_t,\ \mathbf{a}_t,\ \mathbf{m}_t]\in\mathbb{R}^{N\times 6},\qquad t=1,\dots,L.
 \end{equation}
 
-\textbf{场景与阶段。} 评价按目标节点在窗口内的观测角色轨迹构造四类场景，事件持续步数 $m$ 在 $1$ 至 $L$ 内均匀抽取：Unseen 中目标节点全程为 VS；Steady 中全程为 AAS；Join 中前 $L-m$ 步为 VS、最后 $m$ 步为 NAS；Fault 中前 $L-m$ 步为 AAS、最后 $m$ 步为 FS。Join 与 Fault 的本地证据随 $m$ 积累或流失：Join 在 $m=1$ 时只有一个新读数，$m=L$ 时整个窗口都处于可读状态；Fault 在 $m=1$ 时只缺最后一步，$m=L$ 时整个窗口都没有读数。因此再按 $m$ 划分阶段：Join 分为冷启动（Cold）、预热（Warm）与就绪（Ready），Fault 分为中断初期（Onset）、证据衰减（Decay）与完全中断（Outage），分别对应 $m=1$、$2\le m\le L-1$ 与 $m=L$。训练阶段四类场景均在已知节点上模拟；评价时，Unseen 与 Join 在对应阶段的保留节点上构造，Steady 与 Fault 在已知节点上构造。窗口内可见读数数 $q_n=\sum_{t}M_{t,n}$ 只用于描述 OS 的多少，不作为额外输入。评价中的观测角色与状态进度由协议精确给出；在实际应用中，它们需要由接入记录与故障检测提供，可能存在延迟或误判，本文没有评估这类误差的影响。
+\textbf{场景与阶段。} 评价按目标节点在窗口内的观测角色轨迹构造四类场景，事件持续步数 $m$ 在 $1$ 至 $L$ 内均匀抽取：Unseen 中目标节点全程为 VS；Steady 中全程为 AAS；Join 中前 $L-m$ 步为 VS、最后 $m$ 步为 NAS；Fault 中前 $L-m$ 步为 AAS、最后 $m$ 步为 FS。Join 与 Fault 的本地证据随 $m$ 积累或流失：Join 在 $m=1$ 时只有一个新读数，$m=L$ 时整个窗口都处于可读状态；Fault 在 $m=1$ 时只缺最后一步，$m=L$ 时整个窗口都没有读数。因此再按 $m$ 划分阶段：Join 分为冷启动（Cold）、预热（Warm）与就绪（Ready），Fault 分为中断初期（Onset）、证据衰减（Decay）与完全中断（Outage），分别对应 $m=1$、$2\le m\le L-1$ 与 $m=L$。训练阶段四类场景均在已知节点上模拟；评价时，Unseen 与 Join 在对应阶段的保留节点上构造，Steady 与 Fault 在已知节点上构造。窗口内可见读数数 $q_n=\sum_{t}M_{t,n}$ 只用于描述 OS 的多少，不作为额外输入。本文假设观测角色与状态进度已知，实际应用中可由传感器接入记录与故障检测获得。
 
 \textbf{预测任务。} 在上述设置下，预测是在固定模型参数下学习映射
 \begin{equation}\label{eq:3}
@@ -32,9 +32,9 @@ a_{t,n}=\begin{cases}1, & \text{节点 } n \text{ 在第 } t \text{ 步为 AAS},
 
 \subsection{观测支持感知历史补全（SAHC）}\label{sec:3_2}
 
-SAHC（图\ref{fig:arch}第二列）对全部 $N$ 个节点、完整的 $L$ 步历史只运行一次，依次包括双向图循环补全、窗口内插值与参考中心化；后两步只在部分数据集上启用（图中以*标记，取值见\ref{sec:3_6}节）。
+SAHC（图\ref{fig:arch}第二列）对全部 $N$ 个节点、完整的 $L$ 步历史只运行一次，依次包括双向图循环补全、窗口内插值与参考中心化；后两步只在部分数据集上启用（图中以*标记，取值见\ref{sec:4_1}节）。
 
-\textbf{双向图循环补全。} SAHC 沿时间正、反两个方向各运行一个图循环补全层~\citep{cini2022filling}。以正向为例，记外生输入 $\boldsymbol{\eta}_t=[\mathbf{R}_t,\mathbf{a}_t]\in\mathbb{R}^{N\times5}$，隐藏状态 $\mathbf{h}_0=\mathbf{0}\in\mathbb{R}^{N\times64}$。对 $t=1,\dots,L$，先由上一隐藏状态给出初步估计，并保留可见位置的观测值：
+\textbf{双向图循环补全。} SAHC 沿时间正、反两个方向各运行一个图循环补全层。以正向为例，记外生输入 $\boldsymbol{\eta}_t=[\mathbf{R}_t,\mathbf{a}_t]\in\mathbb{R}^{N\times5}$，隐藏状态 $\mathbf{h}_0=\mathbf{0}\in\mathbb{R}^{N\times64}$。对 $t=1,\dots,L$，先由上一隐藏状态给出初步估计，并保留可见位置的观测值：
 \begin{equation}\label{eq:4}
 \hat{\mathbf{x}}^{(1)}_t=\mathbf{h}_{t-1}\mathbf{W}_1,\qquad \mathbf{x}^{(1)}_t=\mathbf{m}_t\odot\mathbf{x}_t+(\mathbf{1}-\mathbf{m}_t)\odot\hat{\mathbf{x}}^{(1)}_t.
 \end{equation}
@@ -49,7 +49,7 @@ SAHC（图\ref{fig:arch}第二列）对全部 $N$ 个节点、完整的 $L$ 步�
 \begin{equation}\label{eq:6}
 \mathbf{x}^{(2)}_t=\mathbf{m}_t\odot\mathbf{x}_t+(\mathbf{1}-\mathbf{m}_t)\odot\hat{\mathbf{x}}^{(2)}_t,\qquad \mathbf{h}_t=\mathrm{GRU}_{\mathcal{D}}\big([\mathbf{x}^{(2)}_t,\ \mathbf{m}_t,\ \boldsymbol{\eta}_t],\ \mathbf{h}_{t-1}\big),
 \end{equation}
-其中 $\mathrm{GRU}_{\mathcal{D}}$ 为门控循环单元（GRU）~\citep{cho2014learning}，门控形式与式~\eqref{eq:19}相同，但三个门中的线性变换替换为二阶扩散卷积 $\mathcal{D}(\mathbf{U})=[\mathbf{U},\mathbf{P}_{\mathrm f}\mathbf{U},\mathbf{P}_{\mathrm f}^{2}\mathbf{U},\mathbf{P}_{\mathrm b}\mathbf{U},\mathbf{P}_{\mathrm b}^{2}\mathbf{U}]\,\mathbf{W}_{\mathcal{D}}$~\citep{li2018diffusion}，各门的 $\mathbf{W}_{\mathcal{D}}$ 相互独立。反向层在时间反转的序列上执行相同计算，参数独立。记正向与反向在第 $t$ 步的表示为 $\overrightarrow{\boldsymbol{\rho}}_t$ 与 $\overleftarrow{\boldsymbol{\rho}}_t$，二者在每个历史位置上与掩码拼接，经多层感知机（MLP）融合为重建值，最后保留可见读数：
+其中 $\mathrm{GRU}_{\mathcal{D}}$ 为门控循环单元（GRU），门控形式与式~\eqref{eq:19}相同，但三个门中的线性变换替换为二阶扩散卷积 $\mathcal{D}(\mathbf{U})=[\mathbf{U},\mathbf{P}_{\mathrm f}\mathbf{U},\mathbf{P}_{\mathrm f}^{2}\mathbf{U},\mathbf{P}_{\mathrm b}\mathbf{U},\mathbf{P}_{\mathrm b}^{2}\mathbf{U}]\,\mathbf{W}_{\mathcal{D}}$，各门的 $\mathbf{W}_{\mathcal{D}}$ 相互独立。反向层在时间反转的序列上执行相同计算，参数独立。记正向与反向在第 $t$ 步的表示为 $\overrightarrow{\boldsymbol{\rho}}_t$ 与 $\overleftarrow{\boldsymbol{\rho}}_t$，二者在每个历史位置上与掩码拼接，经多层感知机（MLP）融合为重建值，最后保留可见读数：
 \begin{equation}\label{eq:7}
 \mathbf{X}^{\mathrm{rec}}_t=\mathrm{ReLU}\big([\overrightarrow{\boldsymbol{\rho}}_t,\ \overleftarrow{\boldsymbol{\rho}}_t,\ \mathbf{m}_t]\,\mathbf{W}_3\big)\mathbf{W}_4,\qquad \mathbf{X}^{\mathrm{c}}=\mathbf{M}\odot\mathbf{X}+(\mathbf{1}-\mathbf{M})\odot\mathbf{X}^{\mathrm{rec}},
 \end{equation}
@@ -90,9 +90,9 @@ ALFTemporal（图\ref{fig:arch}右上）从跨节点历史生成逐节点的条�
 \end{equation}
 其中 $\bar{s}$ 为向量 $\mathbf{s}$ 在全部节点上的均值，$\mathbb{I}[\cdot]$ 为指示函数；$\phi$ 为两层 MLP（$7\to64\to32$，ReLU 激活）。
 
-\textbf{空间分区。} 训练前，节点被划分为 $P=32$ 个分区，每个分区含 $C$ 个槽位~\citep{fang2025efficient}：速度数据依据已核验的地理坐标以 KD-tree 划分，流量数据依据图拓扑做考虑连通分量的广度优先搜索（BFS）划分。记 $\pi(p,c)$ 为第 $p$ 个分区第 $c$ 个槽位对应的节点；节点不足 $C$ 个的分区以邻接排序的真实节点补足，这些补足副本只提供上下文，不产生输出。按 $\pi$ 排列得到 $\mathbf{T}\in\mathbb{R}^{P\times C\times160}$，其中 $\mathbf{T}_{p,c}=\mathbf{z}^{0}_{\pi(p,c)}$（图\ref{fig:arch}右上 Spatial partitions）。
+\textbf{空间分区。} 训练前，节点被划分为 $P=32$ 个分区，每个分区含 $C$ 个槽位：速度数据依据已核验的地理坐标以 KD-tree 划分，流量数据依据图拓扑做考虑连通分量的广度优先搜索（BFS）划分。记 $\pi(p,c)$ 为第 $p$ 个分区第 $c$ 个槽位对应的节点；节点不足 $C$ 个的分区以邻接排序的真实节点补足，这些补足副本只提供上下文，不产生输出。按 $\pi$ 排列得到 $\mathbf{T}\in\mathbb{R}^{P\times C\times160}$，其中 $\mathbf{T}_{p,c}=\mathbf{z}^{0}_{\pi(p,c)}$（图\ref{fig:arch}右上 Spatial partitions）。
 
-\textbf{两阶段注意力。} 分区特征经一个两阶段注意力块处理~\citep{zhang2023crossformer}（图\ref{fig:arch}右上 Two-stage attention block）。记单头注意力与前馈层为
+\textbf{两阶段注意力。} 分区特征经一个两阶段注意力块处理（图\ref{fig:arch}右上 Two-stage attention block）。记单头注意力与前馈层为
 \begin{equation}\label{eq:13}
 \mathrm{Attn}(\mathbf{Q},\mathbf{K},\mathbf{V})=\mathrm{softmax}\Big(\frac{(\mathbf{Q}\mathbf{W}^{Q})(\mathbf{K}\mathbf{W}^{K})^{\top}}{\sqrt{160}}\Big)\mathbf{V}\mathbf{W}^{V}\mathbf{W}^{O},\qquad \mathrm{FFN}(\cdot)=\mathrm{GELU}\big((\cdot)\,\mathbf{W}^{F}_{1}\big)\mathbf{W}^{F}_{2},
 \end{equation}
@@ -109,7 +109,7 @@ ALFTemporal（图\ref{fig:arch}右上）从跨节点历史生成逐节点的条�
 \end{equation}
 其中 $\mathbf{T}'_p\in\mathbb{R}^{C\times160}$ 为第一阶段输出中分区 $p$ 的槽位特征。分区内的交互因此经过4个 token 的瓶颈，而不是 $C\times C$ 的直接注意力。注意力权重与各残差分支上使用 dropout。最后按 $\pi$ 取回每个真实节点的输出，恢复原始节点顺序，得到条件特征 $\mathbf{Z}\in\mathbb{R}^{N\times160}$，其第 $n$ 行记为 $\mathbf{z}_n$。
 
-\textbf{FiLM 参数头。} FiLM 参数头（图\ref{fig:arch}右上 FiLM head）把 $\mathbf{z}_n$ 映射为逐节点的缩放与平移参数~\citep{perez2018film}：
+\textbf{FiLM 参数头。} FiLM 参数头（图\ref{fig:arch}右上 FiLM head）把 $\mathbf{z}_n$ 映射为逐节点的缩放与平移参数：
 \begin{equation}\label{eq:16}
 [\Delta\boldsymbol{\gamma}_n,\ \boldsymbol{\beta}_n]=\mathrm{ReLU}\big(\mathbf{z}_n\mathbf{W}_{\gamma,1}+\mathbf{b}_{\gamma,1}\big)\mathbf{W}_{\gamma,2}+\mathbf{b}_{\gamma,2},\qquad \Delta\boldsymbol{\gamma}_n,\ \boldsymbol{\beta}_n\in\mathbb{R}^{64},
 \end{equation}
@@ -179,12 +179,12 @@ G(\mathbf{U},\mathbf{S}_t)=\sum_{j=1}^{5}\mathbf{w}_{t,j}\odot\big(\mathbf{P}_j\
 \begin{equation}\label{eq:26}
 \ell(e)=\frac{e}{\sigma_{\mathrm{data}}}\tanh(0.1\,e).
 \end{equation}
-该损失在小误差附近近似 $0.1e^2/\sigma_{\mathrm{data}}$，大误差时趋近标准化 MAE；权重项参与梯度计算。四个数据集取相同系数，但 $e$ 分别以各自的速度或流量单位计量，因此相同系数并不意味着跨量纲的同等加权。记 $\Omega$ 为一个批次内有效的目标元素，$\Omega_r$ 为其中末步观测角色为 $r$ 的节点所对应的元素，$\mathcal{R}_b$ 为该批次实际出现的观测角色集合，则
+该损失在小误差附近近似 $0.1e^2/\sigma_{\mathrm{data}}$，大误差时趋近标准化 MAE；权重项参与梯度计算。记 $\Omega$ 为一个批次内有效的目标元素，$\Omega_r$ 为其中末步观测角色为 $r$ 的节点所对应的元素，$\mathcal{R}_b$ 为该批次实际出现的观测角色集合，则
 \begin{equation}\label{eq:27}
 \mathcal{L}_{\mathrm{mean}}=\frac{1}{|\Omega|}\sum_{\Omega}\ell(e),\qquad
 \mathcal{L}_{\mathrm{role}}=\frac{1}{|\mathcal{R}_b|}\sum_{r\in\mathcal{R}_b}\frac{1}{|\Omega_r|}\sum_{\Omega_r}\ell(e).
 \end{equation}
-$\mathcal{L}_{\mathrm{role}}$ 使样本较少的观测角色在优化中获得与其他角色相同的权重。$\mathcal{L}_{\mathrm{route}}$ 为路由平衡项~\citep{shazeer2017outrageously,wang2023graph}。对条件化传播模块的一次调用，记路由权重为 $w_{n,j}$（$n$ 遍历批次中全部样本的全部节点，$j=1,\dots,5$），则
+$\mathcal{L}_{\mathrm{role}}$ 使样本较少的观测角色在优化中获得与其他角色相同的权重。$\mathcal{L}_{\mathrm{route}}$ 为路由平衡项。对条件化传播模块的一次调用，记路由权重为 $w_{n,j}$（$n$ 遍历批次中全部样本的全部节点，$j=1,\dots,5$），则
 \begin{equation}\label{eq:28}
 \mathrm{imp}_j=\sum_{n}w_{n,j},\qquad \mathrm{load}_j=\sum_{n}\mathbb{I}[w_{n,j}>0],\qquad \mathrm{CV}^2(\mathbf{c})=\frac{\mathrm{Var}(\mathbf{c})}{\mathrm{mean}(\mathbf{c})^{2}+10^{-10}},
 \end{equation}
@@ -192,8 +192,4 @@ $\mathcal{L}_{\mathrm{role}}$ 使样本较少的观测角色在优化中获得�
 \begin{equation}\label{eq:29}
 \mathcal{L}=0.9\,\mathcal{L}_{\mathrm{mean}}+0.1\,\mathcal{L}_{\mathrm{role}}+\mathcal{L}_{\mathrm{route}}.
 \end{equation}
-训练目标不含独立的重建损失或额外预测头。该目标是对现有训练方式的描述，不作为独立的方法贡献。
-
-\subsection{数据集特定设置}\label{sec:3_6}
-
-四个数据集共享\ref{sec:3_2}–\ref{sec:3_5}节的同一可学习结构，参数量均为1,037,529。数据集之间的差异仅在于训练前固定的设置：分区容量 $C$（METR-LA、PEMS-BAY、PEMS04、PEMS08 依次为7、16、10、6），窗口插值（速度数据关闭、流量数据开启），解码残差倍率 $d$（0.3、0.3、1、1）与中心化强度 $\alpha$（0、0、0、0.5）。这些设置不可学习，也不在推理时由路由选择；完整取值与训练超参数见\ref{sec:4_1}节。它们按变量类型确定：速度数据不插值、解码残差倍率取0.3，流量数据采用窗口插值与倍率1，中心化只在 PEMS08 上使用。这些取值是在本文数据上经验选择的结果（选择过程见\ref{sec:4_1}节），没有可直接迁移到新路网的选择规则；在新路网上需要用验证集重新确定。
+训练目标不含独立的重建损失或额外预测头。
