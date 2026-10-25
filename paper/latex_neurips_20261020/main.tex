@@ -1,0 +1,81 @@
+% ALFNet 论文中文工作稿（NeurIPS 2026 样式，preprint 模式，显示作者）
+% 编译：XeLaTeX + BibTeX（Overleaf：Menu -> Compiler -> XeLaTeX）。
+% 中文稿与导师定稿后整篇译为英文；英文版去掉 ctex 相关设置，改回 pdfLaTeX。
+\documentclass{article}
+
+% 数字编号引用（NeurIPS 模板推荐的传参方式）
+\PassOptionsToPackage{numbers,compress,sort}{natbib}
+\usepackage[preprint]{neurips_2026}
+
+% 中文排版：scheme=plain 保持 NeurIPS 版式，只提供中文字体与断行
+\usepackage[UTF8,scheme=plain,fontset=fandol]{ctex}
+\setmainfont{TeX Gyre Termes}   % 与 NeurIPS 默认 Times 字形一致的拉丁字体
+\setsansfont{TeX Gyre Heros}
+
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+
+% 中文图表名与参考文献标题
+\renewcommand{\figurename}{图}
+\renewcommand{\tablename}{表}
+\renewcommand{\refname}{参考文献}
+
+% NeurIPS 样式把摘要标题写死为 "Abstract"；中文稿仅在此处覆盖为"摘要"，
+% 其余排版参数与 neurips_2026.sty 第 369--380 行一致，未修改样式文件本身。
+\renewenvironment{abstract}%
+{%
+  \vskip 0.075in%
+  \centerline%
+  {\large\bf 摘要}%
+  \vspace{0.5ex}%
+  \begin{quote}%
+}
+{
+  \par%
+  \end{quote}%
+  \vskip 1ex%
+}
+
+\title{ALFNet：动态观测支持下的归纳时空预测}
+
+% TODO（作者）：填写作者、单位与邮箱；preprint 模式会显示作者信息。
+\author{%
+  作者姓名（待填） \\
+  单位（待填） \\
+  \texttt{email（待填）} \\
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\input{sections/abstract}
+\end{abstract}
+
+\input{sections/introduction}
+\input{sections/related_work}
+\input{sections/method}
+\input{sections/experiments}
+\input{sections/conclusion}
+
+% TODO（作者/导师）：致谢与资助声明（NeurIPS 的 ack 环境，正式投稿前按要求填写）
+% \begin{ack}
+% \end{ack}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+% 正式投稿时必须附 NeurIPS Paper Checklist（官方模板 _template_neurips2026/checklist.tex），
+% 导师阅读版暂不加入。
+% \input{checklist}
+
+\end{document}

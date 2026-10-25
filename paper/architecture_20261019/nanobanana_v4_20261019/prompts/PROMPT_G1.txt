@@ -1,0 +1,44 @@
+Redraw IMAGE 1 as a crisp, high-resolution, publication-quality machine-learning architecture figure (wide landscape, white background). Keep IMAGE 1's overall layout, region placement, pastel palette, thin 3D tensor slabs, icons and polished look, but rebuild every region cleanly with sharp vector-like lines and sharp English text, and apply the corrections below.
+
+IMAGE ROLES
+- IMAGE 1 = visual base to preserve (layout and style).
+- IMAGE 2 = authority for content, order and connections. Where IMAGE 1 and IMAGE 2 disagree about an arrow or label, follow IMAGE 2 and the text below. Do not copy IMAGE 2's plain boxy look.
+- IMAGE 3 and IMAGE 4 = drawing vocabulary only (thin feature slabs with axes, small token squares, clock and calendar glyphs, segmented concat bars, small node graphs, small grid matrices, circled + and ⊙ operators). Do not copy any of their modules, titles or mechanisms.
+
+GLOBAL RULES
+One single integrated diagram, no (a)(b) panels. Every input drawn once, every module once, one final Forecast only. Black or dark-gray solid arrows for data and FiLM parameters; purple dashed arrows only for lifecycle conditioning (S); static-graph references shown only as small gray port tags "A" or "G" placed next to the module that uses them, never as long lines. Consistent Arial-like font, consistent line width, clear arrowheads that end exactly on their target. No glow, no heavy shadows, no gradients. Keep text short; no paragraph text.
+
+REGION 1 – INPUTS (left column, as in IMAGE 1)
+"Visible Traffic History" (small curves with gaps, "X : 12 × N × 1"), "Lifecycle Context" (rows Unseen / Steady / Join / Fault with colored role strips that change within the window, a_t bars, M_t mask grid, "S_t = [R_t, a_t, M_t]", "4 + 1 + 1 channels"), "Static Graph" (node graph, adjacency grid "A", "Graph attributes"). Remove the long lines from A and G into the completion column.
+
+REGION 2 – SUPPORT-AWARE HISTORY COMPLETION (pale red column), top to bottom:
+a) "GRIN / BiGRIL": a forward chain GR→GR→GR labeled "Forward" and, in parallel below it, a backward chain GR←GR←GR labeled "Backward"; both chains feed one "Align + merge (all 12 steps)" box. The two chains are parallel, never connected in series. Small port tags "S" (purple) and "A" (gray) on this box. X arrow enters here.
+b) "Keep observations": a row of dots where solid blue dots = observed values kept, red dots = GRIN-filled missing positions. Label "M: keep observed / fill missing". No "q > 0" in this box.
+c) "Interpolation*": small curve with a dashed bridge between observed points; label "nodes with q > 0: overwrite missing"; small note "q = 0: keep GRIN fill".
+d) "Reference centering*": "X̄ = X_filled − αv".
+e) Output slab "X̄ : 12 × N × 1" (shared history). From X̄ ONE line splits into two arrows: up into ALFTemporal and right into the Graph Encoder.
+
+REGION 3 – ALFTemporal (pale green, top right), left to right:
+3a "Temporal patch embedding": draw a thin slab with a visible time axis of 12 narrow columns labeled "t−11 … t" and inputs "[X̄, S, ToD/288, DoW/7] · 9 ch". A single bracket spans all 12 columns, labeled "Conv k = s = 12". Arrow to ONE single vertical token (a column of small cells) labeled "1 temporal patch / node · 64". Then a horizontal segmented concat bar with four colored segments "patch 64 | ToD 32 | DoW 32 | Struct 32" and label "= 160". Three arrows into the bar: from a clock glyph "ToD 32", a calendar glyph "DoW 32", and a small box "Struct MLP 7→64→32" with a gray "G" port tag.
+3b "Spatial partitions (P = 32)": a grid whose columns are partitions 1, 2, …, P and whose rows are slots 1 … C; label axes "P partitions" and "C slots". Small colored node strips enter the grid ("reorder / pad by layout").
+3c "Cross-partition attention": in the same grid style, highlight ONE row (the same slot across all partitions) with a dark outline and draw short curved attention arcs between cells of that row; caption "same slot across P".
+3d "Within-partition interaction": one partition column of C slots → arrow labeled "Gather" → EXACTLY FOUR distinct latent token squares labeled "4 latent tokens" → arrow labeled "Broadcast" → the C slots again. Arrows clearly point Gather down/inward, Broadcast back out.
+3e "Restore node order": same colored short strips reordered with crossing index lines into original order → "Z : N × 160".
+3f "FiLM head 160 → 32 → 128" (light gold box) → two strips "Δγ : N × 64" and "β : N × 64".
+
+FiLM PARAMETER LINE (critical): one dark line labeled "Δγ, β" runs from the FiLM head down into the gold FiLM box in the graph region. It must end on the FiLM box, NOT on the decoder.
+
+REGION 4 – ALFGraph (pale blue, bottom right), left to right on one main line:
+4a "Graph Encoder (2 layers, hidden 64)": two stacked layer slabs labeled "L1" and "L2", input X̄ arrow, purple "S_t" tag, gray "A" tag. Output label "H : 2 × N × 64 (terminal states)".
+4b gold "FiLM (once, before decoding)": H passes along a main line through a circled ⊙ then a circled +; "1 + Δγ" enters the ⊙ from above, "β" enters the + from above; output "H_mod = (1 + Δγ) ⊙ H + β".
+4c "Residual AR Decoder (2 layers × 12 steps)": two stacked layer slabs "L1", "L2" initialized by H_mod; purple "S^L" tag; data port "y_0 = X̄^L" entering the decoder input; a feedback loop arrow from the step output y_k back to the decoder input labeled "y_k (× 12 steps)"; formula "y_k = y_{k−1} + d · Linear(h_k)". Output label "y_{1:12}". Do NOT write Y_0 inside the decoder.
+4d "Restore reference*": circled + with inputs y_{1:12} (from left) and "αv" (from below). Output labeled "Y_0". Its only outgoing arrow goes into Refinement. No line from here directly to Forecast.
+4e light orange "Role-Scaled Graph Refinement": Y_0 → three short slabs "[Y_0, P⁺Y_0, P⁻Y_0]" (gray "A" tag) → "MLP 3 → 32 → 1 (GELU)" → "tanh" → "× 0.05 · s(R^L)" with a purple "R^L" tag → circled +. A separate skip line carries Y_0 around the side into the same circled +. Output "Ŷ".
+4f "Forecast" panel at far right: three 12-point future curves, axis "t+1 … t+12", "Ŷ : 12 × N × 1". Its ONLY input is Ŷ from the refinement circled +.
+
+CELL INSET (inside the blue region below encoder/decoder, dashed border, connected to encoder and decoder only by thin dashed leader lines WITHOUT arrowheads):
+Title "DCRNN cell · lifecycle-conditioned propagation (each layer and gate has its own router)". Left: purple "S" → "Linear → Softmax" → five small vertical weight bars w1…w5 (all nonzero, dense, not top-k). Five tiny matrices labeled "I", "Mean", "WM", "Fwd", "Bwd", each multiplied by its weight, summed into one Σ. Formula "G(U, S) = Σ_j w_j ⊙ (P_j U Θ_j) + b". Right: "Graph-GRU gates": "r = σ(G_r([x, h], S))", "u = σ(G_u([x, h], S))", "c = tanh(G_c([x, r ⊙ h], S))", "h′ = u ⊙ h + (1 − u) ⊙ c".
+
+FOOTER (thin strip): "Training only: L = 0.9 L_mean + 0.1 L_role + L_route" | "Masked teacher forcing" | purple dashed arrow "lifecycle condition" | gray tag "named input port" | "* Dataset-specific processing. Tensors are schematic."
+
+Before finishing, check: FiLM line ends on FiLM; exactly one Forecast with one input; no line from Restore to Forecast; four latent tokens; one temporal patch; candidate gate contains x; all text spelled correctly and sharp.

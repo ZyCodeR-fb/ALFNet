@@ -1,0 +1,15 @@
+Edit this architecture figure. Keep its layout, colors, style, icons and all regions in the same places, and re-render everything crisply at high resolution with sharp, correctly spelled English text. Do not add any numbering, region codes or extra titles. Make only these corrections:
+
+1. The long line labeled "Δγ, β" coming down from "FiLM head" must end on the top of the gold "FiLM" box, not on "Residual AR decoder". Inside the FiLM box, show H flowing left to right through a circled ⊙ (with "1 + Δγ" entering from above) and then a circled + (with "β" entering from above).
+2. Delete the horizontal line that runs from the "Restore + αv*" circle over the top of "Role-Scaled Graph Refinement" to "Forecast". The Forecast panel must have exactly one incoming arrow, from the final circled + at the bottom of the refinement box.
+3. Inside the decoder, replace the label "Y₀ : N × 1" with "y_k". Put the label "Y₀" only on the arrow that leaves the "Restore + αv*" circle and enters the refinement box.
+4. Delete the long gray lines from the "A" and "G" tags in the Static Graph area into the completion column. Instead place small gray tags "A" next to "GRIN / BiGRIL" and next to "[Y₀, P⁺Y₀, P⁻Y₀]", and a gray "G" tag next to "Struct MLP" (keep the one already there).
+5. In "Keep observations" change the row label "Missing (q > 0)" to "Missing → GRIN fill". In "Interpolation*" change the subtitle to "q > 0: overwrite missing". At the bottom of the column change "q = 0: retain GRIN" to "q = 0: keep GRIN fill".
+6. In "History embedding", replace the green "1 temporal patch" box with: a thin slab of 12 narrow time columns labeled "t−11 … t", one curly bracket spanning all 12 columns labeled "Conv k = s = 12", then an arrow to ONE single narrow vertical token labeled "1 temporal patch · 64". Then a horizontal concat bar with four segments "patch 64 | ToD 32 | DoW 32 | Struct 32" labeled "= 160", with arrows into it from the token, the ToD clock, the DoW calendar and Struct MLP.
+7. In "Spatial partitions", label the grid axes "P partitions" (columns) and "C slots" (rows). Make one row (same slot across partitions) outlined dark with small curved arcs connecting its cells, caption "Cross-partition attention (same slot across P)".
+8. In "Within-partition interaction" keep exactly four latent token squares, with a downward arrow labeled "Gather" from the C slots to the tokens and an upward/outward arrow labeled "Broadcast" from the tokens back to the C slots.
+9. In the cell inset change "c = tanh(G_c(r ⊙ h))" to "c = tanh(G_c([x, r ⊙ h], S))", and the gate boxes to "r = σ(G_r([x, h], S))", "u = σ(G_u([x, h], S))".
+10. In the decoder, label the two stacked blocks "L1" and "L2" ("2 layers"), and draw the feedback loop from the step output y_k back to the decoder input, labeled "× 12 steps". Keep "y_k = y_{k−1} + d · Linear(h_k)".
+11. In the refinement box, the "+ Y₀" skip line must start at the Y₀ input and go down the side into the bottom circled +; "αv" only enters the "Restore" circle.
+
+Everything else stays as in the original.

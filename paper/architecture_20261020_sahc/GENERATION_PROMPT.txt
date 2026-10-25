@@ -1,0 +1,42 @@
+Use case: scientific-educational.
+Create ONE standalone academic architecture module illustration: "Support-Aware History Completion" (SAHC), for an ALFNet paper and for manual rebuilding with native PowerPoint shapes. Redesign the first supplied old module completely while preserving verified computations. Only SAHC, no entire model, no forecast chart, no ALFTemporal or ALFGraph internals.
+
+REFERENCE ROLES:
+Image 1 is the old SAHC to replace, not an accurate symbol/arrow template. Eliminate its unexplained GR blocks and the floating row of circles.
+Image 2 is the original GRIN explanatory graph: borrow identifiable nodes, graph edges, time-stacked graphs, and two independent directional representations. Simplify substantially; do NOT copy its two long detailed pipelines.
+Image 3 (project reference 4.png) supplies visual style: clean thin tensor strips, small grids, graph nodes, simple operator symbols, precise connectors.
+Image 4 (project reference 5.png) supplies clean aligned pale-color enclosures and whitespace. Do not borrow mechanisms from these style references.
+
+COMPOSITION:
+Portrait-ish canvas, width:height about 4:5. Spacious and crisp high-resolution vector-like artwork, white background with one pale blush outer rounded rectangle. Dark Arial-style typography, medium-size short labels, delicate rose outline. Three vertically connected areas: bidirectional reconstruction (top 48%), visible-window interpolation (middle 22%), reference centering and shared output (bottom 30%). Full title at top, in two tidy lines. Use basic PPT shapes: circles, lines, thin graph cards, colored square slots, small rectangles, one clearly labeled subtraction circle. Flat colors, no heavy 3D, no blur, no decoration.
+
+TOP AREA:
+Title "Bidirectional reconstruction (GRIN)".
+One compact shared input caption/port line "Xvis, M, A, [R, a]". Small note "All nodes · 12 history steps".
+Beneath it, TWO side-by-side equal subareas, left "Forward GRIL", right "Backward GRIL".
+Each contains a small stack of THREE thin graph cards; each card has 4 connected circles at identical positions, representing static road graph nodes through time. Some node circles blue, some pale purple, consistent positions. Draw a clear temporal arrow along each stack. Label time processing clearly under the left stack "t−11 → t" and under the right "t → t−11". Graph edges make spatial message passing visually clear. These are independent directions; absolutely NO arrow from one directional module to the other.
+Both directional outputs descend through TWO short separate arrows into ONE wide box "Align all steps + MLP fusion". This is fusion of per-step representations, not just terminal states. Add a tiny "M" named input arrow to this fusion box (the mask participates). No multiply-circle array.
+Directly inside the reconstruction panel below fusion, integrate a compact output-selection strip, not a fourth big module:
+"Preserve observed values" above an 8-slot feature ribbon, blue observed cells and green reconstructed cells. Add a clear small legend "Blue: observed   Green: filled". Caption "Use reconstruction only where M = 0".
+This is a mask selection, not multiplication between the forward and backward paths. No "q > 0" here.
+One solid dark downward connector exits reconstruction into interpolation.
+
+MIDDLE AREA:
+Pale warm-white panel, header "Visible-window interpolation*".
+A tiny input-reference port "Xvis, M" identifies the real observed values used for this operation. Main input still comes from reconstructed history.
+Show one clean small time plot with BLUE filled circles at actual observed times. Leave two interior unobserved times between the middle pair of blue observations. Across precisely this gap, a straight GREEN segment connects the observed endpoints, with two smaller GREEN dots at linearly interpolated values. The remaining observed points stay blue and unchanged. Show a thin horizontal time axis and one light highlight behind the gap; do not create a second phantom baseline sequence.
+Below graph, two concise lines:
+"Observed window: replace missing slots"
+"No observations: retain GRIN result"
+This optional overwrite follows GRIN for ALL inputs; not a branch that skips reconstruction. Stars denote dataset-specific processing.
+One dark downward arrow enters centering.
+
+BOTTOM AREA:
+Header "Reference centering*".
+Show the input filled history as a horizontal thin blue-green tensor ribbon with label "Xfilled".
+Directly below, a compact downward main path through a CIRCLE WITH MINUS SIGN. A short sideways arrow entering this minus operator from a gold chip labeled "αv" is the ONLY subtraction operand. Main data continues downward to a green-blue output ribbon labeled "Xbar = Xfilled − αv". All connectors terminate clearly on the operator or ribbon.
+Beside the gold chip put readable small definition "v: last observed value" and below it "v = 0 if none". It is derived from original Xvis and M, NOT from the reconstructed history. A tiny "Xvis, M" reference label can be used beside v; no giant long wire from graph input.
+From αv chip, a short secondary OUTLET arrow to right edge labeled "To reference restoration" preserves the paired downstream addition, WITHOUT drawing a forecast/decoder block.
+Below the result, centered label "Shared filled history" and dimensions "12 × N × 1". End in one output stem that forks into two short outlet arrows labeled "ALFTemporal" and "ALFGraph"; these are output labels only, no duplicated models.
+Small bottom footnote "* Dataset-specific processing".
+Keep text large enough to rebuild in PPT. No equations beyond the one centering equation, no invented gates, no training loss, no GR boxes, no unexplained circular operators. Curves and graph cards schematic. Every causal connector must match the pipeline: shared GRIN → preserve observations → optional interpolation of unavailable slots → optional reference subtraction → same shared history to both branches.
