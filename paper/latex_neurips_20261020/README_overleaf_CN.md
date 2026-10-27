@@ -26,7 +26,6 @@ Overleaf 项目已经建立并分享给导师，之后不再打包 zip，而是�
 | `figures/` | 图 1（作者 PPT 版 `alfnet.png`）与图 2–6（`final_figures_20261017` 的 PDF 矢量图） | 是 |
 | `references.bib` | 24 条文献，元数据已逐条核对 | 是 |
 | `drafts/manuscript_v6_cn.md` | **编辑源头**：中文 v6 Markdown 稿 | 否 |
-| `drafts/snapshot_20261020_before_r2/` | 第二轮修改前的旧快照（此后改用 git 记录，可删除） | 否 |
 | `tables/provenance.json` | 每张表的数据来源路径与 SHA256 | 否 |
 | `_scripts/` | `md_to_tex.py`（md→各节 tex）、`make_tables.py`（结果文件→表格，并与 md 逐格比对）、`make_overleaf_zip.py`（初次打包用，现已不需要） | 否 |
 | `notes/`、`review_round1/`、`ALIGNMENT_MATRIX_CN.md`、本文件、`CHANGES_FOR_ADVISOR_CN.md` | 对应矩阵、修改记录、引用核对、架构图核对清单、模拟评审 | 否 |
@@ -50,7 +49,7 @@ python paper/latex_neurips_20261020/_scripts/md_to_tex.py
 
 第一条只读取已保存的结果文件，重新写出 `tables/` 并与 md 稿中的表 1、表 2 逐格比对；第二条由 md 稿重新生成 `sections/*.tex`。
 
-2026-10-25 第三轮需要上传覆盖的文件：`sections/` 下全部 6 个 `.tex`（若第二轮的 `tables/ablation_lifeavg.tex` 尚未上传，也一并上传）。`main.tex`、`references.bib`、`figures/` 与其余表格没有变化。
+2026-10-27 第五轮需要上传覆盖的文件：`sections/abstract.tex`、`sections/method.tex`、`sections/experiments.tex`。`main.tex`、`references.bib`、`figures/` 与其余表格没有变化。
 
 修改历史由 git 记录（分支 `paper/final`），不再另存快照。注意仓库 `.gitignore` 忽略所有名为 `figures/` 的目录，本工程的 `figures/` 是用 `git add -f` 加入的；以后替换图片后同样需要 `git add -f`。
 

@@ -2,6 +2,16 @@
 
 任务说明：[PROMPT_ARS_PAPER_CN.md](../../../../paper/writing_20261020/PROMPT_ARS_PAPER_CN.md)。用 ARS（academic-research-skills 3.23.1）补写方法、摘要、结论 → NeurIPS LaTeX → 模拟评审 → 修改。实验已冻结；不训练、不评估、不访问测试集、不改模型/配置/权重/结果；不 commit/push。
 
+## 作者第三批意见修改 — 2026-10-27（提交 git，不推送）
+
+- **用户指令**：摘要阶段映射核对；方法章去掉“部分数据集启用”与图位置说明、rn/P 定义移到 3.2、SAHC 直接用 S_t、GRU 定义顺序、两阶段注意力切片记号、MoE 路由表述、Teacher Forcing、L_route 定义位置与 L_mean 说明、全章符号复核；4.1 补 Ready/Steady 与 Outage/Unseen 的区别。
+- **Facts**：阶段映射正确（`v4_schedule.py::_phase_id`）；SAHC 的 [x, m, R, a, h] 与 [x, S, h] 只差拼接顺序。
+- **Completed**：重写方法章（30 个编号公式）；摘要与 4.1、4.4 修改；更新 changelog 第五轮、FIGURE1_NOTES、CHANGES_FOR_ADVISOR、README。
+- **Verified**：重建的 texlint（scratchpad，静态检查）0 问题；`make_tables.py --check` 一致；方法章无图位置说明、无“传播支持/教师强制/η”残留、无数据集特定表述。
+- **Not touched**：用户在工作区删除的 `drafts/snapshot_20261020_before_r2/` 未纳入提交，留给用户处理。
+- **Modified but unverified**：未编译 PDF。
+- **Next**：作者上传 abstract/method/experiments 三个 tex 并编译；重绘图 1 时参考 `notes/FIGURE1_NOTES_CN.md`。
+
 ## 作者第二批意见修改 — 2026-10-25（已获授权提交 git，不推送）
 
 - **用户指令**：引言不写模块来自他人工作，必要时只写“借鉴其思想”；方法章删 3.6、删文献编号；实验 4.1 删未比较方法理由与基线细节，训练与实现精简，不写测试结果参与配置决策；表 2 图注删 PEMS08 权重衰减说明；结论删“贡献不在于基础算子”、局限只留一两点；同类问题一并修改；不存快照，适当时提交 git。
