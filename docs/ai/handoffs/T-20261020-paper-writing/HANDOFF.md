@@ -2,6 +2,12 @@
 
 任务说明：[PROMPT_ARS_PAPER_CN.md](../../../../paper/writing_20261020/PROMPT_ARS_PAPER_CN.md)。用 ARS（academic-research-skills 3.23.1）补写方法、摘要、结论 → NeurIPS LaTeX → 模拟评审 → 修改。实验已冻结；不训练、不评估、不访问测试集、不改模型/配置/权重/结果；不 commit/push。
 
+## 图 1 重绘支持与下一阶段交接 — 2026-10-29 至 11-02
+
+- **Completed**：方法章定稿（作者确认）。图 1 设计方案 `paper/latex_neurips_20261020/imgs/figure_design/FIG1_DESIGN_CN.md` 与 Codex 提示词 `CODEX_PROMPT.md`；经作者授权操作 Codex 桌面应用生成版式草稿与素材（`figure_design/codex_out/`，Codex 只写入该目录）；复核 Codex 结果 `CODEX_OUT_REVIEW_CN.md`；复核作者 PPT 重绘的 `figures/alfnet.png`（2026-10-31 版），连线、符号、样式问题共 19 项，见 `ALFNET_PNG_REVIEW_CN.md` 与 `alfnet_review_annotated.png`。
+- **Not touched**：作者自己的图片改动（`figures/alfnet.png`、`imgs/alfnet.png`、`imgs/Reference_Image/`、`paper/architecture_20261017/Reference_Image/` 的删除）未提交；`figure_design/` 未提交。
+- **Next**：论文优化，按 [NEXT_PAPER_OPTIMIZATION_BRIEF_CN.md](NEXT_PAPER_OPTIMIZATION_BRIEF_CN.md) 执行（导师 2026-11-02 意见：对比不够、相关工作单薄、引言与 motivation 不够凝练；先调研类似工作，确定挑选标准套到已有结果，再列实验缺口，不急于加实验）。图 1 由作者自行修改。
+
 ## 作者第三批意见修改 — 2026-10-27（提交 git，不推送）
 
 - **用户指令**：摘要阶段映射核对；方法章去掉“部分数据集启用”与图位置说明、rn/P 定义移到 3.2、SAHC 直接用 S_t、GRU 定义顺序、两阶段注意力切片记号、MoE 路由表述、Teacher Forcing、L_route 定义位置与 L_mean 说明、全章符号复核；4.1 补 Ready/Steady 与 Outage/Unseen 的区别。
