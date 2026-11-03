@@ -1,0 +1,2808 @@
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+Jiaming Ma 1 Binwu Wang * 1 2 Pengkun Wang 1 2 Zhengyang Zhou 1 2 Xu Wang 1 2 Yang Wang * 1 2
+
+Abstract
+Recently, spatio-temporal graph convolutional networks have achieved dominant performance in spatio-temporal prediction tasks. However, most models relying on node-to-node messaging interaction exhibit sensitivity to spatio-temporal shifts, encountering out-of-distribution (OOD) challenges. To address these issues, we introduce Spatio-Temporal OOD Processor (STOP), which employs a centralized messaging mechanism along with a message perturbation mechanism to facilitate robust spatio-temporal interactions. Specifically, the centralized messaging mechanism integrates Context-Aware Units for coarse-grained spatio-temporal feature interactions with nodes, effectively blocking traditional node-to-node messages. We also implement a message perturbation mechanism to disrupt this messaging process, compelling the model to extract generalizable contextual features from generated variant environments. Finally, we customize a spatio-temporal distributionally robust optimization approach that exposes the model to challenging environments, thereby further enhancing its generalization capabilities. Compared with 14 baselines across six datasets, STOP achieves up to 17.01% improvement in generalization performance and 18.44% improvement in inductive learning performance. The code is available at https://github.com/PoorOtterBob/STOP.
+1. Introduction
+Spatio-temporal prediction is a critical task in urban computing with positive effects for various applications including traffic management, energy control, and atmospheric analy-
+1University of Science and Technology of China (USTC), Hefei, China 2Suzhou Institute for Advanced Research, USTC, Suzhou, China. First author mail: JiamingMa@mail.ustc.edu.cn. Correspondence to: Binwu Wang and Yang Wang as corresponding authors <wbw2024@ustc.edu.cn and angyan@ustc.edu.cn>.
+Proceedings of the 42 nd International Conference on Machine Learning, Vancouver, Canada. PMLR 267, 2025. Copyright 2025 by the author(s).
+
+Changed nodes
+
+New nodes
+
+Removed nodes
+
+Inaccurate nodes
+
+Figure 1. Subfigure (a) (upper half) illustrates the predictive performance of STGNNs in various scenarios and subfigure (b) (lower half) demonstrates the sensitivity of the node-to-node messaging mechanism to spatio-temporal shift.
+
+sis (Xia et al., 2024; Liang et al., 2023; Miao et al., 2024; Zhang et al., 2023; Liu et al., 2024a). Currently, spatiotemporal graph convolutional networks (STGNNs) have emerged as the primary tools in this field. These models generalize spatio-temporal graph dependencies and employ node-to-node messaging mechanism (such as GCN or Transformer) for feature interaction. Finally, the generated unique representation is fed into a decoder to generate prediction.
+However, the encouraging success of STGNNs is predicated on the independent and identically distributed (IID) assumption. In reality, the distributional characteristics (such as mean and variance) or graph structures of spatio-temporal data evolve over time, presenting out-of-distribution (OOD) generalization challenges for STGNNs.
+With the LargeST-SD dataset (Liu et al., 2023b) as an example, we report the performance of advanced STGNNs in both IID and OOD scenarios, as shown in Figure 1 (a). The results indicate that their performance rapidly deteriorates when facing spatio-temporal OOD challenges, particularly in structural shift (S-OOD) scenario. Embarrassingly, the models' reliance on node-to-node messaging appears to hinder their effectiveness. Ablation experiments (as shown in Table 2) further support this: for some advanced STGNNs, variants without node-to-node messaging mechanism per-
+
+1
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+form embarrassingly better. This is because the knowledge learned acquired through this mechanism is coupled with the features of the training graph, and this knowledge is difficult to generalize to unseen graphs during testing (Hamilton et al., 2017). As illustrated in Figure 1 (b), when node features change, STGNNs struggle to accurately represent these nodes. Furthermore, when certain nodes disappear from the graph, their neighbors are significantly impacted, as they can no longer aggregate information along the trained paths. This propagation of errors through the node-to-node messaging mechanism adversely affects the accuracy of the entire graph representation. On the other hand, generating accurate representations for new nodes, i.e., inductive learning, also poses a significant challenge for STGNNs (Zheng et al., 2023; 2024; Wang et al., 2024b).
+In this paper, we propose a Spatio-Temporal OOD Processor (STOP). Specifically, STOP's core contribution is a spatio-temporal centralized interaction strategy: first, we design a centralized message passing mechanism configured with Context-Aware Units (ConAU) to learn generalizable contextual features. The interaction is realized through message exchange between ConAU and nodes - blocking node-to-node messages. Furthermore, we employ a Generalized Perturbation Unit (GenPU) to randomly perturb the message interaction process, effectively promoting diverse training environments through the introduction of uncertainty, preventing the model from coupling with a single training environment. Furthermore, we customize a spatiotemporal Distributionally Robust Optimization (DRO) objective for GenPU to help the model learn robust knowledge from challenging environments. STOP can effectively generalize this knowledge to new nodes to generate good representations. Finally, STOP synthesizes two prediction components from temporal and spatial dimensions to generate the final prediction, which can enhance model robustness across comprehensive OOD scenarios.
+Our contributions can be four-folds:  We introduce a Spatio-Temporal OOD Processor (STOP), incorporating a robust centralized messaging mechanism and a message perturbation mechanism.  The centralized messaging constrains nodes to interact exclusively with Context Aware Units (ConAU) for feature interaction, thereby enhancing the resilience of model to spatio-temporal shifts.  The message perturbation mechanism, equipped with Generalized Perturbation Units (GenPU), disrupts node interactions with ConAU and includes a specialized spatio-temporal distributionally robust optimization (DRO) for GenPU, facilitating the model's acquisition of causal knowledge across diverse environments.  We evaluate STOP's effectiveness against 14 baselines across six datasets, where it can achieve up to 17.01% improvement in generalization performance and up to 18.44% improvement in inductive learning performance.
+
+2. Preliminaries
+We use a graph G = (V, A) to represent spatio-temporal data, where V means the node set with N nodes and A  RN×N is the weighted adjacency matrix of the graph G. We use Xt  RN×c to represent the observed graph signal at time step t, where c indicates the number of feature channels.
+Training environment e contains two characteristic elements: a training graph G = (V, A) and training data (X , Y). With this training environment, spatio-temporal OOD learning aims to learn a robust function f , which can accurately predict values after TP time steps given observed data of past T time steps X = [X1, X2, . . . , XT ]  RT ×N×c and the graph sampled from any environment e  E, where e may have different two characteristic elements with training environment e,
+argminf sup E(X,Y)p(X ,Y|e) [L (f (X) , Y)] , (1)
+eE
+where Y = XT +1, XT +2, . . . , XT +Tp  RTp×N×c is the ground-truth value.
+
+3. Methdology
+STOP employs a channel mixing module to model temporal and spatial dynamics, and after utilizing centralized messaging and message perturbation mechanisms for feature interaction, the generated temporal and spatial prediction components jointly determine the final prediction. The details of STOP are illustrated in Figure 2 and Algorithm 1.
+
+3.1. Temporal Prediction Component
+
+Temporal decomposition. In time series analysis, researchers (Cleveland et al., 1990; Wu et al., 2021; Zeng et al., 2023) often decompose time series into components at various time scales. Long-term patterns, such as seasonal or periodic trends, are relatively stable, while short-term patterns, like hourly traffic fluctuations, are unstable. Intuitively, when the spatio-temporal distribution of the node changes over time, long-term patterns may remain robust (Wang et al., 2024b). Hence, we employ temporal decomposition technique to model temporal dynamics at different scales. Specifically, we use the padding moving average kernel AvgPool (·; ) with kernel size  to decouple the input X  RT ×N×c into long-term patterns Xl and short-term patterns Xs:
+
+Xl = AvgPool (X; )  RT ×N×c,
+
+(2)
+
+Xs = X - Xl  RT ×N×c.
+
+(3)
+
+where we employ padding operation AvgPool in (·; ) along
+temporal dimension, ensuring a consist time length. Subsequently, two distinct MLP (·) : RT ×N×c  RT ×N×d are
+
+2
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+leveraged to model the temporal interdependencies within these kinds of patterns. Finally, the outputs are mixed to yield the data representation,
+H0 = MLP1 (Xl) + MLP2 (Xs)  RT ×N×d0 . (4)
+
+Spatio-temporal Embedding. To comprehensively capture spatio-temporal dynamics, we employ embedding techniques to encode various prior information that is independent of spatio-temporal data, which facilitates the model's ability to capture generalizable spatio-temporal knowledge. Specifically, we utilize a timestamp-of-day embedding Et  RNt×dp to capture the periodic dependencies of each temporal step and a day-of-week embedding Ed  RNd×dp to model the periodic patterns at daily intervals, where Nd = 7 is the number of days in one week and Nt indicates the number of sampling points in a day. For example, for some PeMS datasets, the data sampling frequency of traffic flow is five minutes, so Nt is set to 60 × 24/5 = 288. dp is the dimension of each embedding.
+In addition, we further use the positional embedding P followed by Transformer (Vaswani et al., 2017) to encode the position of each data point in X. Finally, we integrate temporal prior embedding and data positional embedding to generate the output ZI denoted as the input representation:
+ZI = Concat (H0 + P, Et, Ed)  RT ×N×(d0+2dp). (5)
+
+Channel Mixing Module. To capture temporal dynamics,
+we first mix-up the channel and temporal dimensions of the
+output ZI into shape N × dt, where dt = T  (d0 + 2dp). Subsequently, we use L-layer MLP for hybrid modeling.
+Given the input of l-th MLP layer with residual connection technology ZT(l), where ZT(0) = ZI, the forward process of l-th MLP layer is as follows:
+
+ZT(l+1) = GELU Z(Tl)W1(l) W2(l) + ZT(l)  RN×dt , (6)
+
+where l  {0, 1, ..., L - 1} and GELU (·) (Hendrycks & Gimpel, 2016) is an activation function. W1(l)  Rdt×4dt and W2(l)  R4dt×dt are learnable parameters. After L MLP layers, we get the temporal representation denoted as ZT = ZT(L)  RN×dt . Finally, we use a linear transformation as decoder to generate a temporal prediction component
+Yt as follows,
+
+Yt = ZTWt + bt  RN×(TP c),
+
+(7)
+
+where Wt  Rdt×(TP c) and bt  RTP c are learnable parameters.
+
+3.2. Robust Spatio-temporal Centralized Interaction
+3.2.1. CENTRALIZED MESSAGING MECHANISM
+STGNNs, relying on node-to-node message interaction mechanisms, are sensitive to structural shifts (Finkelshtein
+
+et al., 2023; Han et al., 2024b), which limits their generalization capability on unknown graph structures. To address these limitations, we propose a novel centralized message passing mechanism where each graph node interacts specifically with an established context-aware unit through a novel low-rank attention mechanism.
+
+Context Aware Units. We first set K context aware units (ConAU), where K is a hyperparameter and K  N . ConAUs are used to perceive generalizable contextual features from nodes, which nodes extract to achieve interactions. Specifically, we adopt a learnable feature vector c  Rdt for each ConAU, where dt indicates the number of feature channels. Thus, we can get a series of context feature vectors C = [c1, c2, . . . , cK ]  RK×dt . Next, we propose a multi-head low-rank attention method to achieve the interaction between nodes and ConAUs.
+
+Multi-head Low-rank Attention. This mechanism can be summarized in two processes: aggregating node features to extract contextual features and diffusing contextual features for feature interaction between nodes. It takes ZT  RN×dt and C as input. Inspired by the multi-head mechanism (Vaswani et al., 2017), we utilize distinct linear layers to project Query, Key, and Value separately into dh = dt/h dimensions with h heads. Specifically, for the ith head where i = {1, 2, . . . , h}, the calculation of low-rank attention is as follows:
+
+Z(ci) =A (Q, K, V)
+
+(8)
+
+= softmax QK × softmax KQ V, (9)
+
+Diffusion
+
+Aggregation
+
+where Q = ZTWq(i)  RN×dh , K = CJ(dit)  RK×dh
+
+and and
+
+V= equals
+
+ZT to
+
+J(dit)  1/ dh
+
+RN ×dh . Wq(i)
+
+. Here  Rdt
+
+ is a scaling factor ×dh is a learnable pa-
+
+rameter matrix, and J(dit)  [0, 1]dt×dh is a column subma-
+
+trix of dt-order identity matrix Idt  [0, 1]dt×dt , which
+
+contains all rows and the columns (dh  (i - 1) + 1) to
+
+(dh  i) of Idt . J(dit) is used to project the feature sub-
+
+space corresponding to the i-th head. The computed at-
+
+tention matrix is low-rank with high efficiency, which is
+
+explained in Appendix C.1. Finally, we splice outputs
+
+of multiple heads to generate representation for nodes:
+
+Zc = Concat Zc(1), Z(c2), . . . , Zc(h)  RN×dt .
+
+This attention comprises both aggregation and diffusion
+processes, as shown in the right half of Figure 2. The aggregation process, denoted by KQ  RK×N , extracts node features for updating context features. Conversely, the diffusion process, denoted by QK  RN×K , disperses the context features to individual nodes to facilitate feature
+interaction and node representation generation.
+
+Theory 1 (Low-rank Attention). Our attention matrix has
+
+3
+
+Update parameters
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+Lat
+123
+Lng
+
+ConAU GGPeUnPGUPU
+Low-rank Attention
+
+Values
+
+Prompt
+
+Time
+Decomposition
+ Spatiotemporal data
+
+Projection MLP
+
+Projection MLP
+
+ConAU GenPU
+
+Aggregation Generalized Perturbation Units
+
+Changed node
+
+Diffusion
+
+GenPU 1 GenPU 2 ... GenPU 
+
+
+
+Removed node New node
+
+ConAU
+
+ STOP Model
+
+
+
+  ... 
+
+
+
+Nodes
+
+Max Distributionally Robust Optimization
+
+Centralized messaging mechanism Optimization process
+
+Figure 2. Overall architecture (left) and centralized messaging mechanism for robust spatio-temporal interaction (right).
+
+a low-rank property, resulting in high computational efficiency of O (KN dh), which is significantly better than the complexity of vanilla self-attention mechanism O N 2dh . Detailed description can be found in Appendix Section C.1.
+3.2.2. MESSAGE PERTURBATION MECHANISM
+We introduce the Generalized Perturbation Units (GenPU) to perturb the interaction process of centralized messaging to improving generalization of the model to unknown environments. Additionally, we specifically design a Distributionally Robust Optimization (DRO) (Duchi & Namkoong, 2019) objective to optimize models and GenPU.
+Generalized Perturbation Units (GenPU). To acquire robust contextual features, our strategy involves disrupting the aggregation process of the centralized messaging mechanism, which is responsible for updating context features. This approach enables us to circumvent the significant computational overhead associated with directly perturbing the data. Specifically, we create M learnable perturbation vector in the training process, denoted G = {g1, g2, . . . , gM }, where gi  RN with i  {1, 2, · · · , M } means i-th GenPU. Then, we use softmax operation to normalize gi  RN to get the corresponding masking probability vector gi = softmax (gi)  (0, 1)N . Subsequently, we create a multinomial distribution M (gi; s). Based on this distribution, we sample a masking indices gi  M (gi; s)  {0, 1}N , where s  (0, N ) indicates the number of sample hits (i.e. the number of values equal to 1 in gi). Finally, we create K replicas of gi corresponding to K ConAU. As a result, we can obtain a mask matrix with log operation as follows:
+Gi = log ([gi, gi, . . . , gi])  {-, 0}K×N . (10)
+The logarithmic operation is to facilitate the masking operation during the exponential activation in the subsequent softmax normalization. If Gi[m, n] = 0, the message between m-th node and n-th ConAU is not be affected. If Gi[m, n] = -, the message between m-th node and n-th ConAU is masked. Then we integrate Gi into low-rank
+
+attention mechanism to control the aggregation process:
+
+Ai (Q, K, V; Gi)
+
+(11)
+
+= softmax QK × softmax KQ + Gi V.
+
+Perturbation operation
+
+From the perspective of ConAU, random perturbations during the aggregation process introduce environmental uncertainty variations, thereby forcing the model to learn generalizable contextual features from these varying environments. In the training phase, we leverage M GenPU in parallel to conduct the perturbation operation. Accordingly, according to Equation 20, the model will individually generate predictions for these M environments, represented as {Y1, Y2, . . . , YM }, which will be explained below.
+Spatio-temporal Distributionally Robust Optimization. With M predictions generated from different environments, our propose spatio-temporal DRO, which does not require optimizing all M branches sequentially; instead, it selects the branch with the highest loss for gradient descent, as shown in the right half of Figure 2. This approach indicates that the model performs worst in that particular environment, thereby enhancing training efficiency and encouraging the model to learn purely invariant knowledge. We designate the GenPU responsible for generating this environment as g. The specific optimization objective is defined as follows:
+
+min sup E(X,Y)(X ,Y|e) [L (f (X) , Y; g)] , (12)
+f gRN
+
+s.t. ||g||0 = s  (0, N ) .
+
+(13)
+
+where || · ||0 stands for zero norm. GenPUs participate in the learning process by influencing the sampling distribution of the mask matrix, which is essentially non-differentiable, rather than participating in the backpropagation process as part of the parameters. Thus, we optimize the model parameters and GenPUs alternately, as shown in Algorithm 2.
+In fact, our proposed objective belongs to the DRO paradigm, which theoretically has superior generalization
+
+4
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+compared to the Empirical Risk Minimization (ERM) paradigm followed by most spatio-temporal models. ERM optimizes the model using only single training environment. The details are provided in Appendix Section D.
+Theory 2. Within a predefined uncertainty set of environments E, DRO substitutes the expected risk under a single distribution with the worst-case expected risk. DRO yields tighter upper bounds compared to ERM:
+
+sup E(X,Y)p(X ,Y|e);D(e,e) [L (f (X) , Y)]
+eE
+
+ E(X,Y)p(X ,Y|e) [L (f (X) , Y)] + ,
+
+(14)
+
+where  = 2 Var(X,Y)p(X ,Y|e) [L (f (X) , Y)] and the distance D (·, ·) between any e  E and training environment e is less than or equal to , and "sup" means the supremum. This reveals that DRO allows the model to adapt more robustly to various environments than ERM.
+Robustness Analysis. Centralized message mechanism restricts interactions to operate between nodes and ConAUs, avoiding the complexities of node-to-node interactions. Structural shift does not significantly disrupt the message passing paths between nodes and ConAUs. Furthermore, GenPU introduces uncertain perturbations during this spatiotemporal interaction process, generating diverse training environments. This strategy prevents the model from over-relying on a single training environment. Our spatiotemporal DRO forces the model to interact with the most challenging instances in the generated environments, which can further enhance the model's robustness. Moreover, the learned context features can flexibly extend to newly added nodes, improving its inductive learning capability.
+
+3.2.3. SPATIAL PREDICTION COMPONENT
+
+After feature interaction, we extract shared contextual features from ConAUs for each node. To further enhance the node representation, we refine the personalized features of individual nodes. This refinement involves subtracting the contextual features from the temporal representation to isolate the personalized feature representation of each node, denoted as Zp:
+
+Zp = ZT - Zc  RN×dt .
+
+(15)
+
+Subsequently, we concatenate the decoupled context features Zc and personalized features Zp, and then linearly map them back to the initial representation.
+
+Zt = GELU (Concat (Zp, Zc) W1) W2  RN×dt , (16)
+
+Zt = LayerNorm (Zt + ZT)  RN×dt ,
+
+(17)
+
+where W1  Rdt×4dt and W2  R4dt×dt are learnable parameters. We then decouple spatial components by calculating the difference between the input representation ZI and
+
+the temporal representation Zt, denoted as Zs(0) = ZI - Zt. Next, we utilize a channel mixing module with L-layer MLP
+to capture spatial high-dimensional features, with the final output denoted as the spatial representation ZS = Z(sL). The forward process of the l-th MLP layer is as follows:
+
+Z(sl+1) = GELU Z(sl)W3(l) W4(l) + Zs(l)  RN×dt ,
+(18) where W3(l)  Rdt×4dt and W4(l)  R4dt×dt are learnable parameters. Finally, same as the temporal part, we also use a linear layer to decode the spatial representation Zs to produce a prediction from the spatial component:
+
+Ys = ZSWs + bs  RN×(TP c),
+
+(19)
+
+where Ws  Rdt×(TP c) and bs  RTP c are learnable parameters.
+
+3.3. Final Prediction
+
+We sum the predictions from the spatial and temporal dimensions to get finial prediction Y as follow,
+
+Y =Yt + Ys  RN×TP ×c.
+
+(20)
+
+4. Experiments
+In this section, we conduct a comprehensive evaluation of the proposed model. We will answer the following potential questions in the following subsections one-by-one: Q.1. What is the generalization performance of STOP in spatiotemporal OOD scenarios? Q.2. Is the proposed centralized messaging mechanism effective? Q.3. How sensitive is the model to hyperparameters M and K? Q.4. Is each component of the model valid for OOD capabilities? Q.5. How efficient is the model? Q.6.What is the inductive learning ability of STOP for new nodes?
+In Appendix, we analyze the effectiveness of STOP in various OOD scenarios (temporal OOD or structural OOD in Section E.5, rapid expansion OOD in Section E.6), and provide visualization examples in Section E.13.
+
+Table 1. Summary of the used datasets.
+
+Dataset
+
+Nodes Edges Years
+
+LargeST-SD LargeST-GBA LargeST-GLA LargeST-CA PEMSD3-Stream KnowAir
+
+716 2,352 3,834 8,600 655 184
+
+17,319 61,246 201,363 525,888 1,577 3,796
+
+2017  2021 2017  2021 2017  2021 2017  2021 2011  2017 2015  2018
+
+4.1. Experiment Setting
+ Setting. We set both the input and prediction windows to 12 in traffic prediction and 24 in atmospheric prediction.
+
+5
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+Temporal decomposition kernel size  is equal to 3 in traffic datasets and 7 in KnowAir. The number of ConAU K is set to {8, 24, 32, 64, 8, 4} and the number of GenPU M is equal to {3, 3, 3, 3, 2, 4} in six datasets in Table 1. The dimensions of embeddings are set to 64. We use 8 heads in multi-head low-rank attention. We implement all models using PyTorch framework of Python 3.8.3 and leveraging the Nvidia A100-PCIE-40GB as support, MAE, RMSE, and MAPE are used as metrics for comparison.
+ Datasets & Baselines. We conduct a comprehensive evaluation of our model on six spatio-temporal datasets spanning multiple years across two domains. These datasets include LargeST (Liu et al., 2024b) and PEMSD3-Stream (Chen et al., 2021) in the traffic domain, and KnowAir (Wang et al., 2020) in the atmospheric domain. The dataset summary is presented in Table 1. Our comparison involves advanced spatio-temporal prediction, spatio-temporal OOD learning, and spatio-temporal continual learning model.  Spatio-temporal predictionn models include STGCN (Yu et al., 2017), GWNet (Wu et al., 2019), STNorm (Deng et al., 2021), STID (Shao et al., 2022a), STAEformer (Liu et al., 2023a), STNN (Yang et al., 2021), D2STGNN (Shao et al., 2022b), BigST (Han et al., 2024a), and RPMixer (Yeh et al., 2024).  Spatio-temporal OOD learning models include CaST (Xia et al., 2024) and STONE (Wang et al., 2024a).  Spatio-temporal continual learning models include TrafficStream (Chen et al., 2021), PEMCP (Wang et al., 2023b), and TFMoE (Lee & Park, 2024). Some models require the removal of non-essential components (such as node embedding in STID or adaptive graph learning method in GWNet) to adapt them to the ST-OOD setting, as the parameters of them are intertwined with the scale of the graph structure, as elaborated in Appendix E.1.
+ ST-OOD Datasets. For the evaluation of temporal shift, we train the models using data from the first year and test them on each subsequent year. The training set comprises the first 60% of data from the initial year dataset, while the following 20% of data is used as the validation set. In each subsequent year, the last 20% of data is designated as the test set. This setup aims to accentuate the temporal distribution difference between the test and training sets, while maintaining a ratio of approximately 6:2:2 for the training, validation, and test sets. Regarding structural shift evaluation, we select a subset of nodes for training and validation. In the test set, we decrease the number of nodes by 10% and introduce 30% new nodes to simulate shifts in the graph structure and scale. More detailed settings can be found in Appendix E.2.
+4.2. OOD Performance Comparison(Q.1)
+As shown in Table 3, we report the average values across all years of test sets on four datasets. Experiments on large
+
+datasets can be found in Appendix E.3, and detailed yearspecific reports can be found in Appendix E.9. The comparison with spatio-temporal continuous learning models is shown in Table 11.
+GCN-based models like STGCN and GWNet underperform in OOD settings due to their reliance on the global messaging mechanism of GCN, rendering them highly sensitive to spatio-temporal shifts. Transformer-based models such as STAEformer and D2STGNN exhibit improved predictive accuracy by leveraging self-attention mechanisms to aggregate global node features, effectively addressing spatio-temporal shift errors. Despite these advancements, STGNNs still face challenges in generalizing weights for unseen graph structures. On the other hand, spatio-temporal OOD learning baselines like STONE introduce diverse training environments utilizing perturbation-generated semantic relations to learn invariant causal knowledge, resulting in enhanced performance. STOP demonstrates significant improvements across various metrics, with a maximum enhancement of 17.01%. This improvement can be attributed to its robust centralized messaging mechanism, which facilitates effective spatial feature interaction.
+4.3. Node-to-node Interaction vs. Ours (Q.2)
+We used two representative backbone models, STGCN and STAEformer, to compare the effectiveness of different message mechanisms. The former utilizes graph convolution for inter-node interaction, while the latter employs self-attention mechanisms for node-to-node interaction. We removed their node-to-node message mechanisms and labeled these variants as "-graph". Additionally, we replaced their inter-node interactions with our spatial interaction mechanism, denoting these variants as "+Ours". Using the SD and KnowAir datasets with OOD settings, the performance results are shown in Table 2. We can find that variants without nodeto-node message mechanisms performed better than the original models, indicating that the initial mechanism limited the models' generalization performance. Furthermore, these models achieve generalization performance improvements after integrating our centralized messaging mechanism. Therefore, this further validates the effectiveness and necessity of our central interaction mechanism.
+
+Table 2. Comparison of two interaction mechanisms.
+
+Variant
+
+SD
+
+KnowAir
+
+MAE RMSE MAPE MAE RMSE MAPE
+
+STGCN STGCN - graph STGCN + Ours
+
+25.72 25.45 24.87
+
+40.03 39.62 38.98
+
+18.21 17.98 17.65
+
+29.49 26.18 25.44
+
+40.93 38.03 37.42
+
+63.85 55.75 52.80
+
+STAEformer
+
+26.20
+
+STAEformer - graph 25.80
+
+STAEformer + Ours 24.65
+
+41.18 40.84 38.46
+
+18.39 17.45 17.30
+
+27.25 25.82 25.46
+
+38.93 37.28 37.25
+
+56.48 55.65 55.04
+
+6
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+Table 3. OOD performance comparisons on four datasets. The unit of MAPE is percent (%). We bold the best-performing model results
+
+in red and underline the sub-optimal model results in blue.
+
+Method
+
+Ours STONE CaST RPMixer BigST D2STGNN STNN STAEformer STID STNorm GWNet STGCN
+
+SD
+
+GBA
+
+MAE 17.71 3 RMSE 28.45
+MAPE 11.73
+MAE 23.62 6 RMSE 37.71
+MAPE 15.99
+MAE 32.59 12 RMSE 51.82
+MAPE 22.89
+MAE 18.33 3 RMSE 29.70
+MAPE 13.64
+MAE 24.75 6 RMSE 38.48
+MAPE 20.48
+MAE 34.93 12 RMSE 53.10
+MAPE 31.09
+MAE 11.39 3 RMSE 19.48
+MAPE 15.45
+MAE 12.47 6 RMSE 21.62
+MAPE 16.02
+MAE 14.36 12 RMSE 24.95
+MAPE 18.66
+MAE 24.37 6 RMSE 36.56
+MAPE 51.94
+MAE 27.03 12 RMSE 40.29
+MAPE 54.45
+MAE 28.70 24 RMSE 42.39
+MAPE 57.96
+
+18.44 29.55 12.32
+25.10 39.66 17.56
+37.12 54.60 25.90
+20.19 33.65 15.10
+25.84 41.96 21.24
+39.56 56.18 32.18
+13.27 21.48 17.06
+14.30 23.68 18.23
+16.28 28.41 20.94
+25.68 37.59 52.41
+28.96 42.64 71.99
+30.56 45.48 75.11
+
+21.35 33.28 16.04
+29.28 45.24 21.49
+42.40 64.05 31.73
+21.85 34.32 18.61
+29.70 45.16 25.77
+42.60 63.33 36.88
+15.43 24.53 32.15
+17.13 27.63 33.77
+20.96 33.82 39.07
+26.20 38.42 59.53
+29.49 41.98 70.15
+31.63 45.21 75.36
+
+24.92 39.88 15.63
+42.37 66.45 26.15
+77.31 115.62 49.48
+24.79 39.59 17.06
+40.77 62.24 29.48
+72.51 104.93 56.28
+14.68 23.73 18.02
+17.41 28.61 20.90
+24.00 39.64 27.84
+30.56 45.34 69.06
+38.45 55.26 87.60
+42.67 61.30 94.76
+
+18.56 29.93 12.18
+25.66 40.61 18.03
+37.89 58.74 27.12
+19.92 32.33 14.75
+28.64 43.93 22.25
+42.87 63.06 34.52
+12.79 20.79 17.30
+14.05 23.07 19.54
+16.65 27.46 23.59
+26.89 39.16 57.45
+29.77 41.75 68.39
+31.57 44.52 76.76
+
+18.70 29.31 13.04
+25.13 38.77 17.46
+36.35 53.60 25.98
+19.10 32.64 14.29
+26.10 41.72 21.26
+36.26 56.23 32.23
+12.89 21.14 16.58
+14.08 23.26 17.62
+16.55 27.44 20.12
+26.43 37.91 58.39
+30.06 42.52 67.10
+30.94 46.21 69.84
+
+36.46 56.84 26.91
+36.91 57.59 27.15
+41.69 64.99 31.32
+40.61 60.07 33.77
+40.50 59.96 33.68
+44.62 65.61 38.28
+17.04 28.47 23.63
+17.26 29.27 25.63
+18.19 30.14 30.81
+27.85 39.07 65.74
+30.48 42.67 71.05
+31.48 44.72 74.14
+
+18.70 28.97 12.62
+25.80 40.73 17.59
+37.17 57.81 27.07
+20.91 33.59 14.93
+28.61 44.03 22.41
+41.68 62.28 34.99
+12.81 21.02 16.48
+14.14 23.38 19.71
+16.71 27.92 20.95
+26.19 37.82 52.90
+29.45 41.71 61.64
+30.96 43.48 65.31
+
+19.68 29.56 13.18
+25.87 40.86 18.03
+38.30 59.40 26.90
+19.09 31.40 14.36
+26.90 42.15 21.79
+39.36 59.60 33.43
+12.96 20.95 16.66
+14.18 23.19 18.52
+16.56 27.31 21.25
+26.49 38.90 57.84
+30.85 44.59 68.44
+32.78 46.67 74.02
+
+18.82 30.06 12.82
+26.00 41.20 18.03
+38.08 59.24 27.89
+20.86 32.92 16.00
+31.24 46.69 25.57
+45.73 65.62 41.02
+13.03 21.07 20.44
+14.51 23.67 22.43
+17.04 27.94 25.30
+28.46 41.47 65.26
+30.86 43.87 71.83
+32.52 44.80 81.32
+
+20.15 31.34 14.44
+28.07 43.00 21.17
+39.75 61.08 31.46
+20.65 32.21 15.70
+28.39 42.60 22.74
+39.61 58.33 33.67
+12.97 21.11 16.41
+14.14 23.31 17.91
+16.37 27.10 20.29
+27.84 40.25 52.42
+31.11 43.65 61.51
+32.99 44.14 70.84
+
+18.68 29.61 12.92
+25.25 39.48 17.34
+36.15 55.74 26.41
+21.49 33.57 14.79
+30.05 44.97 22.84
+43.29 62.34 35.23
+13.39 21.60 16.71
+14.63 23.82 18.33
+17.25 28.20 21.30
+27.92 39.47 58.32
+31.63 43.71 69.83
+34.68 47.19 80.49
+
+PEMSD3-Stream
+
+KnowAir
+
+4.4. Hyperparameter Sensitivity Analysis (Q.3)
+We analyze the sensitivity of the numer of ConAU and GenPU on the SD (upper) and KnowAir (lower) datasets on the Figure 3. Hyperparameter experiments on other datasets are provided in Appendix Section E.11. When the number of ConAU K is set to 8 in SD dataset and 4 in KnowAir dataset. When K exceeds this value, the model creates too many ConAU, making it unable to focus on extracting invariant contextual features, thus introducing noise. When K is less than this value, too few perception units fail to learn sufficient invariant knowledge, leading to a decrease in the model's generalization performance. The number of GenPU M is set to 3 in SD dataset and 4 in KnowAir dataset. A smaller M may not provide sufficient training environment diversity, resulting in performance degradation. On the other hand, an excessive number of GenPU does not necessarily improve performance. Too large M means that the generated environment is too complex, which in-
+
+creases the learning difficulty of the model to extract causal knowledge.
+4.5. Ablation Study (Q.4)
+In this section, we evaluate the effectiveness of each component on SD and KnowAir datasets. "w/o decom" removes the time decomposition module, "w/o prompt" eliminates the spatio-temporal prompting method, "w/o Yt" uses only spatial prediction as the final prediction. "w/o LA" means that we use vanilla self-attention mechanism to replace the low-rank attention module.
+As illustrated in Figure 4, the results show that each component of STOP helps to improve the OOD generalization. "w/o Yt" achieves poor prediction performance, which proves that the proposed collaborative component is effective for OOD. "w/o ConAU" removes ConAU and achieves high errors, proving that spatio-temporal interaction is also
+
+7
+
+0$3(
+
+0$( 506(
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+
+
+
+0$( 506( 0$3(
+
+
+
+
+
+ 
+
+
+
+
+
+ 
+
+
+
+
+
+K           
+&RQ$8
+
+
+
+
+0$( 506( 0$3(
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+K         
+&RQ$8
+
+0$3( 0$( 506(
+
+0$( 506(
+
+
+
+
+0$( 506( 0$3(
+
+
+
+
+
+ 
+
+
+
+ 
+
+
+
+ 
+
+  *HQ38M  
+
+
+
+
+0$( 506( 0$3(
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   *HQ38M   
+
+0$3(
+0$( 506(
+
+0$3(
+0$( 506(
+
+
+
+
+
+0$(
+
+506(
+
+0$3(
+
+
+
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+2XUV ZRGHFRP ZRSURPSW ZRYt ZR/$ ZR&RQ$8 ZR*HQ38 ZR'52 
+
+
+
+0$(
+
+506(
+
+0$3(
+
+
+
+
+
+ 
+
+
+
+
+
+
+
+ 
+
+2XUV ZRGHFRP ZRSURPSW ZRYt ZR/$ ZR&RQ$8 ZR*HQ38 ZR'52
+
+0$3(
+
+0$( 506(
+
+Figure 3. Hyperparameter Experiments for K and M .
+
+Figure 4. Ablation experiments on SD (upper) and KnowAir (lower) datasets.
+
+0RQ 7XH :HG 7KX
+ 
+URPSWSRRO
+
+necessary in OOD scenarios. "w/o GenPU" has higher pre- vanced baselines for new nodes on SD and GBA datasets in
+
+diction errors because GenPU can help the model extract Table 4 and on CA and GLA datasets in Table 7. Specifically, causal knowledge and enhance model robustness. Ablation Transformer-based models, like D2STGNN, are good at gen-
+
+experiments demonstrate the necessity and effectiveness of eralizing because they can create accurate representations
+
+each module of our model, while we further perform a com- for new nodes. GCN-based models are poor at generalizing
+
+prehensive ablation experiment including double module because they rely heavily on the original graph structure
+
+ablation in Appendix Section E.10.
+
+and can not generate accurate representations for new nodes.
+
+Transformer-based models struggle because they can not
+
+4.6. Efficiency Study (Q.5)
+
+create robust weights for new nodes. However, the STONE
+
+The training time of per epoch is illustrated in Figure 5, we can see that STOP demonstrates remarkable effectiveness and efficiency on the SD dataset. Since our model primarily uses lightweight MLP layers to model temporal and spatial dynamics. Compared to the SOTA model D2STGNN,
+
+framework uses a novel embedding method to generate good initial representations for new nodes. Our model stands out by using a centralized messaging mechanism to access contextual features and enhance representations, making it excel in extending performance to new nodes.
+
+wpoh)riUacLlhdiysnaamTricasnsmfoordmeelirn-gbaasnedd
+
+model GNNs
+
+with RNNs for temfor spatial dynamics
+
+m2066otdDXiWeQmliensg(,6o0u.r57mso/deeplohcahsvims 1p2ro2v0e.7d9thse/eepfoficchie).ncByecbayuasbeoiutst
+
+transformer-based architecture introduces a quadratic de-
+pendency on the number of spatial nodes, leading to high
+
+computational complexity. Furthermore, its recursive tem-
+poral modeling mechanism requires storing hidden repre-
+
+sentations at each time step, which significantly increases
+both memory consumption and inference latency. Conse-
+qscuaelnatbliyl,itsyucbharsreieqrusewnthiaelnaapppprloiaecdhteosleanrgceo-usnc%3&taHReRlUXQreVQWRsHaGQu[iDDWbrUXOsL\qD]tHOuaGInaHltIDiiHWtaDXylWUXHUH
+forecasting tasks. In contrast, our model demonstrates supe-
+rsipoarticootmemppuotartailoinnatleeraEffcitci3ioeHnnUVcmRyo.QdTDuOhlIieHs,DiwsWXhaUitHctrhDibQcuGatpeFtdRuQrtoeWsHo[cuWorImnHopDvlWeXexUlH
+
+dynamics with near-linear time complexity. As a result, our
+
+$YHUDJH0$(
+
+
+&D67
+
+
+
+
+*:1HW
+
+ 67,'671RUP  %LJ67
+
+67*&1
+
+
+6721(
+
+0% 0%
+0% 0%
+0HPRU\8VDJH
+67$(IRUPHU '267*11
+
+ 6723RXUV
+
+7UDLQLQJVSHHGVHSRFK
+
+       
+
+F(IILFLHQF\FRPSDULVRQ
+
+Figure 5. Efficiency study of STOP on SD dataset.
+
+approach enables highly scalable deployment.
+
+4.7. Inductive Learning Performance of STOP (Q.6)
+In OOD scenarios, the model's ability to represent unseen nodes is a challenge, which mainly involves the model's inductive learning. We report the performance of some ad-
+
+5. Related Work
+5.1. Spatio-temporal Prediction
+As a crucial task in intelligent transportation systems, current SOTA spatio-temporal prediction models primarily rely
+
+8
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+Table 4. Inductive learning performance comparisons.
+
+Model
+
+SD
+
+GBA
+
+MAE RMSE MAPE MAE RMSE MAPE
+
+STONE CaST BigST D2STGNN STAEformer STID GWNet
+Ours
+
+25.06 28.83 25.22 25.85 25.28 25.40 29.01
+22.74
+
+39.15 44.10 39.22 39.33 39.42 39.53 44.18
+36.09
+
+18.12 22.93 18.02 20.07 18.41 18.66 22.82
+16.82
+
+26.28 29.62 28.75 26.36 28.61 26.83 29.15
+24.76
+
+42.02 44.97 43.80 42.15 44.87 43.94 43.60
+38.52
+
+24.12 25.56 24.32 25.96 27.61 24.42 28.00
+19.67
+
+on STGNNs (Wang et al., 2024b;c; Zhang et al., 2025; 2024; Huang et al., 2023). However, they assume similarity between training and testing environments. To learn from evolving spatio-temporal graphs, some representative continual learning methods (Chen et al., 2021; Wang et al., 2023a) sequentially fine-tune models using data subsets with new distributions to adapt to spatio-temporal changes. Unfortunately, these models' effectiveness is only proven in environments similar to the training set, leading to challenges when encountering OOD scenarios. To overcome OOD challenges, researchers initially addressed temporal shift challenges, with models focusing on extracting invariant spatio-temporal knowledge from training data. However, they largely overlooked the evolution of spatio-temporal graph structures--which poses challenges for their reliedupon node-to-node interaction mechanisms. In this paper, we propose a novel message passing mechanism to overcome these challenges.
+5.2. Spatio-temporal OOD Learning
+Inspired by advances in time series shift learning (Liu et al., 2022) discussed in Appendix A, researchers have specifically designed spatio-temporal OOD learning models. For example, CauSTG (Zhou et al., 2023a) introduces a causal framework that transfers global invariant spatio-temporal relationships to OOD scenarios. CaST (Xia et al., 2023) employs a structural causal model to elucidate the data generation process of spatio-temporal graphs. STONE (Wang et al., 2024a) proposes a causal graph structure to learn robust spatio-temporal semantic relationship. STEVE (Hu et al., 2023) encodes traffic data into two disentangled representations and utilizes spatio-temporal environments as self-supervised signals. In this paper, we reformulate their message-passing mechanism, addressing the OOD challenge from a novel perspective.
+5.3. Temporal Shift in Time Series
+Various models have been developed in the time series domain to address temporal shifts in time series data, particularly focusing on OOD learning challenges. For in-
+
+stance, RevIN (Kim et al., 2021) employs a symmetric structure to eliminate and reconstruct distribution information based on the input window's statistics. AdaRNN (Du et al., 2021) categorizes historical time sequences into different classes and dynamically matches input data to these classes for contextual information identification. Additionally, a reversible instance normalization technique, proposed by (Kim et al., 2021), aims to mitigate temporal distribution shift issues. Non-stationary Transformers (Liu et al., 2022) introduce a normalization-denormalization technique to stabilize time series data, mainly for transformer-based models. SAF (Arik et al., 2022) suggests test-time adaptation through a self-supervised objective to enhance adaptation against distribution shifts. DIVERSIFY (Lu et al., 2024) aims to leverage subdomains within a dataset to mitigate challenges arising from non-stationary generalized representation learning. However, these models often overlook the modeling of spatial dependencies. Spatial modeling is crucial in the field of spatio-temporal prediction, as it can examine the states of neighboring nodes to enhance prediction performance, given the strong correlations that often exist among neighboring nodes (Jin et al., 2023; Shao et al., 2023).
+6. Conclusion
+In this paper, we propose a Spatio-temporal Out-ofdistribution Processor (STOP), which combines spatial interaction mechanisms and message perturbation mechanisms to enhance adaptation to spatio-temporal variations. We employ a centralized message passing mechanism and message shape perturbation mechanism to replace traditional point-to-point message interaction strategies. STOP can learn generalizable knowledge from diverse training environments. Evaluation on extensive datasets across various OOD scenarios demonstrates the model's robust generalization, inductive learning capabilities, and efficiency.
+Impact Statement
+This paper presents research aimed at advancing the field of Machine Learning. While there are many potential societal consequences of our work, we believe that none require specific emphasis in this context.
+Acknowledgment
+This paper is partially supported by the National Natural Science Foundation of China (No.12227901). The AIdriven experiments, simulations and model training were performed on the robotic AI-Scientist platform of Chinese Academy of Sciences.
+
+9
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+References
+Arik, S. O., Yoder, N. C., and Pfister, T. Self-adaptive forecasting for improved deep learning on non-stationary time-series. arXiv preprint arXiv:2202.02403, 2022.
+Arjovsky, M., Bottou, L., Gulrajani, I., and LopezPaz, D. Invariant risk minimization. arXiv preprint arXiv:1907.02893, 2019.
+Bai, L., Yao, L., Li, C., Wang, X., and Wang, C. Adaptive graph convolutional recurrent network for traffic forecasting. Advances in neural information processing systems, 33:17804­17815, 2020.
+Chen, W. and Liang, Y. Expand and compress: Exploring tuning principles for continual spatio-temporal graph forecasting. arXiv preprint arXiv:2410.12593, 2024.
+Chen, X., Wang, J., and Xie, K. Trafficstream: A streaming traffic flow forecasting framework based on graph neural networks and continual learning. arXiv preprint arXiv:2106.06273, 2021.
+Cleveland, R. B., Cleveland, W. S., McRae, J. E., Terpenning, I., et al. Stl: A seasonal-trend decomposition. J. off. Stat, 6(1):3­73, 1990.
+Deng, J., Chen, X., Jiang, R., Song, X., and Tsang, I. W. St-norm: Spatial and temporal normalization for multivariate time series forecasting. In Proceedings of the 27th ACM SIGKDD conference on knowledge discovery & data mining, pp. 269­278, 2021.
+Du, Y., Wang, J., Feng, W., Pan, S., Qin, T., Xu, R., and Wang, C. Adarnn: Adaptive learning and forecasting of time series. In Proceedings of the 30th ACM international conference on information & knowledge management, pp. 402­411, 2021.
+Duchi, J. and Namkoong, H. Variance-based regularization with convex objectives. Journal of Machine Learning Research, 20(68):1­55, 2019.
+Finkelshtein, B., Huang, X., Bronstein, M., and Ceylan, I. I. Cooperative graph neural networks. arXiv preprint arXiv:2310.01267, 2023.
+Greub, W. H. Linear algebra, volume 23. Springer Science & Business Media, 2012.
+Hamilton, W., Ying, Z., and Leskovec, J. Inductive representation learning on large graphs. Advances in neural information processing systems, 30, 2017.
+Han, J., Zhang, W., Liu, H., Tao, T., Tan, N., and Xiong, H. Bigst: Linear complexity spatio-temporal graph neural network for traffic forecasting on large-scale road networks. Proceedings of the VLDB Endowment, 17(5): 1081­1090, 2024a.
+
+Han, L., Chen, X.-Y., Ye, H.-J., and Zhan, D.-C. Softs: Efficient multivariate time series forecasting with seriescore fusion. arXiv preprint arXiv:2404.14197, 2024b.
+Hendrycks, D. and Gimpel, K. Gaussian error linear units (gelus). arXiv preprint arXiv:1606.08415, 2016.
+Hu, J., Liang, Y., Fan, Z., Chen, H., Zheng, Y., and Zimmermann, R. Graph neural processes for spatio-temporal extrapolation. arXiv preprint arXiv:2305.18719, 2023.
+Huang, Q., Shen, L., Zhang, R., Ding, S., Wang, B., Zhou, Z., and Wang, Y. Crossgnn: Confronting noisy multivariate time series via cross interaction refinement. Advances in Neural Information Processing Systems, 36: 46885­46902, 2023.
+Jin, M., Koh, H. Y., Wen, Q., Zambon, D., Alippi, C., Webb, G. I., King, I., and Pan, S. A survey on graph neural networks for time series: Forecasting, classification, imputation, and anomaly detection. arXiv preprint arXiv:2307.03759, 2023.
+Kim, T., Kim, J., Tae, Y., Park, C., Choi, J.-H., and Choo, J. Reversible instance normalization for accurate time-series forecasting against distribution shift. In International Conference on Learning Representations, 2021.
+Lee, S. and Park, C. Continual traffic forecasting via mixture of experts. arXiv preprint arXiv:2406.03140, 2024.
+Levy, D., Carmon, Y., Duchi, J. C., and Sidford, A. Largescale methods for distributionally robust optimization. Advances in Neural Information Processing Systems, 33: 8847­8860, 2020.
+Li, F., Feng, J., Yan, H., Jin, G., Yang, F., Sun, F., Jin, D., and Li, Y. Dynamic graph convolutional recurrent network for traffic prediction: Benchmark and solution. ACM Transactions on Knowledge Discovery from Data, 17(1):1­21, 2023.
+Li, Y., Yu, R., Shahabi, C., and Liu, Y. Diffusion convolutional recurrent neural network: Data-driven traffic forecasting. arXiv preprint arXiv:1707.01926, 2017.
+Liang, Y., Xia, Y., Ke, S., Wang, Y., Wen, Q., Zhang, J., Zheng, Y., and Zimmermann, R. Airformer: Predicting nationwide air quality in china with transformers. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 37, pp. 14329­14337, 2023.
+Liu, C., Yang, S., Xu, Q., Li, Z., Long, C., Li, Z., and Zhao, R. Spatial-temporal large language model for traffic prediction. In 25th IEEE International Conference on Mobile Data Management, pp. 31­40, 2024a.
+
+10
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+Liu, C., Hettige, K. H., Xu, Q., Long, C., Xiang, S., Cong, G., Li, Z., and Zhao, R. St-llm+: Graph enhanced spatiotemporal large language models for traffic prediction. IEEE Transactions on Knowledge and Data Engineering, 2025a.
+Liu, C., Xu, Q., Miao, H., Yang, S., Zhang, L., Long, C., Li, Z., and Zhao, R. Timecma: Towards llm-empowered multivariate time series forecasting via cross-modality alignment. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 39, pp. 18780­18788, 2025b.
+Liu, C., Zhou, S., Xu, Q., Miao, H., Long, C., Li, Z., and Zhao, R. Towards cross-modality modeling for time series analytics: A survey in the llm era. arXiv preprint arXiv:2505.02583, 2025c.
+Liu, H., Dong, Z., Jiang, R., Deng, J., Deng, J., Chen, Q., and Song, X. Spatio-temporal adaptive embedding makes vanilla transformer sota for traffic forecasting. In Proceedings of the 32nd ACM international conference on information and knowledge management, pp. 4125­ 4129, 2023a.
+Liu, X., Xia, Y., Liang, Y., Hu, J., Wang, Y., Bai, L., Huang, C., Liu, Z., Hooi, B., and Zimmermann, R. Largest: A benchmark dataset for large-scale traffic forecasting. arXiv preprint arXiv:2306.08259, 2023b.
+Liu, X., Xia, Y., Liang, Y., Hu, J., Wang, Y., Bai, L., Huang, C., Liu, Z., Hooi, B., and Zimmermann, R. Largest: A benchmark dataset for large-scale traffic forecasting. Advances in Neural Information Processing Systems, 36, 2024b.
+Liu, Y., Wu, H., Wang, J., and Long, M. Non-stationary transformers: Exploring the stationarity in time series forecasting. Advances in Neural Information Processing Systems, 35:9881­9893, 2022.
+Lu, W., Wang, J., Sun, X., Chen, Y., Ji, X., Yang, Q., and Xie, X. Diversify: A general framework for time series out-of-distribution detection and generalization. IEEE Transactions on Pattern Analysis and Machine Intelligence, 2024.
+Ma, J., Wang, G., Huang, S., Yang, K., Wang, B., Wang, P., and Wang, Y. Spatiotemporal causal decoupling model for air quality forecasting. arXiv preprint arXiv:2505.20119, 2025.
+Miao, H., Zhao, Y., Guo, C., Yang, B., Kai, Z., Huang, F., Xie, J., and Jensen, C. S. A unified replay-based continuous learning framework for spatio-temporal prediction on streaming data. In ICDE, 2024.
+
+Miao, H., Zhao, Y., Guo, C., Yang, B., Zheng, K., and Jensen, C. S. Spatio-temporal prediction on streaming data: A unified federated continuous learning framework. IEEE Transactions on Knowledge and Data Engineering, 2025.
+Namkoong, H. and Duchi, J. C. Stochastic gradient methods for distributionally robust optimization with fdivergences. Advances in neural information processing systems, 29, 2016.
+Pan, Z., Liang, Y., Wang, W., Yu, Y., Zheng, Y., and Zhang, J. Urban traffic prediction from spatio-temporal data using deep meta learning. In Proceedings of the 25th ACM SIGKDD international conference on knowledge discovery & data mining, pp. 1720­1730, 2019.
+Qiao, F. and Peng, X. Topology-aware robust optimization for out-of-distribution generalization. arXiv preprint arXiv:2307.13943, 2023.
+Shafieezadeh Abadeh, S., Nguyen, V. A., Kuhn, D., and Mohajerin Esfahani, P. M. Wasserstein distributionally robust kalman filtering. Advances in Neural Information Processing Systems, 31, 2018.
+Shao, Z., Zhang, Z., Wang, F., Wei, W., and Xu, Y. Spatialtemporal identity: A simple yet effective baseline for multivariate time series forecasting. In Proceedings of the 31st ACM International Conference on Information & Knowledge Management, pp. 4454­4458, 2022a.
+Shao, Z., Zhang, Z., Wei, W., Wang, F., Xu, Y., Cao, X., and Jensen, C. S. Decoupled dynamic spatial-temporal graph neural network for traffic forecasting. Proc. VLDB Endow., 15(11):2733­2746, 2022b.
+Shao, Z., Wang, F., Xu, Y., Wei, W., Yu, C., Zhang, Z., Yao, D., Jin, G., Cao, X., Cong, G., et al. Exploring progress in multivariate time series forecasting: Comprehensive benchmarking and heterogeneity analysis. arXiv preprint arXiv:2310.06119, 2023.
+Staib, M. and Jegelka, S. Distributionally robust optimization and generalization in kernel methods. Advances in Neural Information Processing Systems, 32, 2019.
+Vapnik, V. Statistical learning theory. John Wiley & Sons google schola, 2:831­842, 1998.
+Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., Kaiser, L., and Polosukhin, I. Attention is all you need. Advances in neural information processing systems, 30, 2017.
+Wang, B., Zhang, Y., Shi, J., Wang, P., Wang, X., Bai, L., and Wang, Y. Knowledge expansion and consolidation for continual traffic prediction with expanding graphs.
+
+11
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+IEEE Transactions on Intelligent Transportation Systems, 2023a.
+Wang, B., Zhang, Y., Wang, X., Wang, P., Zhou, Z., Bai, L., and Wang, Y. Pattern expansion and consolidation on evolving graphs for continual traffic prediction. In Proceedings of the 29th ACM SIGKDD Conference on Knowledge Discovery and Data Mining, pp. 2223­2232, 2023b.
+Wang, B., Ma, J., Wang, P., Wang, X., Zhang, Y., Zhou, Z., and Wang, Y. Stone: A spatio-temporal ood learning framework kills both spatial and temporal shifts. In Proceedings of the 30th ACM SIGKDD Conference on Knowledge Discovery and Data Mining, pp. 2948­2959, 2024a.
+
+Yang, S., Liu, J., and Zhao, K. Space meets time: Local spacetime neural network for traffic flow forecasting. In 2021 IEEE International Conference on Data Mining (ICDM), pp. 817­826. IEEE, 2021.
+Yeh, C.-C. M., Fan, Y., Dai, X., Saini, U. S., Lai, V., Aboagye, P. O., Wang, J., Chen, H., Zheng, Y., Zhuang, Z., et al. Rpmixer: Shaking up time series forecasting with random projections for large spatial-temporal data. In Proceedings of the 30th ACM SIGKDD Conference on Knowledge Discovery and Data Mining, pp. 3919­3930, 2024.
+Yu, B., Yin, H., and Zhu, Z. Spatio-temporal graph convolutional networks: A deep learning framework for traffic forecasting. arXiv preprint arXiv:1709.04875, 2017.
+
+Wang, B., Wang, P., Zhang, Y., Wang, X., Zhou, Z., Bai, L., and Wang, Y. Towards dynamic spatial-temporal graph learning: A decoupled perspective. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 38, pp. 9089­9097, 2024b.
+Wang, B., Wang, P., Zhang, Y., Wang, X., Zhou, Z., and Wang, Y. Condition-guided urban traffic co-prediction with multiple sparse surveillance data. IEEE Transactions on Vehicular Technology, 2024c.
+Wang, S., Li, Y., Zhang, J., Meng, Q., Meng, L., and Gao, F. Pm2. 5-gnn: A domain knowledge enhanced graph neural network for pm2. 5 forecasting. In Proceedings of the 28th international conference on advances in geographic information systems, pp. 163­166, 2020.
+Wang, X., Wang, P., Wang, B., Zhang, Y., Zhou, Z., Bai, L., and Wang, Y. Latent gaussian processes based graph learning for urban traffic prediction. IEEE Transactions on Vehicular Technology, 2023c.
+Wu, H., Xu, J., Wang, J., and Long, M. Autoformer: Decomposition transformers with auto-correlation for long-term series forecasting. Advances in neural information processing systems, 34:22419­22430, 2021.
+Wu, Z., Pan, S., Long, G., Jiang, J., and Zhang, C. Graph wavenet for deep spatial-temporal graph modeling. arXiv preprint arXiv:1906.00121, 2019.
+Xia, Y., Liang, Y., Wen, H., Liu, X., Wang, K., Zhou, Z., and Zimmermann, R. Deciphering spatio-temporal graph forecasting: A causal lens and treatment. arXiv preprint arXiv:2309.13378, 2023.
+Xia, Y., Liang, Y., Wen, H., Liu, X., Wang, K., Zhou, Z., and Zimmermann, R. Deciphering spatio-temporal graph forecasting: A causal lens and treatment. Advances in Neural Information Processing Systems, 36, 2024.
+
+Zeng, A., Chen, M., Zhang, L., and Xu, Q. Are transformers effective for time series forecasting? In Proceedings of the AAAI conference on artificial intelligence, volume 37, pp. 11121­11128, 2023.
+Zhang, G., Yi, J., Yuan, J., Li, Y., and Jin, D. Das: Efficient street view image sampling for urban prediction. ACM Transactions on Intelligent Systems and Technology, 14 (2):1­20, 2023.
+Zhang, J., Zheng, Y., Qi, D., Li, R., and Yi, X. Dnn-based prediction model for spatio-temporal data. In Proceedings of the 24th ACM SIGSPATIAL international conference on advances in geographic information systems, pp. 1­4, 2016.
+Zhang, Y., Wang, X., Wang, P., Wang, B., Zhou, Z., and Wang, Y. Modeling spatio-temporal mobility across data silos via personalized federated learning. IEEE Transactions on Mobile Computing, 2024.
+Zhang, Y., Wang, X., Yu, X., Sun, Z., Wang, K., and Wang, Y. Drawing informative gradients from sources: A one-stage transfer learning framework for cross-city spatiotemporal forecasting. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 39, pp. 1147­ 1155, 2025.
+Zheng, C., Fan, X., Wang, C., Qi, J., Chen, C., and Chen, L. Increase: Inductive graph representation learning for spatio-temporal kriging. In Proceedings of the ACM Web Conference 2023, pp. 673­683, 2023.
+Zheng, J., Saxena, D., Cao, J., Yang, H., and Ruan, P. Inductive spatial temporal prediction under data drift with informative graph neural network. arXiv preprint arXiv:2409.13253, 2024.
+Zhou, Z., Huang, Q., Yang, K., Wang, K., Wang, X., Zhang, Y., Liang, Y., and Wang, Y. Maintaining the status quo:
+
+12
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning Capturing invariant relations for ood spatiotemporal learning. In Proceedings of the 29th ACM SIGKDD Conference on Knowledge Discovery and Data Mining, pp. 3603­3614, 2023a. Zhou, Z., Yang, K., Liang, Y., Wang, B., Chen, H., and Wang, Y. Predicting collective human mobility via countering spatiotemporal heterogeneity. IEEE Transactions on Mobile Computing, 2023b. Zhou, Z., Yang, K., Sun, W., Wang, B., Zhou, M., Zong, Y., and Wang, Y. Towards learning in grey spatiotemporal systems: A prophet to non-consecutive spatiotemporal dynamics. In Proceedings of the 2023 SIAM International Conference on Data Mining (SDM), pp. 190­198. SIAM, 2023c.
+13
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+A. Related Work
+A.1. Spatio-temporal Prediction
+Current popular spatio-temporal prediction models are predominantly based on spatio-temporal graph neural networks (STGNNs) (Zhang et al., 2016; Wang et al., 2024b; Zhou et al., 2023c; Liu et al., 2025a; Pan et al., 2019; Wang et al., 2023c; Zhou et al., 2023b; Ma et al., 2025). These models focus on developing advanced variants to accurately characterize spatiotemporal data, typically combining GCNs with sequential models to learn complex dynamics. GWNet (Wu et al., 2019), STGCN (Yu et al., 2017) leverage GNNs with TCN to model spatial and temporal dynamics, respectively. D2STGNN (Shao et al., 2022b), DGCRN (Li et al., 2023) and DCRNN (Li et al., 2017) integrate diffusion graph convolutional networks with RNN to effectively capture temporal patterns. Meanwhile, STAEformer (Liu et al., 2023a) and STNN (Yang et al., 2021) utilize Transformer to model long-term temporal dependencies. AGCRN (Bai et al., 2020) directly treats the graph topology as a trainable parameter of the model and goes through the training process to find the optimal graph topology. In addition, some spatio-temporal models choose other ways of spatial interaction, such as STNorm (Deng et al., 2021) which adjusts the data distribution of all nodes by normalization to accomplish spatial information influence among nodes, and STID (Shao et al., 2022a) captures and distinguishes spatial patterns of each node in a data-driven manner by assigning learnable node embeddings. However, these kind of spatial modeling on nodes has no capability of out-of-distribution learning since these parameters in models are coupled with the spatial scale. Furthermore, some continual learning approaches (Chen et al., 2021) sequentially fine-tune models using data subsets with new distributions to adapt to spatio-temporal changes. Unfortunately, the effectiveness of these models can only be demonstrated in environments similar to the training set, leading to challenges when encountering OOD scenarios.
+A.2. Continual Learning with Spatio-temporal Shift
+Several studies (Chen et al., 2021; Miao et al., 2024; Wang et al., 2023a; Miao et al., 2025; Chen & Liang, 2024) have proposed continual learning strategies to tackle spatio-temporal graph prediction in scenarios with spatio-temporal shifts. When the spatio-temporal data distribution undergoes changes, these models engage in fine-tuning using a subset of new data to adjust to the updated data distribution. For instance, TrafficStream (Chen et al., 2021) recommends utilizing subsets of newly added nodes and significant temporal pattern data changes for fine-tuning the model. PECPM (Wang et al., 2023b) identifies conflicting nodes to enhance the fine-tuning process, focusing on nodes that have experienced substantial changes. DLF (Wang et al., 2024b) introduces a streaming training strategy to continuously fine-tune the model to adapt to the dynamic nature of spatio-temporal data. TFMoE (Lee & Park, 2024) partitions traffic flow into multiple homogeneous groups and assigns an expert model responsible for each group, enabling each expert model to specialize in learning and adapting to specific patterns. However, these models often compromise performance to improve learning efficiency, resulting in lower performance compared to traditional spatio-temporal models. Primarily, these models train and fine-tune on a sufficient amount of new distribution data (approximately 21 days in one month) and test on the new data distribution, thereby adhering to the IID assumption and encountering difficulties in OOD learning.
+
+B. Algorithm & Optimization
+We have provided the pseudocode of the algorithm in Algorithm 1, where we can observe that STOP makes final predictions based on the temporal component and spatial component. This includes a perturbation process to extract robust knowledge. This perturbation process only occurs in the training phase and we no longer use it in the test phase. We also provide the optimization flow of GenPU and model parameters in Algorithm 2. As shown, we interleaved the optimization of GenPU and model parameters.
+
+C. Theoretical Explanation and Analysis
+
+C.1. Low-rank Attention
+
+In the centralized messaging mechanism, We first define low-rank attention as follows:
+
+Z(ci) =A (Q, K, V) = softmax QK × softmax KQ V,
+
+(21)
+
+Diffusion
+
+Aggregation
+
+where Q =ZTWq(i)  RN×dh , K = CJd(it)  RN×dh , V = ZTJ(dit)  RN×dh .
+
+(22)
+
+14
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+Algorithm 1 STOP for spatio-temporal prediction
+Input: Historical data X  RT ×N×c. Output: Future prediction Y  RTP ×N×c. # Data encode; H0  X in Eq. 2  4 ZI  H0, T, E in Eq. 5 # Temporal modeling and prediction; ZT  ZI in Eq. 6 Yt  ZT in Eq. 7 # Spatial modeling and prediction; if test phase then
+Zc  ZT, C in Eq. 8  9 end if if training phase then
+Zc  ZT, C, g in Eq. 8  9, 10  11 Zs  Zc, ZT in Eq. 15  18 Ys  Zs in Eq. 19 # Final prediction; Y  Yt + Ys in Eq. 20 end if
+
+ Temporal decomposition  Input representation
+ Temporal representation learning  Temporal prediction component
+ ConAU
+ ConAU & GenPU  Spatial representation learning  Spatial prediction component
+ Final prediction
+
+Algorithm 2 Optimization process of STOP
+
+Input: Historical data X  RT ×N×c, GenPU G = {g1, g2, . . . , gM }  RN , sample hits s  (0, N ), future label Y  RTP ×N×c, loss function L, initialized parameters  of STOP function f , patience P , learning rates  and . Output: Well-trained parameters  of STOP.
+
+while maximum epochs not reached or not converged do
+
+for patience = 1, 2, . . . , P do
+
+for j = 1, 2, . . . , M do gj  softmax (gj) gj  sampling from multinomial distribution M gj ; s Gj  gj in Eq. 10
+Lj  L (f (X) , Y; Gj)
+end for L  max {L1, L2, . . . , LM }    - L
+end for
+
+ Generalized Perturbation Units  Update the parameters of STOP
+
+i  argmax {L1, L2, . . . , LM } gi  gi +  (1 - gi) gi - log || exp gi||1 L end while
+
+ Update GenPU
+
+Let Sa = softmax KQ  RK×N be the aggregation component of the attention score, and Sd = softmax QK  RN×K be the diffusion component of the attention score, hence the attention score matrix S  RN×N can be expressed as
+
+S = Sd × Sa  RN×N .
+
+(23)
+
+And the rank of S is satisfied,
+
+rank (S) = rank (Sd × Sa)  min (rank (Sd) , rank (Sa))  K  N.
+
+(24)
+
+The final inequality is a consequence of the fact that the maximum rank of a matrix is no more than the minimum of the ranks of its rows and columns (Greub, 2012). The rank of S, up to K, is much lower than its size N , i.e., the number of rows and columns, hence the attention score matrix of our attention mechanism is a low-rank matrix. This constitutes the basis for the low ranking observed in our low-rank attention mechanism.
+
+15
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+The low-rank characteristic in the centralized messaging mechanism offers one key advantage: it exhibits linear complexity compared to the self-attention mechanism, allowing for a larger spatio-temporal efficiency.
+
+C.1.1. EFFICIENCY ANALYSIS
+
+The low-rank attention function in Equation 21 can be rewritten as follows,
+
+A (Q, K, V) = SV = (SdSa) × V = Sd × (SaV) .
+
+(25)
+
+Consequently, in contrast to the unlike vanilla self-attention mechanism (Vaswani et al., 2017), which necessitates the pre-computation of the attention score matrix with complexity O N 2dh , we have the option of computing SaV  RK×dh initially with complexity O (KN dh) and subsequently determining Sd × (SaV)  RN×dh with same complexity O (KN dh), resulting in the efficient computation of low-rank attention with linear time complexity O (N ) by K  N . As shown, we reduce the computational complexity from quadratic to nearly linear. This enables our method to effectively
+process graph data with a large number of nodes without requiring excessive GenPU memory resources. See Figure 9 and
+Figure 6 for experimental analysis.
+
+D. Distributionally Robust Optimization
+We theoretically analyzed STOP's generalization performance. Since STOP's optimization objective belongs to the distributionally robust optimization class (Duchi & Namkoong, 2019), which exhibits good generalization properties. Note that distributionally robust optimization class is a general term for optimization objectives that satisfy specific conditions our contribution lies in how to implement optimization strategies that meet these conditions in the spatio-temporal OOD problem. First, we will introduce what constitutes a distributionally robust optimization class and the necessary conditions for membership, then analyze its beneficial properties, and finally extend these concepts to STOP.
+
+D.1. What is DRO?
+
+Distributionally Robust Optimization (DRO) (Duchi & Namkoong, 2019) refers to a class of loss functions that aim to optimize by considering the worst-case scenario within a certain range of all possible distributions of the data. In practical terms, an optimization object that takes the following form with respect to the training environment e can be categorized under DRO (Duchi & Namkoong, 2019; Staib & Jegelka, 2019; Levy et al., 2020),
+
+argminf sup E(X,Y)p(X ,Y|e);D(e,e) [L (f (X) , Y)] ,
+eE
+
+(26)
+
+where f is the function we optimized, usually a deep neural network with learnable parameters. D (·, ·) is the distribution distance metric (Namkoong & Duchi, 2016; Shafieezadeh Abadeh et al., 2018), which is used to calculate the distance between distributions.  is a hyperparamer to limit the extent to which the distribution is explored. In fact, this merely indicates an exploration constraint, limiting the explored environments from being completely different from the training environment.
+
+Mark. If an optimization satisfies: (1) modeling of different environments, (2) applying constraints, and (3) emphasizing the most challenging environments, then this optimization belongs to DRO and possesses the following beneficial properties.
+
+D.2. Robust Properties of DRO
+
+Recall that in the preliminary, the task of spatio-temporal OOD learning aims to learn a robust function f , which can
+accurately predict values after TP time steps given observed data of past T time steps X and the graph sampled from any environment e  E, where e may have different spatio-temporal distributions with training environment e,
+
+argminf sup E(X,Y)p(X ,Y|e) [L (f (X) , Y)] .
+
+(27)
+
+eE
+
+In a more intuitive sense, Equation. 1 is designed to find a function that reduces the loss associated with the most challenging
+
+scenario across all possible distributions e  E. This task is particularly challenging because we lack access to data
+
+from any unfamiliar distributions outside of the training set (Qiao & Peng, 2023). Although traditional Empirical Risk
+
+Minimisation (Vapnik, 1998),
+
+argminf E(X,Y)p(X ,Y|e) [L (f (X) , Y)] ,
+
+(28)
+
+16
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+which optimises solely based on the raw training environment e, performs well under the IID assumption, it is not possible to guarantee its performance in the presence of distributional drifts (Arjovsky et al., 2019). For all possible e  E and function f , with high probability in mathematics, the following property holds,
+
+E(X,Y)p(X ,Y|e);D(e,e) {[L (f (X) , Y)]}
+
+  E(X,Y)p(X ,Y|e) [L (f (X) , Y)] + O 
+
+ Var(X,Y)p(X ,Y|e) [L (f (X) , Y)]  ,
+Ne
+
+(29)
+
+where Ne is the number of data point in traning environment. Therefore, due to the presence of subsequent variance terms, optimizing ERM alone cannot guarantee performance improvement in other environments e  E - {e}. Compared to the IID-only condition of the ERM, distributionally robust optimization explores a certain range of challenging training data distributions, mathematically, distributionally robust optimization is equivalent to adding variance regularization to the standard ERM (Duchi & Namkoong, 2019),
+
+sup E(X,Y)p(X ,Y|e);D(e,e) [L (f (X) , Y)]
+eE
+= E(X,Y)p(X ,Y|e) [L (f (X) , Y)] + 2 Var(X,Y)p(X ,Y|e) [L (f (X) , Y)] +  (f ) ,
+
+(30)
+
+where  (f )  0 and it is O(1/Ne ) uniformly about f . Therefore, if we do not consider the subsequent asymptotic terms (f ), the above formula is equivalent to the following inequality,
+
+sup E(X,Y)p(X ,Y|e);D(e,e) [L (f (X) , Y)]
+eE
+ E(X,Y)p(X ,Y|e) [L (f (X) , Y)] + 2 Var(X,Y)p(X ,Y|e) [L (f (X) , Y)].
+
+(31)
+
+DRO explores a certain range of training data distributions and tries to optimise on data distributions that may match the distribution of the test set, providing ideas for solving the OOD problem. Therefore, DRO mathematically provides more rigorous constraints than using empirical loss functions alone in OOD environments, preventing the model from over-relying on training data. This enables the model to flexibly adapt to different environments, improving its generalization performance in unknown environments.
+
+D.3. Does STOP have properties of DRO?
+
+We will demonstrate that our optimization objective of STOP belongs to DRO, inheriting its good properties. Our optimization objective is as follows:
+
+min sup E(X,Y)(X ,Y|e) [L (f (X) , Y; g)] , s.t. ||g||0 = s  (0, N ) .
+
+(32)
+
+f gRN
+
+Next, we demonstrate according to Mark 1 that our proposed optimization strategy satisfies the necessary conditions for DRO, thus inheriting its beneficial properties.
+
+Diverse environments. STOP creates a diverse training environment by adding a perturbation process through a message perturbation mechanism.
+
+Applying constraints. Our perturbation process follows polynomial distribution sampling, and we strictly control the perturbation ratio, which imposes constraints on the generated environments.
+
+Exploring challenging environments: We emphasize selecting environments with the largest gradients during training for optimization, encouraging the model to be exposed to challenging environments.
+
+In summary, our optimization strategy belongs to DRO and thus inherits its good generalization property.
+
+E. Experiments
+E.1. Baseline Details In experiments, we compare a lot of spatio-temporal prediction models with spatio-temporal OOD models. However, the original versions of many of these models are not compatible with the OOD setting. Consequently, we had to remove certain
+17
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+non-essential code related to graph structures, particularly node embedding techniques and adaptive graph structure learning techniques.
+ Node embedding technology. The researchers set a node embedding vector E  RN×ds to capture node patterns adaptively, which are coupled with the size N of the graph structure. Therefore, when the model is trained, it cannot be run directly into the test environment with ST-OOD. STID, STAEformer, and BigST use this technology.
+ Adaptive graph learning. This method generally use two noode embedding vectors E1  RN×ds and E2  RN×ds , and they multiply these two node embedding matrices, As = E1E2  RN×N , to generate an adaptive adjacency matrix As for learning the adjacency matrix, which is then used for GCN. GWNet, D2STGNN, and CaST adopt this method.
+E.2. Experimental dataset details
+In this paper, we utilized six datasets to evaluate the effectiveness of the models in OOD scenarios, primarily from the domains of transportation and atmosphere. These datasets often span multiple years. Among them, LargeST (Liu et al., 2024b) collected five years of data from 8600 records, sampled at a frequency of five minutes. PEMSD3-Stream (Chen et al., 2021) is a naturally streaming traffic dataset, recording data from July each year from 2011 to 2017, where the traffic structure expands year by year, naturally representing spatio-temporal shifts. Knowair (Wang et al., 2020) collected 18 atmospheric features sampled at an hourly frequency. We followed the following rules to create spatio-temporal OOD datasets.
+ Temporal shift: We used the first 60% of data from the first year as the training set, followed by 20% of data for the validation set. We used the last 20% of data from subsequent years for the test set. This longer time interval ensures changes in temporal distribution characteristics.
+ Structural shift: Apart from the PEMSD3-Stream dataset, we selected a subset of nodes for training and validation, approximately 75% of the total number, in the test set, we randomly masked 10% of nodes to simulate node disappearance and added 30% of nodes as new nodes. This is because for spatio-temporal systems, cities or detection systems generally tend to expand. Since PEMSD3-Stream is a natural streaming data set, we use it directly.
+
+Dataset
+LargeST-SD LargeST-GBA LargeST-GLA LargeST-CA
+KnowAir PEMSD3-Stream
+
+Training set
+Time range
+First 60% data in 2017 First 60% data in 2017 First 60% data in 2017 First 60% data in 2017 First 60% data in 2011 First 60% data in 2015
+
+Table 5. The details of used datasets.
+
+Test set
+
+Graph Nodes
+
+Temporal shift
+
+Structural shift
+
+New nodes
+
+Removed Nodes
+
+550 Last 20% data in 2018-2021
+
+165
+
+55
+
+1809 Last 20% data in 2018-2021
+
+542
+
+180
+
+2949 Last 20% data in 2018-2021
+
+884
+
+294
+
+6615 Last 20% data in 2018-2021
+
+1984
+
+661
+
+141 Last 20% data in 2012-2017
+
+42
+
+14
+
+655 Last 20% data in 2016-2021 (60, 131, 167, 179, 195, 216)
+
+0
+
+E.3. OOD Performance Comparison on Large Datasets
+As the largest collection of spatio-temporal data available in open source today, CA represents an invaluable test case for the OOD capability of the model. The performance of STOP and the baseline is evaluated on large-scale and large-scale spatio-temporal datasets, respectively, under identical conditions.
+Based on the same partitioning strategy as described in Section 4.1, we divide the LargeST dataset into the two largest subdatasets, GLA and CA. Due to the parameter complexity of Transformer-based baselines such as STAEformer, STNN, D2STGNN, and STONE, which scales at least quadratically with the number of nodes, deploying these models on GLA and CA datasets is not feasible.
+As shown in Table 6, STOP consistently outperforms the baselines on both the large-scale spatio-temporal OOD dataset in terms of overall performance and performance on newly added nodes, with improvements of up to 14.01%. On large-scale spatio-temporal datasets, the performance of baselines based on global message passing mechanisms declines significantly due to the introduction of more new nodes. STID, which does not involve node interactions, achieves the second-best
+18
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+performance among the baselines. In contrast, STOP benefits from ConAU by decomposing large-scale spatio-temporal scenes into stable spatio-temporal subenvironments, leading to the best performance while ensuring node interactions. This highlights STOP's remarkable OOD capabilities even in large-scale scenarios.
+
+Table 6. OOD performance comparisons on GLA and CA datasets. The absence of baselines indicates that the models incur out-of-memory
+
+issues.
+
+Method
+
+Ours CaST RPMixer BigST STID STNorm GWNet STGCN
+
+GLA
+
+MAE 19.13 3 RMSE 30.33
+MAPE 11.93
+MAE 26.29 6 RMSE 40.66
+MAPE 17.60
+MAE 36.87 12 RMSE 55.96
+MAPE 27.07
+MAE 17.47 3 RMSE 28.24
+MAPE 12.69
+MAE 23.70 6 RMSE 37.17
+MAPE 18.39
+MAE 32.86 12 RMSE 50.28
+MAPE 27.65
+
+23.36 35.53 21.44
+31.43 47.49 27.75
+43.48 65.08 36.46
+21.87 34.44 17.79
+29.13 45.30 23.63
+41.26 62.85 34.71
+
+25.89 41.10 14.90
+43.33 66.65 26.18
+77.32 114.02 53.23
+23.72 38.43 16.02
+39.52 61.88 27.42
+70.64 105.36 53.26
+
+20.32 32.56 12.93
+28.83 44.69 18.49
+42.12 62.99 30.33
+18.77 30.77 13.60
+26.80 42.34 19.98
+39.59 60.24 32.00
+
+19.87 31.78 12.03
+28.30 43.92 17.72
+41.38 62.69 27.90
+18.35 30.01 12.92
+26.06 41.33 19.33
+38.23 59.16 29.77
+
+21.05 33.03 13.34
+30.70 46.35 20.57
+46.13 66.98 34.63
+19.10 30.86 15.38
+27.63 43.10 23.24
+40.77 61.20 35.50
+
+21.17 32.96 13.87
+29.91 45.47 19.90
+41.81 62.08 28.21
+19.01 30.30 13.62
+26.64 41.32 19.56
+37.63 57.07 30.31
+
+20.51 32.24 12.81
+29.13 44.50 19.36
+43.92 64.34 31.14
+19.23 30.89 13.68
+27.30 42.51 20.23
+40.64 61.01 31.93
+
+CA
+
+Table 7. Inductive learning preformance on GLA and CA datasets of new nodes. The absence of baselines indicates that the models incur
+
+out-of-memory issues.
+
+Method
+
+Ours CaST RPMixer BigST STID STNorm GWNet STGCN
+
+GLA
+
+MAE 18.99 3 RMSE 30.13
+MAPE 11.94
+MAE 26.17 6 RMSE 40.57
+MAPE 17.64
+MAE 36.78 12 RMSE 55.89
+MAPE 27.17
+MAE 17.48 3 RMSE 28.39
+MAPE 12.87
+MAE 23.71 6 RMSE 37.29
+MAPE 18.73
+MAE 32.83 12 RMSE 50.30
+MAPE 28.24
+
+23.09 35.16 21.32
+31.15 47.16 27.62
+43.12 64.65 36.35
+21.86 34.50 18.46
+29.11 45.31 24.37
+41.22 62.78 35.75
+
+25.65 40.89 14.86
+42.95 66.35 26.09
+76.60 113.41 53.12
+23.73 38.59 16.15
+39.50 62.03 27.65
+70.53 105.38 53.61
+
+20.17 32.36 12.91
+28.66 44.51 18.47
+41.84 62.56 30.24
+18.76 30.86 13.85
+26.79 42.38 20.34
+39.53 60.14 32.69
+
+19.71 31.55 12.03
+28.14 43.76 17.73
+41.13 62.36 27.87
+18.35 30.14 13.12
+26.05 41.40 19.70
+38.18 59.13 30.44
+
+20.92 32.84 13.26
+30.56 46.24 20.47
+45.87 66.70 34.35
+19.10 30.98 16.06
+27.65 43.20 24.45
+40.75 61.20 37.24
+
+21.35 33.30 14.01
+30.46 46.51 20.25
+42.97 63.92 28.98
+19.38 30.87 15.62
+27.47 42.50 22.76
+39.27 59.43 35.64
+
+20.36 32.05 12.81
+29.00 44.39 19.38
+43.70 64.04 31.14
+19.23 30.96 13.97
+27.30 42.53 20.62
+40.61 60.94 32.53
+
+CA
+
+E.4. Inductive Learning Comparison on Large Datasets To evaluate the inductive learning capabilities of each model, we further report the performance of added nodes in Table 7. We can see that GCN-based models have overall poor inductive capabilities. While they can rely on message passing
+19
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+mechanisms to generalize learned information to unseen nodes, the spatially confused interactions cannot guarantee accurate descriptions of added nodes, leading to subpar performance. In this regard, STID achieves better predictive results because it assumes nodes are independent, allowing the model to learn time-related knowledge that is unrelated to nodes, which can generalize to added nodes and avoid error accumulation. Our model demonstrates strong inductive learning capabilities on large-scale graphs, as added nodes can access shared context features to obtain good representations.
+E.5. Performance in S-OOD and T-OOD Scenarios
+With LargeST-SD dataset, we investigate the performance of models in T-OOD and S-OOD scenarios. Used two datasets are simplified versions of ST-OOD. For S-OOD, we use the last 20% of the 2017 data as the test set with the graph structure unchanged. For T-OOD, we maintain the graph structure consistent between the training and testing environments, aligning the data selection with ST-OOD. The experimental results are shown in Table 8, and we can observe that STGNNs exhibit poor performance in the S-OOD scenario, mainly due to the sensitivity of the node-to-node interaction method to structural shifts. The poor performance of STNN can be attributed to its use of Transformer, which lacks robustness against noise introduced by temporal and spatial shifts. Our model has achieved competitive performance in both T-OOD and S-OOD scenarios.
+
+Table 8. Comparison in T-OOD and S-OOD scenarios. Method Ours STONE D2STGNN STNN STGCN GWNet
+
+MAE 23.21 S-OOD RMSE 36.95
+MAPE 14.45
+MAE 22.91 T-OOD RMSE 37.17
+MAPE 15.35
+
+25.00 39.12 16.72
+25.41 37.56 16.38
+
+26.56 42.77 19.80
+24.23 39.04 17.37
+
+35.06 55.12 23.42
+36.14 56.26 26.46
+
+29.74 44.45 21.79
+25.73 40.07 17.68
+
+26.79 41.47 18.16
+23.38 37.63 16.58
+
+E.6. Performance on Rapid Evoluting Spatio-temporal Dynamical System
+In the main experiment, the proportion of added nodes is relatively small (only 30%), which may not cover rapidly developing urban scenarios. We further create a challenging scenario where we train on 30% of nodes from the year 2017 and test on the remaining 70% of nodes from subsequent years. Details of the experimental dataset are provided in Table 9.
+
+Table 9. Rapidly growth OOD setting on SD dataset.
+
+Training set
+
+Test set
+
+Time range
+
+Graph (Nodes)
+
+Temporal shift
+
+Strucal shift
+
+Firtst 60% data in 2017
+
+214
+
+Last 20% data in 2018-2021 500 new nodes & 0 removed nodes
+
+We observe that for baseline models based on Transformer and GCN, such as D2STGNN and GWNet, the rapid and large influx of new nodes significantly disrupts the model's learning of message passing mechanisms, leading to a decrease in performance for models relying on such global message passing mechanisms. Models like BigST based on linear attention mechanisms and STONE based on relaxed mapping perform better than the former in out-of-distribution (OOD) scenarios with rapid growth. On the other hand, STID, based on node independence, shows limitations in generalizing features to new nodes when faced with a large number of additional nodes. In contrast, STOP benefits from its innovative ConAU and GenPU-oriented low-order attention mechanism, capturing flexible adaptations to changes in the overall spatio-temporal environment through sub-environments, showing the highest relative improvement rate at 16.35% and demonstrating robustness in scenarios with rapid node growth.
+E.7. Compare Continuous Learning Method
+We compared STOP with several continual learning methods on out-of-distribution (OOD) tasks. Taking the PEMSD3Stream dataset as an illustration, when encountering spatio-temporal shifts, these models require fine-tuning using 21-day data from the new distribution. To ensure a fair comparison, we aligned the OOD task settings by conducting tests directly in the subsequent years following the initial year of training. This training methodology is denoted as `static-STModel' in
+20
+
+All nodes
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+Method
+MAE 3 RMSE
+MAPE
+MAE 6 RMSE
+MAPE
+MAE 12 RMSE
+MAPE
+MAE 3 RMSE
+MAPE
+MAE 6 RMSE
+MAPE
+MAE 12 RMSE
+MAPE
+
+Ours
+18.04 29.17 12.32
+23.64 38.10 16.49
+32.29 51.74 22.95
+18.28 29.47 12.50
+24.02 38.57 16.77
+32.81 52.31 23.33
+
+Table 10. OOD performance with rapidly growth on SD dataset.
+STONE CaST RPMixer BigST D2STGNN STNN STAEformer STID
+
+18.61 29.82 13.74
+25.03 39.92 18.89
+38.97 55.20 26.80
+18.84 30.11 14.07
+25.39 40.39 19.40
+39.40 55.68 27.39
+
+21.47 33.75 15.92
+28.80 44.71 20.73
+41.95 63.40 31.80
+21.53 33.67 16.20
+28.94 44.74 21.04
+42.19 63.55 32.22
+
+25.20 40.13 15.64
+42.69 66.85 26.13
+77.90 116.56 49.35
+25.24 39.93 15.66
+42.76 66.81 26.13
+77.95 116.44 49.28
+
+18.85 30.36 12.59
+26.32 41.79 17.79
+38.60 60.11 26.72
+18.97 30.34 12.72
+26.55 41.94 18.02
+38.86 60.25 26.88
+
+20.98 33.46 14.50
+30.83 47.76 21.61
+45.12 68.19 31.83
+21.26 33.81 14.98
+31.34 48.51 22.34
+45.73 68.94 32.76
+
+42.24 65.12 33.68
+42.67 65.66 34.18
+46.48 71.04 36.88
+44.82 68.42 35.29
+45.26 68.97 35.86
+48.99 74.23 38.59
+
+18.99 30.29 14.87
+26.68 41.82 22.79
+38.76 59.68 33.16
+19.16 30.43 15.21
+27.00 42.19 23.34
+39.22 60.24 33.87
+
+18.78 30.17 12.91
+26.52 41.93 18.89
+39.44 60.79 30.24
+18.92 30.22 13.08
+26.79 42.17 19.22
+39.78 61.08 30.86
+
+STNorm
+19.14 30.84 15.79
+26.60 42.20 22.20
+38.59 60.35 35.07
+19.37 31.06 16.38
+27.02 42.74 23.22
+39.24 61.32 37.24
+
+GWNet
+22.62 34.70 17.83
+32.67 49.31 25.61
+48.05 71.78 40.56
+22.97 35.27 18.45
+33.27 50.15 26.58
+48.98 72.91 41.97
+
+STGCN
+20.61 32.56 15.15
+28.28 44.40 20.54
+40.62 63.28 29.35
+20.86 32.98 15.54
+28.71 45.06 21.08
+41.26 63.97 30.12
+
+New nodes
+
+TrafficStream (Chen et al., 2021), `SurSTG-Static' in PEMCP (Wang et al., 2023b), and `Static-TFMoE' in TFMoE (Lee & Park, 2024). We directly extracted their experimental results from the PEMSD3-Stream dataset. For an intuitive comparison, we have added the predicted performance of STGCN.
+As depicted in Table 11, the performance of continual learning strategies is notably inferior to traditional prediction models because they trade performance for accelerated training processes. And our model significantly surpasses existing continual learning models in OOD tasks.
+It is noteworthy that in this experiment, the performance indicated by STOP is slightly superior to that in the primary experiment because the results amalgamate the performance of testing data in the first year, which was omitted in the primary experiment to emphasize the disparities in data distribution between the test and training sets as much as possible.
+
+Table 11. Compared with spatio-temporal continuous learning methods on PEMSD3-Stream dataset.
+
+Model
+
+15min
+
+30min
+
+60min
+
+MAE RMSE MAPE MAE RMSE MAPE MAE RMSE MAPE
+
+PECMP 13.37 TrafficStream 13.98
+TFMoE 12.95
+
+21.10 21.88 21.18
+
+28.35 29.36 18.97
+
+14.78 15.12 14.51
+
+23.54 23.98 23.90
+
+30.88 31.67 19.62
+
+16.32 17.46 18.07
+
+27.20 28.01 29.87
+
+34.28 36.44 24.92
+
+STGCN Ours
+
+13.27 21.03 16.64 14.47 23.64 18.03 17.05 27.95 21.04 11.37 19.16 15.38 12.41 21.18 15.92 14.24 24.39 18.51
+
+E.8. Efficiency Study on KnowAir Dataset
+The training time per epoch is depicted in Figure 6, showcasing the remarkable effectiveness and efficiency of STOP on the KnowAir dataset. Transformer-based models like STNN, STARformer, and D2STGNN exhibit substantial computational time and high memory usage due to their utilization of self-attention mechanisms to calculate dependencies between node pairs, resulting in a time and space complexity that scales quadratically with the number of nodes. Similarly, GCN-based models rely on GCN mechanisms for spatial feature interactions, leading to a time complexity that is also quadratic with the number of nodes. In contrast, our model, with a complexity linear with the number of nodes, significantly reduces the computational complexity.
+21
+
+$YHUDJH0$(
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+
+
+671RUP
+
+6711
+
+
+
+67*&1
+
+*:1HW
+
+ 67,' %LJ67
+
+
+
+&D67
+
+67$(IRUPHU 6721(
+
+  
+
+6723RXUV
+
+
+
+
+
+
+
+7UDLQLQJVSHHGVHSRFK
+
+
+
+
+
+
+
+
+
+ 
+
+0HPRU\8VDJH0%
+
+
+
+'267*11
+
+
+
+  
+
+Figure 6. Visual case and efficiency study of STOP on KnowAir dataset.
+
+E.9. Detailed Performance Analysis of OOD in Each Year
+In the main experiment, we reported the average OOD performance over multiple years. To provide a more detailed comparison, we present the performance changes of each model in LargeST OOD datasets for each year. As shown in Table 12 to 14, the results demonstrate that in fine-grained performance analysis, our model remains highly effective.
+E.10. Ablation Experiment
+We conduct thorough ablation experiments to evaluate the effectiveness of each component. The variants we created are shown in Table 15 and the experiments are shown in Table 16.
+For the time module, we found that time decomposition and prompting provided the model with better capabilities to capture the temporal patterns from the sequence perspective, while the introduction of Yt to make predictions from multiple components enhanced the model's robustness.
+Regarding the C&S messaging mechanism, the "w/o ConAU" variant, which removes the spatial interaction module, resulted in a significant increase in error, indicating that the spatial interaction is still necessary in OOD scenarios. The "w/o LA" variant, which removes the low-rank attention mechanism in the C&S spatial interaction module, performed poorly in prediction, as the traditional node-to-node messaging mechanism is less robust to spatio-temporal shifts. The "w/o LA + DRO" variant performed better than the "w/o LA + RandomDrop" variant, demonstrating that the proposed message perturbation mechanism is more effective than directly perturbing the dataset to generate diverse training environments in helping the model extract robust representations.
+The "w/o DRO" variant exhibited a larger prediction error, suggesting that the inability to effectively optimize the deployed GenPU mask matrix increased the complexity of the model's learning process. The "w/o (GenPU&DRO)" variant also showed a considerable increase in error, further highlighting the crucial importance of the proposed message perturbation mechanism in enhancing the model's robustness, as it allows the model to learn resilient representations from the perturbed environments.
+These ablation studies can demonstrate the positive impact of each designed component on enhancing the overall performance of the model in out-of-distribution scenarios.
+22
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+SD
+
+GBA
+
+Method
+MAE 3 RMSE
+MAPE
+MAE 6 RMSE
+MAPE
+MAE 12 RMSE
+MAPE
+MAE 3 RMSE
+MAPE
+MAE 6 RMSE
+MAPE
+MAE 12 RMSE
+MAPE
+MAE 3 RMSE
+MAPE
+MAE 6 RMSE
+MAPE
+MAE 12 RMSE
+MAPE
+MAE 6 RMSE
+MAPE
+MAE 12 RMSE
+MAPE
+MAE 24 RMSE
+MAPE
+
+Ours
+17.80 28.23 10.76
+23.40 37.13 14.52
+32.06 51.45 20.59
+19.87 32.71 15.74
+25.44 40.59 23.19
+33.94 53.45 33.85
+19.70 31.31 11.25
+26.38 41.01 16.20
+36.15 55.61 24.33
+18.66 30.26 13.24
+24.67 39.12 18.98
+33.54 52.42 27.78
+
+CaST
+22.07 34.38 14.68
+30.03 46.41 19.82
+43.42 66.43 29.10
+24.51 38.63 23.37
+32.60 49.60 32.35
+45.49 67.92 45.54
+24.78 37.70 19.65
+33.17 50.28 25.56
+45.37 68.36 33.70
+23.86 37.58 18.53
+31.61 49.24 24.83
+44.03 67.48 36.25
+
+Table 12. OOD performance on LargeST-2018 dataset
+RPMixer BigST STID STNorm GWNet STGCN STONE
+
+26.22 41.83 15.28
+44.55 69.75 25.81
+80.17 120.41 48.67
+28.16 45.26 21.21
+45.23 69.42 37.04
+77.43 113.45 69.67
+28.12 44.37 14.84
+47.11 72.19 26.16
+83.11 121.95 53.19
+26.15 42.44 17.31
+43.27 67.85 29.84
+75.81 113.33 57.70
+
+19.13 30.76 11.47
+26.41 41.64 16.28
+38.86 60.05 24.68
+22.44 36.86 18.03
+30.73 47.93 27.13
+43.71 65.75 41.11
+21.81 34.75 12.42
+30.71 47.55 17.46
+44.34 66.37 27.87
+20.59 33.80 14.28
+28.95 45.85 20.89
+41.51 63.71 32.88
+
+18.65 29.87 12.25
+26.01 40.92 16.57
+38.31 59.78 24.39
+21.70 35.55 17.34
+29.52 46.23 27.55
+41.78 63.68 42.03
+21.03 33.54 11.58
+29.39 45.86 16.73
+42.28 64.77 25.94
+20.07 32.72 13.71
+28.08 44.60 20.56
+40.52 63.08 31.63
+
+19.48 30.75 11.96
+26.76 41.64 16.71
+38.93 60.02 25.31
+22.33 36.07 18.08
+30.96 47.50 27.63
+43.38 64.22 43.41
+22.27 34.76 12.62
+31.64 47.81 18.70
+45.84 67.03 29.77
+20.41 33.06 14.50
+28.61 45.05 21.59
+40.85 62.43 32.32
+
+19.84 30.62 12.50
+26.97 41.36 17.98
+37.66 58.90 26.42
+21.96 34.62 18.71
+28.76 43.56 26.81
+38.42 57.12 38.80
+21.52 33.47 12.69
+29.57 45.05 17.76
+40.51 60.64 24.75
+19.96 31.84 14.02
+27.00 41.99 19.74
+37.02 56.46 30.10
+
+18.68 29.29 11.56
+24.53 38.01 15.22
+34.78 53.80 22.96
+22.61 36.12 17.26
+30.21 46.13 26.59
+41.67 61.36 40.22
+21.73 33.99 11.91
+30.22 46.24 17.50
+44.17 65.32 26.93
+20.84 33.53 14.24
+29.04 45.49 20.89
+42.04 63.80 32.09
+
+18.83 29.97 11.24
+26.38 38.53 15.02
+38.77 51.94 22.15
+20.58 36.49 16.65
+26.15 42.86 24.30
+36.96 56.02 37.77
+
+D2STGNN
+18.38 28.51 11.47
+23.98 37.72 15.03
+32.97 51.27 21.70
+20.48 35.06 16.67
+26.05 42.49 24.63
+34.94 54.96 37.31
+
+STNN
+35.32 55.12 23.38
+35.77 55.73 23.72
+41.51 64.44 28.11
+41.67 62.49 39.87
+41.57 62.41 39.73
+46.13 68.65 46.05
+
+Out of Memory
+
+STAEformer
+19.01 30.25 11.58
+26.21 41.04 16.22
+38.25 59.22 24.79
+23.27 37.74 18.17
+31.18 48.28 27.59
+44.53 66.98 43.32
+
+GLA
+
+CA
+
+23
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+SD
+
+GBA
+
+Method
+MAE 3 RMSE
+MAPE
+MAE 6 RMSE
+MAPE
+MAE 12 RMSE
+MAPE
+MAE 3 RMSE
+MAPE
+MAE 6 RMSE
+MAPE
+MAE 12 RMSE
+MAPE
+MAE 3 RMSE
+MAPE
+MAE 6 RMSE
+MAPE
+MAE 12 RMSE
+MAPE
+MAE 6 RMSE
+MAPE
+MAE 12 RMSE
+MAPE
+MAE 24 RMSE
+MAPE
+
+Ours
+18.42 29.68 11.73
+24.16 38.73 15.81
+32.78 52.84 22.22
+19.95 32.18 15.45
+26.30 40.91 23.51
+36.07 54.99 34.75
+19.69 30.93 11.74
+26.68 41.06 17.13
+36.79 56.03 25.92
+18.50 29.65 13.34
+24.94 38.97 19.55
+34.31 52.57 29.07
+
+CaST
+22.51 35.36 16.02
+30.58 47.64 21.39
+43.96 67.24 31.30
+23.90 37.26 21.66
+31.96 48.34 30.05
+44.88 67.05 42.42
+24.47 37.04 21.06
+32.83 49.58 27.37
+45.09 67.71 36.07
+23.33 36.55 18.47
+30.93 48.06 24.73
+43.25 66.25 36.29
+
+Table 13. OOD performance on LargeST-2019 dataset
+RPMixer BigST STID STNorm GWNet STGCN STONE
+
+26.61 42.80 16.03
+44.89 70.91 26.91
+80.12 120.77 50.17
+27.07 42.81 19.51
+43.87 66.45 34.24
+76.42 110.42 65.49
+27.31 43.19 15.06
+45.88 70.56 26.73
+81.30 119.66 55.21
+25.21 40.72 16.80
+41.86 65.53 29.04
+73.86 110.23 56.63
+
+19.71 32.18 12.27
+26.85 43.07 17.42
+39.17 61.26 26.46
+21.52 34.69 16.54
+29.93 45.96 24.85
+43.52 65.05 37.91
+21.23 33.92 12.69
+29.83 46.45 17.97
+42.90 64.97 28.69
+19.90 32.59 14.01
+28.08 44.55 20.55
+40.68 62.63 32.69
+
+19.51 31.39 13.18
+26.88 42.76 17.95
+39.31 61.64 26.42
+21.01 34.16 15.95
+29.05 45.13 25.50
+41.75 63.30 38.94
+20.76 32.95 12.01
+29.44 45.54 17.68
+42.73 64.92 27.67
+19.51 31.74 13.44
+27.58 43.67 20.30
+40.08 62.31 31.37
+
+19.56 31.25 12.65
+26.32 41.85 17.44
+38.24 60.13 26.47
+21.98 34.68 17.48
+31.42 46.99 27.53
+44.80 64.97 43.22
+21.51 33.70 12.88
+30.68 46.59 19.31
+44.89 66.28 31.03
+19.91 32.19 15.19
+28.22 44.30 22.95
+40.80 62.15 34.17
+
+21.12 33.00 14.57
+28.93 44.61 20.96
+40.49 62.82 30.52
+21.95 33.94 17.87
+29.34 43.72 25.63
+39.71 58.44 37.05
+21.69 33.58 13.66
+30.29 45.96 19.35
+41.81 62.28 27.11
+19.81 31.40 14.04
+27.27 42.14 20.04
+37.76 57.27 30.78
+
+19.63 31.15 12.99
+26.05 40.84 17.25
+37.07 57.94 26.08
+22.43 35.05 16.16
+30.51 45.62 25.25
+43.12 62.39 38.59
+21.10 33.12 12.35
+29.50 45.29 18.42
+43.33 64.54 28.64
+20.19 32.40 13.94
+28.23 44.22 20.56
+41.13 62.72 31.72
+
+19.42 30.88 12.76
+25.86 40.54 17.80
+36.89 54.16 26.00
+22.26 34.94 16.04
+28.25 42.30 25.05
+36.93 56.18 35.69
+
+D2STGNN
+19.54 30.68 12.91
+25.76 39.74 17.12 35.59 54.24 25.06
+21.46 35.45 16.84
+27.84 43.83 24.59
+37.50 57.40 36.41
+
+STNN
+37.94 59.76 28.17
+38.28 60.37 28.40
+43.02 67.88 32.33
+41.80 62.20 38.21
+41.72 62.10 38.23
+45.94 67.93 43.50
+
+Out of Memory
+
+STAEformer
+19.52 31.62 12.58
+26.58 42.38 17.50
+38.22 60.11 26.42
+22.59 35.99 16.74
+30.51 46.78 25.25
+43.56 65.74 38.83
+
+GLA
+
+CA
+
+24
+
+SD
+
+GBA
+
+GLA
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+Method
+MAE 3 RMSE
+MAPE
+MAE 6 RMSE
+MAPE
+MAE 12 RMSE
+MAPE
+MAE 3 RMSE
+MAPE
+MAE 6 RMSE
+MAPE
+MAE 12 RMSE
+MAPE
+MAE 3 RMSE
+MAPE
+MAE 6 RMSE
+MAPE
+MAE 12 RMSE
+MAPE
+MAE 6 RMSE
+MAPE
+MAE 12 RMSE
+MAPE
+MAE 24 RMSE
+MAPE
+
+Ours
+18.24 29.23 12.02
+24.22 38.64 16.31
+33.06 52.31 22.98
+17.44 28.33 11.46
+24.12 37.13 17.16
+35.00 52.48 26.56
+18.86 30.05 11.99
+26.22 40.56 18.04
+37.19 56.17 28.09
+16.89 27.45 11.87
+23.08 36.07 17.21
+32.27 49.11 26.04
+
+CaST
+21.42 33.16 15.99
+29.31 44.84 21.48
+42.01 62.75 31.50
+20.37 32.32 13.84
+27.81 42.60 19.18
+39.89 59.20 27.65
+22.84 34.85 21.13
+30.69 46.41 27.41
+42.11 62.84 35.91
+21.15 33.42 16.48
+28.08 43.74 21.83
+39.63 60.16 31.94
+
+Table 14. OOD performance on LargeST-2021 dataset
+RPMixer BigST STID STNorm GWNet STGCN STONE
+
+25.11 39.71 15.64
+42.46 65.77 26.12
+
+19.24 30.70 12.27
+26.47 41.67 18.57
+
+18.92 30.10 13.33
+26.50 41.67 18.41
+
+19.29 30.74 12.80
+26.78 42.10 17.96
+
+20.97 32.61 15.29
+29.11 44.43 21.94
+
+19.33 30.60 13.21
+26.33 41.13 17.82
+
+18.61 30.01 12.95
+26.09 40.94 17.58
+
+77.24 114.49 49.02
+
+38.48 59.15 26.74
+
+38.91 60.06 27.21
+
+38.60 59.64 27.48
+
+40.88 62.34 31.56
+
+37.16 57.35 26.67
+
+37.77 56.07 26.02
+
+23.25 37.24 13.74
+38.87 59.14 23.40
+
+18.68 30.49 11.88
+27.59 42.14 17.63
+
+17.64 29.58 10.73
+25.21 39.93 16.38
+
+20.12 31.67 13.67
+31.23 46.19 22.01
+
+19.76 30.91 12.54
+27.70 41.54 18.15
+
+21.12 32.83 12.59
+30.22 44.89 18.99
+
+18.23 29.56 10.72
+25.87 39.06 17.21
+
+70.24 100.88 44.32
+
+41.91 60.59 27.42
+
+37.03 56.12 26.84
+
+45.97 64.95 34.75
+
+39.12 57.59 26.88
+
+43.87 62.31 29.04
+
+36.03 58.97 26.67
+
+24.75 39.70 14.56
+41.37 63.92 25.56
+74.06 110.23 51.89
+
+19.69 31.81 12.68
+27.88 43.35 18.23
+40.33 60.29 29.45
+
+20.31 32.13 12.89
+28.59 43.85 18.60
+41.17 61.56 28.61
+
+20.59 32.59 13.15
+30.16 45.63 20.36
+45.21 65.44 34.08
+
+20.98 32.77 13.95
+29.73 45.22 20.05
+41.30 61.33 27.84
+
+19.98 31.76 12.59
+28.42 43.60 19.14
+43.05 62.86 30.83
+
+22.68 36.75 14.87
+37.95 59.24 25.41
+
+17.93 29.54 12.56
+25.66 40.57 18.40
+
+17.58 28.99 12.02
+25.06 39.82 17.88
+
+18.46 30.00 15.25
+26.82 41.83 23.02
+
+18.47 29.52 12.76
+26.22 40.67 18.39
+
+18.46 29.84 12.60
+26.20 40.85 18.58
+
+68.35 101.84 49.28
+
+37.99 36.71 57.47 56.62 29.39 27.37
+
+39.46 58.96 34.64
+
+37.29 56.56 28.40
+
+39.01 58.40 29.37
+
+D2STGNN
+19.54 30.73 13.81
+26.55 41.07 18.35
+37.26 56.52 26.77
+18.32 31.67 12.06
+25.42 41.14 17.75
+36.09 55.86 26.96
+
+STNN
+38.32 58.72 27.23
+38.64 59.25 27.34
+42.59 65.51 31.06
+39.34 57.83 26.84
+39.18 57.64 26.75
+42.72 62.52 29.43
+
+Out of Memory
+
+STAEformer
+19.69 27.31 12.91
+27.21 42.59 18.10
+38.66 59.78 27.48
+19.63 31.84 12.03
+26.96 41.73 17.39
+39.04 58.17 26.71
+
+Variant
+
+Table 15. Variants and their definitions in ablation experiment.
+Definition
+
+w/o decom w/o prompt w/o (decom & prompt)
+w/o Yt w/o Ys
+
+Remove the decoupling mechanism Remove the temporal prompt learning Remove the decoupling mechanism and temporal prompt learning Remove the temporal prediction component Remove the spatio-temporal prediction component
+
+w/o ConAU w/o LA
+w/o LA + GenPU w/o LA + GenPU +DRO w/o LA + RandomDrop
+
+Completely remove the spatial centralized messaging mechanism Use naive self-attention mechanism to replace Low-rank attention Add GenPU term with the variant w/o LA Add GenPU and spatio-temporal DRO with the variant w/o LA Randomly mask 20% training nodes and then train variant w/o LA
+
+w/o DRO w/o (GenPU) w/o (GenPU&DRO) + RandomDrop
+
+Remove spatio-temporal DRO Remove spatio-temporal DRO and GenPU Remove spatio-temporal DRO and GenPU and randomly mask 20% training nodes to simulate temporal and spatial shifts
+
+CA
+
+25
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+Table 16. Ablation experiments on SD and KnowAir datasets.
+
+Variant
+
+SD
+
+KnowAir
+
+MAE RMSE MAPE MAE RMSE MAPE
+
+Ours
+w/o decom w/o prompt w/o decom & prompt
+w/o Yt w/o Ys
+w/o ConAU w/o LA
+w/o LA + GenPU w/o LA + GenPU + DRO w/o LA + RandomDrop
+w/o DRO w/o (GenPU&DRO) w/o (GenPU&DRO) + RandomDrop
+
+23.79
+24.09 24.67 25.23 23.87 26.25
+26.06 26.14 26.29 26.11 27.41
+24.08 24.52 24.77
+
+37.94
+38.49 39.83 40.46 38.02 41.25
+41.47 41.86 42.15 41.73 43.11
+38.17 38.65 38.90
+
+16.24
+17.53 18.20 19.01 16.86 18.76
+17.56 18.26 18.71 17.58 18.32
+17.06 18.13 18.48
+
+24.78
+25.10 25.27 25.83 25.70 27.04
+26.88 25.62 25.61 25.10 25.77
+24.93 25.26 25.45
+
+36.77
+37.10 36.78 37.25 36.99 39.21
+38.22 37.10 36.86 36.91 37.16
+37.24 36.98 36.87
+
+51.02
+54.16 51.42 54.33 53.10 63.68
+58.23 53.12 55.81 54.73 59.09
+54.86 55.12 55.90
+
+E.11. Hyperparameter Sensitivity Experiments
+In addition to the hyperparameter experiment in Section4.4 of the main body, we additionally deployed conduct experiments on four datasets--SD, GBA, GLA, and CA--to analyze the sensitivity of two hyperparameters, the number of ConAU K and the number of GenPU M . The numebr of nodes for training in these six datasets range from 141 to 6615 nodes. The results on six datasets are shown in Figure 7 and Figure 8.
+ The number of ConAU K. ConAU is the coarsening unit set up to interact with the node. Thus, the number of ConAU K is closely related to the spatial scale. Based on our observations, we find that setting K to approximately 1% of the spatial scale is a good choice. A larger number of ConAU can hinder the model's ability to focus on capturing generalizable contextual features.
+ The number of GenPU M . The hyperparameter M represents the number of GenPU, which are used to modulate the interaction process between nodes and ConAU. Each GenPU corresponds to a different training environment. We have observed that the number of GenPU M is universally effective when set to between 2 and 4. When M is set to a smaller value, an overly complex training environment can disrupt learning stability. Conversely, if there are too few GenPU, the limited training environments may not provide sufficient diversity for the model to extract invariant knowledge. Interestingly, this hyperparameter is insensitive to spatial scale.
+We further analyze the sensitivity of this hyperparameter to the temporal span of the dataset. Long-range SD, GBA, GLA, and CA datasets contain a full year of training data, and TrafficStream is a short-range dataset containing one month data for training. And we can see that M is not highly correlated with the time span of the data.
+Summary. Based on the above analysis, we recommend setting the initial values K to 1% of the number of training nodes and the initial values of M between 2 and 4 for hyperparameter tuning in out-of-distribution (OOD) scenarios.
+E.12. Effectiveness Evaluation of Collaborative Structure
+STOP's predictions arise from the superposition of spatial and temporal components, which helps improve the model's robustness across various OOD scenarios. Using the SD dataset as an example, we employ two separate scenarios: S-OOD and T-OOD. We use Shapley Values to analyze the contribution levels of Yt and Ys components in each scenario. The normalized results are shown in the following table: We observe that when structural shifts occur (S-OOD), the contribution of the temporal prediction component increases, due to the decreased accuracy of spatial correlation features. The opposite occurs in the T-OOD scenario. Through this collaborative architecture, our STOP can flexibly adapt to various OOD scenarios.
+26
+
+0$3(
+
+0$( 506(
+
+0$3(
+
+0$( 506(
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+6'
+
+
+
+
+
+0$( 506( 0$3(
+
+
+
+
+
+ 
+
+
+
+
+
+ 
+
+ 
+
+ 
+        
+
+&$
+
+
+
+
+
+0$( 506( 0$3(
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+      
+
+0$3( 0$( 506(
+
+0$3( 0$( 506(
+
+*%$
+
+
+
+
+
+0$( 506( 0$3(
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+       
+
+3(066WUHDP
+
+
+
+
+
+0$( 506( 0$3(
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+        
+
+Figure 7. Sensitivity experiments of ConAU.
+
+6'
+
+*%$
+
+
+
+
+
+
+
+0$( 506( 0$3(
+
+
+
+0$( 506( 0$3(
+
+
+
+
+
+
+
+
+
+0$3( 0$( 506(
+
+
+
+
+
+
+
+ 
+
+
+
+ 
+
+
+
+&$
+
+
+
+
+
+0$( 506( 0$3(
+
+
+
+
+
+ 
+
+
+
+
+
+ 
+
+ 
+
+ 
+
+
+0$3( 0$( 506(
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+
+
+3(066WUHDP
+
+
+
+
+
+0$( 506( 0$3(
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+
+
+Figure 8. Sensitivity experiments of GenPU.
+
+0$3( 0$( 506(
+
+0$3( 0$( 506(
+
+0$3( 0$( 506(
+
+0$3( 0$( 506(
+
+*/$
+
+
+
+0$( 506( 0$3( 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+
+      
+
+.QRZ$LU
+
+
+
+
+
+0$( 506( 0$3(
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+      
+
+*/$
+
+
+
+
+
+0$( 506( 0$3(
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+.QRZ$LU
+
+
+
+
+
+0$( 506( 0$3(
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+
+
+0$3(
+
+0$( 506(
+
+0$3(
+
+0$( 506(
+
+E.13. Embedding visualization
+Using LargeST-SD dataset as example, we visualize the temporal prompt embedding E in Figure 9 (a), Personalized features Zp, and contextual features Zc in Figure 9 (b). We can see that temporal embeddings unveil essential periodic patterns for OOD scenarios. Both node personalized and context features exhibit strong discriminative capabilities. Context features capture shared node patterns, ensuring resilience to individual node variations. Meanwhile, personalized features enhance the model's ability to tailor predictions for each node effectively.
+
+F. Discussion
+In this section, we discuss the limitations of our work as our future work:
+· Validating the Broad Impact of STOP. The spatial interaction module integrated within the STOP framework is inherently generic, suggesting its potential for broader applicability. In upcoming research, we will propose replacing the graph convolutional networks utilized by other spatio-temporal backbones with the spatial interaction module to validate its effectiveness across various contexts. This initiative will help us better understand the potential value and applicability of the STOP module in a wide range of application domains.
+· Exploring a Wider Range of OOD Scenarios. Current OOD problems are typically defined within the confines of
+27
+
+Robust Spatio-Temporal Centralized Interaction for OOD Learning
+
+Table 17. Contribution of prediction components in different scenarios
+
+SD
+
+KnowAir
+
+Commpent S-OOD T-OOD S-OOD T-ODD
+
+Yt
+
+64.04 41.95 72.62 36.23
+
+Ys
+
+35.96 58.05 27.38 63.77
+
+0RQ )UL
+
+
+
+7XH 6DW
+
+:HG 6XQ
+
+
+
+7KX
+
+
+
+
+
+
+
+      
+D7HPSRUDOSURPSWSRRO
+
+
+
+
+
+
+
+
+
+
+
+3HUVRQDOL]HGIHDWXUH
+
+
+
+&RQWH[WXDOIHDWXUH
+
+%RXQGDU\
+
+
+
+
+
+
+
+
+
+
+
+E3HUVRQDOIHDWXUHDQGFRQWH[WIHDWXUH
+
+Figure 9. Visual case and efficiency study of STOP on LargeST-SD dataset.
+
+$YHUDJH0$(
+
+
+&D67
+
+
+
+
+*:1HW
+
+ 67,'671RUP
+
+ %LJ67
+
+67$(
+
+67*&1
+
+
+6721(
+
+  
+
+6723RXUV
+ 
+
+7U
+
+
+F(IILFLHQF\FR
+
+single-modal data and single tasks. However, spatio-temporal data exhibits diverse modalities and varied tasks. We believe that an improved spatio-temporal OOD handler should be capable of addressing challenges such as cross-task and cross-modal processing, areas that have not been thoroughly explored in the spatio-temporal domain.
+· Integrating Large Language Models for zero-shot learning. In OOD settings, accurately predicting new nodes poses a significant challenge, as these nodes have not been encountered by the model during training--commonly referred to as the zero-shot challenge. Large language models excel in this context, as their representational capabilities, developed from extensive training on massive datasets, can enhance a model's zero-shot learning ability (Liu et al., 2025a;c;b). While this has been successfully demonstrated in the time series community, it remains relatively unexplored within the spatio-temporal domain. In future work, we plan to integrate large language models into the STOP framework to further enhance its scalability for predicting new nodes.
+
+28
+
+

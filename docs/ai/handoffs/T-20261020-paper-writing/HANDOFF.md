@@ -2,6 +2,57 @@
 
 任务说明：[PROMPT_ARS_PAPER_CN.md](../../../../paper/writing_20261020/PROMPT_ARS_PAPER_CN.md)。用 ARS（academic-research-skills 3.23.1）补写方法、摘要、结论 → NeurIPS LaTeX → 模拟评审 → 修改。实验已冻结；不训练、不评估、不访问测试集、不改模型/配置/权重/结果；不 commit/push。
 
+## 补充实验准备：候选方法与服务器提示词 — 2026-11-03
+
+- **用户指令**：2.2 只有 GinAR、2.3 没有比较方法，每类给两个最合适的候选（按训练结果最终选择）；SAHC 与 OS 整体消融；实验在 Ubuntu 服务器上进行，最多同时 3 个，不终止他人进程。
+- **Facts**：四个候选的官方仓库均已打开 README 核对：Merlin `ChengqingYu/Merlin`（本地 `references/Merlin/` 已有）、HD-TTS `marshka/hdtts`、STONE `PoorOtterBob/STONE-KDD-2024`、STOP `PoorOtterBob/STOP`。已有 `no_imputer`（`experiments/alfnet_ablation_adapter.py`）只替换补全器、保留插值与中心化；METR-LA、PEMS-BAY 的插值与中心化本就关闭，PEMS04、PEMS08 需重跑；"整体去除 OS 条件化"此前没有实现。ST-FiT 与 Merlin 的旧适配器已不在 `model/comparison_model/`。
+- **Completed**：`SERVER_EXPERIMENT_PROMPT_CN.md`（下载清单、服务器端 Claude 的完整提示词：恢复上下文、服务器使用规则、四个方法的适配原则与注意事项、两项消融定义、冻结计划、验证选点后一次测试、结果全部保留由作者选择、产出与汇报）。
+- **Not touched**：未训练、未评估；未提交。服务器需要同步 `survey/` 与本文件后才能使用提示词。
+- **Next**：作者下载代码、同步仓库，在服务器启动新任务 `T-20261103-extension-experiments`。
+
+## 第八轮：引言可读性与段落衔接 — 2026-11-03（等待作者审阅）
+
+- **用户指令**：独立判断 Codex 对最新稿的写作审核；重点为引言的论证顺序与衔接，不扩充文献；保留第七轮的事实与分类修正；只改文字。
+- **Completed**：引言按"具体情形 → 已有能力与较少显式刻画之处 → 设置边界与核心问题 → 核心认识与 OS 变量（四类传感器定义移到此处）→ 信息流与模块协同（借鉴来源合为一句）→ 实证概述 → 贡献"重写；2.1 按目标位置的训练与推理观测条件组织，2.2 改为两条设计轴，2.3 写明固定参数与窗口内缺失不是本文特有，各小节末尾的比较方法名单统一移到 4.1；结论按四项消融的实际干预改写。记录见 `notes/V6_CHANGELOG_CN.md` 第八轮。
+- **Verified**：`make_tables.py --check` 一致；46 个引用键均在 bib；六个章节配平；`method.tex` 与表格文件只有换行符差异、无内容变化。
+- **Not touched**：方法章、数值、表图、比较方法；未训练、未评估、未访问测试集；未提交。
+- **Next**：作者审阅；上传 `sections/{abstract,introduction,related_work,experiments,conclusion}.tex` 与 `references.bib`（abstract、experiments 本轮无变化，若第七轮已上传则只需 introduction、related_work、conclusion）。
+
+## 第七轮：按 Codex 审核理顺论证链 — 2026-11-03（等待作者审阅）
+
+- **用户指令**：独立判断 Codex 对引言、相关工作与全文对应关系的审核；文献事实回查原文；保留架构、八个方法与已有结果；不训练、不评估、不访问测试集、不改数值；只做文字。
+- **Facts（本轮回查）**：FRIGATE §4.2 为一小时历史预测一小时、Δ=12，§4.6 推理时丢弃 33.33% 快照且不重训（survey 中"输入长度待核"已更正）；SIML 式 (24) λ_o=λ_u=0.5；GMN、GRU-D、STONE 摘要与正文表述一致；图 3/4/6 代表基线来自 `paper/advisor_experiments_20261012/plan.json` 的旧三组规则（`scripts/advisor_support_20261012.py:19`），排除 ST-FiT/Merlin。
+- **Completed**：Codex 十项意见全部接受（依据见 `notes/V6_CHANGELOG_CN.md` 第七轮）；正文摘要、第 1、2 节、4 节引言、4.1、4.2、4.5、第 5 节按此修改，重新生成 sections；新增 `survey/ARGUMENT_MAP_CN.md`；更新 `survey/RELATED_WORK_OUTLINE_CN.md` 第 0 节、矩阵与标准草案中的 FRIGATE 与 UIGNN 记录；`CHANGES_FOR_ADVISOR_CN.md` 第十节。
+- **Verified**：`make_tables.py --check` 一致；46 个引用键均在 bib；六个章节 LaTeX 配平；残留措辞检索无问题。
+- **Not touched**：方法章、数值、表图、比较方法集合；模型、配置、权重、结果；未训练、未评估、未访问测试集；未提交。
+- **Next**：作者审阅后上传 `sections/{abstract,introduction,related_work,experiments,conclusion}.tex` 与 `references.bib`；与导师讨论 2.2 只有 GinAR、SAHC 无消融两项是否补实验。
+
+## 论文优化阶段 2（调整）+ 阶段 4：引言与相关工作重写 — 2026-11-03（等待作者与导师审阅）
+
+- **用户指令**：取舍事项暂缓；按导师意见写好引言、相关工作与创新点，尽量套用已有结果；对比方法以现有八个为基础，尽量少补充或更换；阶段 3 推迟，直接进行阶段 4。任务说明 `NEXT_PAPER_OPTIMIZATION_BRIEF_CN.md` 第 2 节已按此调整。
+- **Completed**：阶段 2 定稿写入 `survey/RELATED_WORK_OUTLINE_CN.md` 第 0 节（四个小节、论证顺序、每类沿用的对比方法与暂未比较的近邻）；`drafts/manuscript_v6_cn.md` 第 1、2 节重写，4.1 比较方法段改为按四个方向归类（八个方法与全部数值不变）；新增 24 条文献，编号按首次出现重排为 [1]–[46]；同步 `_scripts/md_to_tex.py` 的 CITE 映射与 `references.bib`；重新生成 `sections/*.tex`；记录 `notes/V6_CHANGELOG_CN.md` 第六轮、`notes/CITATION_LOG_CN.md`、`CHANGES_FOR_ADVISOR_CN.md` 第九节。
+- **Verified**：`make_tables.py --check` 两表一致；46 个引用键均在 bib 中、无重复；三个章节 LaTeX 括号与 `$` 配平、无残留编号；`sections/experiments.tex` 只有比较方法一段变化。
+- **Modified but unverified**：未编译 PDF。
+- **Not touched**：方法、实验数值与表图、摘要、结论；模型、配置、权重、结果；未训练、未评估、未访问测试集；未提交。
+- **Next**：作者上传 `sections/introduction.tex`、`sections/related_work.tex`、`sections/experiments.tex`、`references.bib` 覆盖 Overleaf 并编译；与导师讨论核心问题表述与四类划分；实验部分（含未比较近邻的说明）待对比方法与 ALFNet 结构确定后进行。
+
+## 论文优化阶段 1 修订 + 相关工作提纲 + 阶段 2 标准草案 — 2026-11-03（等待作者确认）
+
+- **Input**：Codex 核验 `survey/CODEX_LITERATURE_AUDIT_20261103_CN.md` 与修订要求 `survey/PROMPT_FOR_CLAUDE_SURVEY_REVISION_20261103_CN.md`（作者转来，要求自行判断）。逐条回到原始来源核对：7 处实质问题、补漏条目、DOI 与代码链接全部成立；FRIGATE "12→12" 只核到预测 12 步，输入长度待核。
+- **Completed**：`survey/LITERATURE_MATRIX_CN.md` 改写为 v2（v1 未入 git，已覆盖；v1 检索式与差异保留在 v2 第 0、1.2 节）；新增 `survey/LITERATURE_METADATA_APPENDIX_CN.md`（88 篇唯一论文、89 个版本的完整元数据与核实路径，旧 28 项映射）、`survey/RELATED_WORK_OUTLINE_CN.md`（四类提纲）、`survey/BASELINE_CRITERIA_CN.md`（三种资格、S1–S12、信息账本、逐候选判断、需取舍事项）；原始记录 `survey/verification_20261103/`。
+- **Facts**：HD-TTS 官方数据代码切窗前整序列 `ffill().bfill()`（静态阅读）；SIML 式 (24) λ_o=λ_u=0.5 监督未观测节点；SCPT §3.6 在 A∪D∪G（含测试道路训练时段）上做 DCT；ST-FiT/Merlin 2026-10-01 评估 `verification.json` passed，权重 2026-10-17 已删除；`paper/`、`artifacts/` 下未找到最终模型逐样本预测。
+- **Not touched**：正文、LaTeX、实验表、模型、配置、权重、结果；Codex 两份文件；作者未跟踪的 `paper/comparison_ten_baselines_20261102/`；未训练、未评估、未访问测试集；未提交。
+- **Next**：作者确认分层近邻、四类提纲、标准草案，并决定 `BASELINE_CRITERIA_CN.md` 第 5 节五项取舍；之后进入阶段 3（实验缺口与工作量）或先做 ST-FiT/Merlin 只读有效性审计。
+
+## 论文优化阶段 1：类似工作调研 — 2026-11-02（等待作者确认后进入阶段 2）
+
+- **Checked state**：`paper/final`，HEAD `10cb396`，开工时工作区干净。
+- **Completed**：`paper/latex_neurips_20261020/survey/LITERATURE_MATRIX_CN.md`（75 篇：核心 18 张卡片 + 扩展 57 条；检索式、数据库、日期、纳入标准、逐篇核实路径、未列入线索、实验类型对照、已有结果状态、ST-FiT/Merlin 事实记录、初步挑选标准 S1–S9、实验缺口 G1–G13）。原始核实记录在 `survey/verification_20261102/`。
+- **Facts**：元数据经 Semantic Scholar + Crossref（或 DBLP 键、arXiv 注释、会议页面）两路核对；DBLP 网页被人机验证拦截，arXiv 官方 API 当日 429。ST-FiT、Merlin 的测试格在 `paper/all_final_test_20261001/validation_selected_test_cells.csv`；`docs/ai/` 下未找到"结果无效"的技术说明。
+- **Not touched**：正文、sections/*.tex、模型、配置、权重、结果；未训练、未评估、未访问测试集；未提交。
+- **Commands**：WebSearch、WebFetch；Semantic Scholar、Crossref、OpenAlex 公开 API（scratchpad 脚本）；只读 grep/sed/Python 读取仓库文件。
+- **Next**：作者确认最接近工作、挑选标准初稿与实验缺口清单，并决定 ST-FiT/Merlin 的处理，再进入阶段 2（`survey/BASELINE_CRITERIA_CN.md`）。
+
 ## 图 1 重绘支持与下一阶段交接 — 2026-10-29 至 11-02
 
 - **Completed**：方法章定稿（作者确认）。图 1 设计方案 `paper/latex_neurips_20261020/imgs/figure_design/FIG1_DESIGN_CN.md` 与 Codex 提示词 `CODEX_PROMPT.md`；经作者授权操作 Codex 桌面应用生成版式草稿与素材（`figure_design/codex_out/`，Codex 只写入该目录）；复核 Codex 结果 `CODEX_OUT_REVIEW_CN.md`；复核作者 PPT 重绘的 `figures/alfnet.png`（2026-10-31 版），连线、符号、样式问题共 19 项，见 `ALFNET_PNG_REVIEW_CN.md` 与 `alfnet_review_annotated.png`。

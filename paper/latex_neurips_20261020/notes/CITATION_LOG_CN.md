@@ -19,3 +19,7 @@ v5 原有 [1]–[18] 沿用 v5 与相关工作证据中的信息，本轮未重�
 ## 阶段 3 补充核对（2026-10-20）
 
 生成 `references.bib` 时对 v5 原有条目逐条联网核对了完整作者、出处、卷期页码与 DOI（来源：arXiv 摘要页、AAAI OJS、TRID、PMC、TMLR BibTeX 导出、ICLR 官网、Springer 检索结果）。STBP 经 ICLR 2026 官方页面确认；SC-SAMG 经 PMC 确认作者与 DOI 10.3390/s26154995。审计结果见 [CITATION_AUDIT_CN.md](CITATION_AUDIT_CN.md)。
+
+## 论文优化阶段新增文献（2026-11-03）
+
+第六轮重写引言与相关工作时新增 24 条，全部来自 `survey/LITERATURE_METADATA_APPENDIX_CN.md` 中已核实的条目：有 DOI 的经 Crossref（STSM 为 DataCite）解析，核对题名、作者、出处、卷期页；HD-TTS、STOP 经 PMLR 官方页面；EAC、TESTAM 经 arXiv 注释与 Semantic Scholar（ICLR 无正式 DOI）。逐条核实路径与访问日期见该附表。正文对各文献内容的概括，依据为 `survey/LITERATURE_MATRIX_CN.md` 对应卡片中注明的原文段落或摘要；其中 MAS-Mamba、GinAR+、GMN、TESTAM、Flex-MoE、STONE、EAC 只读到摘要级，正文只写摘要能支持的内容。

@@ -28,15 +28,10 @@ for flag in ("--draft", "--out"):
             OUT = value
 
 CITE = {
-    1: "cini2022filling", 2: "liu2023pristi", 3: "zuo2023graph", 4: "yu2024ginar",
-    5: "wu2021inductive", 6: "mei2023uncertainty", 7: "zhou2025mogernn", 8: "liu2025spatiotemporal",
-    9: "zhao2026structure", 10: "yu2018spatio", 11: "wu2019graph", 12: "bai2020adaptive",
-    13: "jiang2023pdformer", 14: "fang2025efficient", 15: "shao2022spatial", 16: "perez2018film",
-    17: "liu2026general", 18: "li2018diffusion", 19: "cho2014learning", 20: "zhang2023crossformer",
-    21: "shazeer2017outrageously", 22: "wang2023graph", 23: "guo2019attention", 24: "wang2026cold",
+    1: "yin2025xxltraffic", 2: "zhou2025mogernn", 3: "roth2022forecasting", 4: "mei2023uncertainty", 5: "gupta2023frigate", 6: "lei2025stfit", 7: "yu2024ginar", 8: "yu2025merlin", 9: "marisca2024graph", 10: "che2018recurrent", 11: "chen2021trafficstream", 12: "wang2023pattern", 13: "liu2026general", 14: "wang2026cold", 15: "zhao2026structure", 16: "wang2024stone", 17: "ma2025robust", 18: "cini2022filling", 19: "fang2025efficient", 20: "zhang2023crossformer", 21: "perez2018film", 22: "wang2023graph", 23: "li2018diffusion", 24: "wu2021inductive", 25: "zheng2023increase", 26: "xu2025kits", 27: "su2024spatial", 28: "su2026generalising", 29: "prabowo2024traffic", 30: "liu2025spatiotemporal", 31: "liu2023pristi", 32: "cui2020graph", 33: "wang2023traffic", 34: "zuo2023graph", 35: "huang2026masmamba", 36: "yu2025ginarplus", 37: "chen2025expand", 38: "yu2018spatio", 39: "wu2019graph", 40: "bai2020adaptive", 41: "cini2023taming", 42: "shao2022spatial", 43: "jiang2023pdformer", 44: "lee2024testam", 45: "yun2024flexmoe", 46: "guo2019attention",
 }
 FIG = {
-    1: ("fig:arch", "figures/alfnet.png", r"\textwidth"),
+    1: ("fig:arch", "figures/ALFNet.pdf", r"\textwidth"),
     2: ("fig:condition", "figures/fig2_condition_stage_test.pdf", r"\textwidth"),
     3: ("fig:trajectory", "figures/fig3_trajectory_val.pdf", r"\textwidth"),
     4: ("fig:layout", "figures/fig4_layout_val.pdf", r"\textwidth"),

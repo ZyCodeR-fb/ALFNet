@@ -4,49 +4,63 @@
 
 ## 摘要
 
-实际路网中，各位置的观测情况各不相同，而且在不断变化：持续可用传感器（AAS）在训练与推理期间稳定提供读数；新增传感器（NAS）在训练期没有记录，接入后才开始积累读数；失效传感器（FS）原本正常工作，后因设备故障或通信异常中断读数；虚拟传感器（VS）则是没有可读观测、只需要预测的位置。因此，预测窗口内可用观测的位置、数量与时间分布，即观测支持（OS），会随节点在这四类状态之间的转换而变化。本文研究路网拓扑已知、部分节点不参与训练时动态 OS 下的归纳时空预测，并提出 ALFNet。ALFNet 以逐步的观测角色（AAS、NAS、VS 或 FS）、状态进度与观测掩码描述 OS，并把它作为组织预测计算的条件：观测支持感知历史补全（SAHC）为全部节点补全一份共享历史；空间上下文时间条件分支（ALFTemporal）从按空间分区组织的跨节点历史中生成条件特征，经特征级线性调制（FiLM）作用于图编码状态；观测条件化图预测（ALFGraph）依据逐步的观测角色、状态进度与掩码组合五种图传播算子，以残差自回归方式解码，并在输出端施加由末步观测角色控制幅度的有界图修正。按目标节点在窗口内的观测角色轨迹，我们定义四类评价场景：零历史（Unseen）场景中目标节点全程为 VS，稳定观测（Steady）场景中全程为 AAS，新增接入（Join）场景中由 VS 转为 NAS，故障中断（Fault）场景中由 AAS 转为 FS。记 $m$ 为接入或失效之后已经持续的步数：Join 中 $m$ 越大，窗口内的新读数越多，按 $m=1$、$2\le m\le 11$ 与 $m=12$ 分为冷启动（Cold）、预热（Warm）与就绪（Ready）三个阶段；Fault 中 $m$ 越大，缺失的近期读数越多，按相同区间分为中断初期（Onset）、证据衰减（Decay）与完全中断（Outage）三个阶段，以检验模型能否随本地证据的增减调整预测。在 METR-LA、PEMS-BAY、PEMS04 和 PEMS08 四个真实世界数据集上的统一评价表明，ALFNet 跨场景平均误差（LifeAvg）的三项误差指标均优于八个代表性比较方法，平均绝对误差（MAE）降低7.86%–15.63%；Join 与 Fault 场景的三项指标在四个数据集上均为最优。组件消融表明跨节点时间上下文的贡献最大，OS 条件化传播与状态进度带来较小但方向基本一致的改进。
+实际路网中，各位置的观测情况各不相同，而且在不断变化：持续可用传感器（AAS）在训练与推理期间稳定提供读数；新增传感器（NAS）在训练期没有记录，接入后才开始积累读数；失效传感器（FS）原本正常工作，后因设备故障或通信异常中断读数；虚拟传感器（VS）则是没有可读观测、只需要预测的位置。因此，预测窗口内可用观测的位置、数量与时间分布，即观测支持（OS），会随节点在这四类状态之间的转换而变化。本文研究路网拓扑已知、部分节点不参与训练时动态 OS 下的归纳时空预测，并提出 ALFNet。ALFNet 以逐步的观测角色（AAS、NAS、VS 或 FS）、状态进度与观测掩码描述 OS，并把它作为组织预测计算的条件：观测支持感知历史补全（SAHC）为全部节点补全一份共享历史；空间上下文时间条件分支（ALFTemporal）从按空间分区组织的跨节点历史中生成条件特征，经特征级线性调制（FiLM）作用于图编码状态；观测条件化图预测（ALFGraph）在编码时依据逐步的观测角色、状态进度与掩码组合五种图传播算子，以残差自回归方式解码，并在输出端施加由末步观测角色控制幅度的有界图修正。按目标节点在窗口内的观测角色轨迹，我们定义四类评价场景：零历史（Unseen）场景中目标节点全程为 VS，稳定观测（Steady）场景中全程为 AAS，新增接入（Join）场景中由 VS 转为 NAS，故障中断（Fault）场景中由 AAS 转为 FS。记 $m$ 为接入或失效之后已经持续的步数：Join 中 $m$ 越大，窗口内的新读数越多，按 $m=1$、$2\le m\le 11$ 与 $m=12$ 分为冷启动（Cold）、预热（Warm）与就绪（Ready）三个阶段；Fault 中 $m$ 越大，缺失的近期读数越多，按相同区间分为中断初期（Onset）、证据衰减（Decay）与完全中断（Outage）三个阶段，以检验模型能否随本地证据的增减调整预测。在 METR-LA、PEMS-BAY、PEMS04 和 PEMS08 四个真实世界数据集上的统一评价表明，ALFNet 跨场景平均误差（LifeAvg）的三项误差指标均优于八个代表性比较方法，平均绝对误差（MAE）降低7.86%–15.63%；Join 与 Fault 场景的三项指标在四个数据集上均优于这些比较方法。组件消融表明跨节点时间上下文的贡献最大，OS 条件化传播与状态进度带来较小但方向基本一致的改进。
 
 ## 1 引言
 
-交通预测为路网运行管理、出行规划与拥堵预警提供前瞻性信息。然而，预测系统能够获得的历史观测并不总是连续且完整。随着传感网络的建设与维护，路网中的传感器处于不同的观测状态 [7]：持续可用传感器（AAS）在训练与推理期间稳定提供读数；新增传感器（NAS）在训练期没有记录，接入后才开始积累读数；失效传感器（FS）原本正常工作，后因设备故障或通信异常中断读数；虚拟传感器（VS）则是没有可读观测、只需要预测的位置。已有关于未观测位置预测和动态传感器网络的研究已认识到这些问题 [6,7,9]。同一位置在不同预测窗口中可以处于不同状态，所提供的信息条件并不相同。本文将历史窗口内实际可用观测的位置、数量及其时间分布统称为观测支持（OS）。OS 的变化不仅产生需要处理的空缺，也决定模型能从本地历史与关联位置获得怎样的预测依据。
+交通预测为路网运行管理、出行规划与拥堵预警提供前瞻性信息，而预测所依赖的传感网络在不断变化：路网扩建会带来新装的检测器，设备故障与通信异常会使原有检测器中断，受预算限制，许多需要预测的位置也从未安装传感器 [1,2]。这些变化直接体现在模型读到的历史中。一个刚接入的检测器，在历史窗口里只有最近几步读数；一个刚失效的检测器保留了较早的读数，却失去了最近的读数；还有一些位置在窗口内始终没有读数。同一位置在不同窗口之间，甚至在同一个窗口之内，可用的信息都可能不同。本文将历史窗口内实际可用观测的位置、数量及其时间分布统称为观测支持（OS）。
 
-围绕不完整交通观测，已有研究形成了互补的解决途径。缺失感知方法通过图循环重建、条件扩散或联合重建与预测，利用时空关联补充不可用信息 [1–4]；归纳与部分感知预测将预测范围扩展至缺少训练信号或推理期持续观测的位置 [6–9]；自适应图学习及空间分块表示则改善空间关系和多尺度上下文的组织 [10–14]。这些研究已经证明，缺失处理、空间信息传递与未观测位置预测能够协同工作。因而，进一步的关键并非判断模型是否能够接受缺失输入，而是明确：当 OS 在预测窗口内变化时，模型应如何相应调整信息利用方式。
+已有研究从多个角度处理过这类情形。归纳预测把模型推广到训练期没有动态信号的位置，能够预测无传感器位置的未来状态，或在只有少数节点提供训练数据时泛化到其余节点 [2–6]；不完整观测下的预测处理输入中的缺失，其中一些方法让计算依赖掩码、距上次观测的时间间隔等缺失信息 [7–10]；面对传感网络的演化，持续学习、少步适应与分布外泛化方法分别通过增量训练、少量目标观测或不更新参数的方式处理新增节点 [11–17]。因此，未观测位置、读数缺失与传感器配置变化本身都不是新问题。较少被显式刻画的，是这些变化作为事件的过程：已有方法多以掩码或节点所属的配置描述观测是否可用，部分方法还记录距上次观测的时间；而一个位置是刚接入还是刚失效、事件已经持续了多久，较少作为显式变量参与空间信息交换的组织，评价时也较少按事件持续的步数区分预测表现。
 
-这一问题在归纳预测中尤其突出。目标节点没有参与动态信号训练，并不意味着它在推理时始终没有观测；同样，训练期已有记录也不保证推理时始终拥有完整历史。现有方法分别强调训练信号覆盖、缺失恢复、传感器配置适应或空间交互，但这些能力并不直接回答“同一目标对应不同 OS 时，预测计算应如何变化”。即使可用观测数相同，近期集中、早期集中和分散分布的历史也可能对未来状态提供不同依据。本文因此研究**动态 OS 下的归纳时空预测**：在路网拓扑已知、部分节点动态信号不参与训练的条件下，利用变化的 OS 组织空间推理与预测上下文。该设置连接节点归纳与窗口内 OS 的变化，强调固定模型参数下的预测行为。
+本文因此研究动态 OS 下的归纳时空预测：路网拓扑已知，部分节点的动态信号不参与训练，推理时模型参数固定，而各位置的 OS 可以在历史窗口内变化。按目标位置在窗口内的观测轨迹，我们考察四类场景：训练中没有动态信号的保留节点全程没有读数（零历史，Unseen），或在窗口内接入并开始提供读数（新增接入，Join）；参与训练的已知节点全程可读（稳定观测，Steady），或在窗口内中断（故障中断，Fault）。本文假设各位置的接入与失效状态已知，实际中可由接入记录与故障检测获得；模型只依据历史窗口内的 OS 进行预测，不预测未来观测状态的变化。在此设置下，本文的核心问题是：**当目标位置的 OS 在历史窗口内变化、而模型参数固定时，预测计算应如何依据 OS 调整对本地历史与空间上下文的利用。**
 
-我们的核心认识是，**OS 应同时作为输入有效性的描述和预测计算的条件**。观测掩码标明哪些读数可用；在此基础上，观测角色与状态进度可以为模型组织历史信息提供显式的结构化线索。观测角色记录每个节点在每一步属于 AAS、NAS、VS 还是 FS；状态进度（state progress）描述接入或中断已持续的比例。它们提供一种可检验的归纳偏置，而不要求包含完整掩码之外的额外信息。沿这一思路，历史补全负责提供可用表示，空间传播决定如何交换关联信息，跨节点时间上下文则为预测过程提供条件。三者的协作，使模型能够在本地证据与空间证据之间建立依赖当前 OS 的信息利用方式。
+我们的核心认识是，**OS 不仅描述哪些输入有效，也应作为组织预测计算的条件**。为此，我们用三类逐步变量描述 OS。观测掩码标明读数是否可用。观测角色沿用已有研究对传感器的划分 [2]：持续可用传感器（AAS）在训练与推理期间稳定提供读数，新增传感器（NAS）在训练期没有记录、接入后才开始积累读数，失效传感器（FS）原本正常工作、后来中断读数，虚拟传感器（VS）没有可读观测、只需要预测；窗口内全无读数时，掩码不能区分从未接入与已经失效，观测角色可以。状态进度（state progress）描述接入或失效已经持续的比例，同时刻画接入后证据的积累与失效后证据的流失，而距上次观测的时间间隔只刻画后者。这些变量需要在计算的几个环节发挥作用：补全缺失读数之后，后续计算仍应知道哪些值来自观测；本地读数很少或已经中断时，预测需要借助关联位置的历史；空间信息的交换方式也应能随观测状态改变。
 
-据此，我们提出 ALFNet（Adaptive Lifecycle Forecasting Network），其中“自适应”指计算随输入的 OS 而变化，推理时模型参数保持固定。ALFNet 由三个模块组成，分别对应 OS 变化带来的三个问题。第一，不同节点、不同时刻的缺失程度各不相同，若各分支分别处理缺失，同一窗口会得到不一致的输入。观测支持感知历史补全（SAHC）因此借鉴图循环插补的思想 [1]，依据可见读数、观测角色、状态进度与路网关联，对全部节点只补全一次历史，供另外两个模块共享。第二，当目标节点的本地历史很少或已经中断时，预测需要来自关联位置的依据。空间上下文时间条件分支（ALFTemporal）借鉴空间分区交互 [14] 与两阶段注意力 [20] 的思想，把节点组织为空间分区，在分区之间与分区内部交换时间特征，生成逐节点的条件特征，并经特征级线性调制（FiLM）[16] 作用于图编码状态；它本身不产生预测。第三，补全之后，真实读数与补全值在数值上难以区分，同一种图传播方式也难以同时适合持续可用、刚接入与刚失效的节点。观测条件化图预测（ALFGraph）因此借鉴图专家混合 [7] 与扩散卷积循环网络 [18] 的思想，由每一步的观测角色、状态进度与掩码决定五种图传播算子的组合，在编码与解码中逐步调整空间信息的交换方式，并以残差自回归方式生成预测；输出端再由末步观测角色控制一个有界的图修正。三个模块组合后，SAHC 提供一致的输入，ALFTemporal 提供跨节点的预测依据，ALFGraph 决定这些信息在每个节点、每一步如何参与传播，使同一组固定参数能够随 OS 调整对本地历史与空间上下文的利用。
+据此，我们提出 ALFNet（Adaptive Lifecycle Forecasting Network），其中"自适应"指计算随输入的 OS 而变化，推理时模型参数保持固定。观测支持感知历史补全（SAHC）依据可见读数、OS 与路网关联，为全部节点补全一份共享历史，OS 随这份历史一起交给后续两个分支。空间上下文时间条件分支（ALFTemporal）把节点组织为空间分区，从跨节点的共享历史与 OS 中生成逐节点的条件特征，经特征级线性调制（FiLM）作用于图预测分支的编码状态，为本地历史不足的节点提供来自关联位置的依据。观测条件化图预测（ALFGraph）在编码时由每一步的 OS 决定多种图传播算子的组合，使空间信息的交换随观测状态改变，接受调制后再解码生成预测，解码沿用历史窗口末步的 OS。三个模块分别借鉴了图循环插补 [18]、空间分区交互 [19]、两阶段注意力 [20]、特征级线性调制 [21]、图专家混合 [2,22] 与扩散卷积循环网络 [23] 的思想。与最接近的 MoGERNN 相比，ALFNet 同样使用图专家混合，区别在于路由的依据与作用位置：MoGERNN 依据节点输入特征稀疏地选择专家，并在进入编码—解码器之前为未观测节点构造表示；ALFNet 的路由只由 OS 决定、不读取信号值，并作用于编码器每一步的门控图传播。
 
-本文的贡献概括为三点：（1）围绕拓扑已知、训练信号覆盖不完整的路网，将窗口内变化的 OS 纳入归纳预测设置，按目标节点的观测角色轨迹定义零历史（Unseen）、稳定观测（Steady）、新增接入（Join）与故障中断（Fault）四类场景，并按事件持续步数细分 Join 与 Fault 的阶段，以刻画不同 OS 下的预测要求；（2）提出 ALFNet，将 SAHC、ALFTemporal 与 ALFGraph 组织为以 OS 为条件的协同预测框架；（3）在 METR-LA、PEMS-BAY、PEMS04 与 PEMS08 四个数据集上开展统一的场景与阶段评价，并结合组件消融、配对观测干预和样本层面分析，考察总体收益、机制归因及 OS 对预测行为的影响。
+我们在 METR-LA、PEMS-BAY、PEMS04 与 PEMS08 四个数据集上，与归纳预测、缺失感知预测与时空表示三类共八个方法统一比较。ALFNet 跨场景平均误差（LifeAvg）的三项误差指标均优于所列方法，平均绝对误差（MAE）降低7.86%–15.63%；在本地证据逐步积累或中断的 Join 与 Fault 场景下，四个数据集的三项指标均为所列方法中最优；在全程没有本地历史的 Unseen 场景下，优势依赖数据集，两个流量数据集的 MAE 与 RMSE 尚未取得最优。组件消融中，去除跨节点上下文或整个时间条件分支时误差上升最多；以全局权重替代 OS 路由、以掩码替代状态进度，也使多数数据集与指标上的误差上升。固定预测目标的观测干预显示，模型的预测随本地历史的加入与中断而变化，相同数量的可见读数集中在近期时误差更低。
 
-结果表明，在统一的数据暴露与评价协议下，ALFNet 在四个真实世界数据集上跨场景平均误差（LifeAvg）的三项误差指标均优于八个代表性比较方法，平均绝对误差（MAE）降低7.86%–15.63%；在本地证据逐步积累或中断的 Join 与 Fault 场景下，改进在四个数据集的三项指标上一致。
+本文的贡献概括为三点：（1）在已有传感器类型划分的基础上，提出动态 OS 下归纳预测的评价协议：按目标位置的观测角色轨迹划分场景，并按接入或失效后的持续步数划分阶段，用以检验预测能否随本地证据的积累与流失而调整；（2）提出 ALFNet，使 OS 同时进入共享补全、跨节点时间条件与图传播路由，三者共用同一份补全历史，并由时间条件分支调制图预测的编码状态；（3）四个数据集上的统一比较表明，ALFNet 的跨场景平均误差优于所列八个方法，优势在 Join 与 Fault 场景上最稳定；组件消融与观测干预进一步表明，跨节点上下文的贡献最大，预测会随 OS 的变化作出相应调整。
 
 ## 2 相关工作
 
-### 2.1 不完整观测下的重建与预测
+本节前三小节对应引言提到的三类已有研究：未观测位置的归纳预测与部分感知（2.1）、不完整观测下的时空预测（2.2）、传感网络演化下的泛化与适应（2.3）；2.4节讨论贯穿三者的时空表示与条件化计算机制。各方向之间有交叉，部分方法同时涉及多个方向。
 
-不完整观测建模包含历史恢复与未来预测两个相关但不同的目标。GRIN 通过图循环计算和消息传递重建多变量序列，PriSTI 则利用条件扩散和时空关联建模缺失数据 [1,2]。二者说明，关联位置能够为局部缺失提供信息来源；但重建历史的目标与预测未来并不相同，插补质量也不能直接代替预测性能评价。
+### 2.1 未观测位置的归纳预测与部分感知
 
-面向未来预测，GCN-M 联合建模缺失处理与交通预测，通过观测掩码、多尺度历史记忆和图卷积利用局部与全局信息 [3]。GinAR 针对部分变量历史不可用的情况，将插值注意力和自适应图卷积引入递归预测 [4]。UIGNN 同时面向缺失位置预测与不确定性估计，与未观测位置泛化形成交叉 [6]。这些工作已经建立了缺失处理和空间推理的联系，并以掩码区分可见与缺失读数。本文在此基础上关注 OS 的时间结构：可见读数数量相同但位于窗口内不同位置时，预测所依据的信息并不相同；重建之外，观测角色与状态进度如何参与传播组合，跨节点上下文如何进一步条件化未来预测。相应地，实验分别干预状态进度、OS 条件化传播与跨节点上下文，以区分各机制的贡献，并在固定可见数量下比较不同时间布局。
+这一方向的工作可以按目标位置在训练与推理时的观测条件来区分。同一时段的估计是它的任务边界：时空克里金利用已观测位置估计同一时段未观测位置的值，IGNNK、INCREASE 与 KITS 分别通过随机子图训练、异质空间关系建模和向训练图加入虚拟节点，使模型无需重新训练即可用于新位置 [24–26]，但它们不预测未来。
 
-### 2.2 归纳与部分感知预测
+面向未来，最直接的情形是目标位置在训练与推理时都没有读数。FUNS 只在已观测位置上优化模型，预测完全没有传感器的位置 [3]；UIGNN 进一步给出预测的不确定性 [4]；FRIGATE 在只有部分路段装有传感器的路网上以一小时历史预测一小时，并在冻结参数下检验了路网拓扑变化与历史快照缺失的影响 [5]；STSM 与 GenCast 把对象扩展到连续的无观测区域，分别借助道路与兴趣点等静态特征以及物理约束与天气信息 [27,28]。MoGERNN 以图专家混合为未观测节点构造表示，并在同一模型中考察了测试期新增与失效的传感器 [2]。另一种情形是目标位置在训练期没有信号、推理时有历史：ST-FiT 通过时间数据增强与图拓扑学习，泛化到只有输入历史而没有训练数据的节点 [6]；SCPT 在推理时利用新道路两天的数据生成其空间表示 [29]。还有工作允许训练期获得目标位置的临时观测：SLPF 利用未感知位置的临时观测学习向推理期的空间转移，用于长期部分感知预测 [30]。
 
-归纳建模研究如何将已观测位置上学习的规律用于缺少训练信号的位置。IGNNK 通过子图采样学习可迁移的消息传递，解决未采样位置的时空插值 [5]；UIGNN 和 MoGERNN 则进一步预测未来交通状态 [6,7]。其中，MoGERNN 采用图专家混合与图循环编码—解码结构，并考察传感器加入和失效情形，说明变化的传感器配置已是归纳交通预测的重要研究对象。MoGERNN 依据节点输入特征稀疏地选择图专家，并在进入编码—解码器之前为未观测节点构造表示；ALFGraph 则把传播算子的组合放进图循环单元的每个门，由逐步的观测角色、状态进度与掩码稠密路由，不读取信号值。
+在这些工作中，哪些位置有观测通常按评价配置确定，训练时多在已知节点上遮蔽部分节点以模拟未观测；已观测位置的读数可以缺失，但接入与失效作为事件及其持续程度较少被显式表示。ALFNet 同样在已知节点上模拟不同的观测情形，区别在于用观测角色与状态进度表示接入与失效事件，并让同一组参数既处理全程没有读数的保留节点，也处理在窗口内开始积累读数的保留节点。
 
-不同方法对训练和推理阶段的观测条件有不同假设。SLPF 研究长期部分感知预测，利用训练期较充分的数据学习向推理期未感知位置的空间转移 [8]。SIML-MSIGN 将不同观测布局组织为任务，通过掩码门控扩散与结构归纳元学习开展跨布局预测及适应 [9]。SC-SAMG 利用少量目标位置数据生成节点与图表示，并进行少步参数适应 [24]；其中的“支持”指用于适应的目标样本，与本文窗口内的 OS 含义不同。因此，本文并不将“变化观测下的预测”视为未经研究的领域。ALFNet 的侧重点是固定参数下的窗口级 OS 条件化：在统一输入预算内，研究可用历史的状态和布局如何影响空间—时间计算。总体评价考察这一设计在归纳设置中的效果，已知节点配对实验则用于分离 OS 变化本身带来的预测响应。
+### 2.2 不完整观测下的时空预测
 
-### 2.3 空间依赖与时空表示学习
+这一方向的方法可以沿两条相互交叉的设计轴理解。第一条是插补与预测如何组织。GRIN 与 PriSTI 等插补方法可以先重建缺失序列，再交给预测器 [18,31]，但插补误差会传入预测，重建历史的目标也与预测未来不同。联合建模试图缓解这一问题：GMN 把相邻时刻全网状态的转移视为图马尔可夫过程，逐步推断缺失状态并预测 [32]；GSTAE 把插补与预测作为并行任务顺序训练 [33]；GinAR 则以插值注意力与自适应图卷积，端到端地处理部分变量整段历史缺失下的预测 [7]。
 
-空间依赖建模为交通预测提供了利用关联位置的基本途径。STGCN 结合图卷积与时间卷积；Graph WaveNet 和 AGCRN 利用可学习表示构建自适应关系，降低对固定邻接的依赖 [10,11,12]。PDFormer 将传播时延纳入长程空间交互，PatchSTG 通过空间分块及块内、块间交互组织局部与全局信息 [13,14]。这些方法分别改善空间关系、交互范围和计算粒度，但学习到自适应图，并不自动意味着传播会根据每个窗口的 OS 进行调整。空间交互还需与时间表示能力共同考察。STID 通过简洁的时空身份表示建立有竞争力的预测基线 [15]；STBP 利用可扩展上下文模式库支持城市持续预测 [17]。本文关注的不是无限扩大空间交互范围或在线更新模式库，而是如何将可用的跨节点历史用于当前预测条件化。ALFTemporal 生成的上下文经 FiLM [16] 调制图循环预测，ALFGraph 则承担以 OS 为条件的空间传播。实验中的同容量局部上下文替代直接检验跨节点信息的作用，避免将模型收益仅归结为更大的表示规模。
+第二条是缺失信息如何参与计算。GCN-M 把观测掩码与多尺度历史记忆、动态图卷积结合 [34]；GRU-D 把掩码与距上次观测的时间间隔引入循环更新 [10]，MAS-Mamba 以二者调节状态空间模型的更新，使中断期间的状态得以保持或衰减 [35]；HD-TTS 对输入进行分层时空下采样，并以观测与缺失模式为条件组合多尺度表示 [9]。GinAR+ 与 Merlin 则从训练方式入手，分别以不同缺失率的数据构造对比样本、以完整观测教师进行知识蒸馏与多视图对比学习，使一个模型适应变化的缺失率 [8,36]。2.1节的 UIGNN 也以缺失数据的视角处理没有历史记录的位置。
+
+这些研究说明，缺失信息本身可以作为调整计算的依据。它们大多在直推设置下进行，缺失的节点在训练期仍提供标签；ALFNet 的保留节点从未提供训练信号，补全不能依赖目标节点自身的训练统计。在组织方式上，ALFNet 对全部节点只补全一次，结果由两个分支共享，且只通过预测损失训练；在信息使用上，ALFNet 除掩码外还使用观测角色与状态进度，区分"从未可读"与"曾经可读、随后失效"，并对接入与失效两个方向描述事件已持续的比例。
+
+### 2.3 传感网络演化下的泛化与适应
+
+真实的传感网络随时间扩张与演化，XXLTraffic 整理了跨度最长 23 年、节点逐年增加的交通数据 [1]。按是否更新参数、是否使用目标数据，已有工作可分为三种设置。持续学习在网络扩张后利用新数据增量更新模型并缓解遗忘，如 TrafficStream、PECPM、EAC 以及带可扩展上下文模式库的 STBP [11–13,37]。少步适应使用少量目标观测，如利用新传感器一至七天支持数据的 SC-SAMG [14]；SIML-MSIGN 则把不同观测布局组织为任务，训练时同时监督观测与未观测节点，并报告了零步与少步适应的结果 [15]。固定参数的泛化不更新参数，如在测试期加入新节点的 STONE 与 STOP，分别借助对结构偏移不敏感的空间嵌入和以上下文单元为中介的集中式消息机制 [16,17]；2.1节的 MoGERNN 与 FRIGATE 也在不重新训练的条件下考察了传感器或路网的变化。
+
+ALFNet 属于固定参数的设置，推理时不使用目标节点的标签，也不更新参数；这一设置与窗口内的读数缺失都不是 ALFNet 特有的。差异在于变化的刻画方式：ALFNet 面对的是单个历史窗口内的接入与中断，用观测角色与状态进度显式表示事件及其进度，并让它们决定图传播的组合，评价时再按事件持续的步数分阶段考察。持续学习与少步适应可与之互补。
+
+### 2.4 时空表示与条件化计算
+
+空间依赖建模是交通预测利用关联位置的基本途径。STGCN 结合图卷积与时间卷积 [38]，DCRNN 以扩散卷积刻画有向路网上的传播 [23]，Graph WaveNet 与 AGCRN 以可学习的节点表示构造自适应邻接 [39,40]。学到的关系在推理时通常不随输入窗口变化，逐节点的可训练参数也不利于迁移到训练中未出现的节点，Cini 等系统分析了全局共享参数与节点特定参数之间的取舍 [41]。STID 表明，具有时空身份信息的简洁模型也能形成有竞争力的预测基线 [42]。在交互范围与计算规模上，PDFormer 在长程注意力中建模传播时延 [43]，PatchSTG 通过空间分块组织块内与块间交互，提高大规模路网上的效率 [19]。
+
+另一类工作让计算随条件变化，它们贯穿上述三个方向。图专家混合使节点自适应地选择不同跳数的聚合专家 [22]；TESTAM 在恒等、静态图与动态图三类空间建模专家之间按交通状况路由 [44]；MoGERNN 以稀疏门控为未观测节点组合图聚合器 [2]；在多模态学习中，Flex-MoE 依据可用模态的组合组织专家 [45]；FiLM 提供了以条件特征缩放与平移中间表示的一般方式 [21]；2.2节的 HD-TTS 与 GRU-D 则让计算依赖缺失信息。ALFNet 借鉴专家混合与特征调制的思想，但条件的来源与作用位置不同：图专家的路由只由 OS 决定、不读取信号值，编码时作用于每一步、每个门的传播，解码时沿用末步 OS；FiLM 的参数来自跨节点的时间上下文，OS 只经由其输入进入；空间分区注意力只用于生成条件特征，不直接输出预测。
 
 ## 3 方法
 
 图1给出 ALFNet 的总体架构。3.1节定义问题与 OS 的表示，对应图中左列的输入；3.2–3.4节依次介绍 SAHC、ALFTemporal 与 ALFGraph，分别对应图中第二列、右上与右下部分；3.5节给出训练目标。
 
-![ALFNet 架构](../imgs/alfnet.png)
+![ALFNet 架构](../figures/ALFNet.pdf)
 
-<!-- 图1：PPT 版架构图，作者将重绘。 -->
+<!-- 图1：使用 PDF 矢量架构图。 -->
 
 **图1　ALFNet 总体架构。** 左列为输入：可见历史 $\mathbf{X}$、生命周期上下文 $\mathbf{S}=[\mathbf{R},\mathbf{a},\mathbf{M}]$ 与静态路网（3.1节）；第二列为 SAHC（3.2节）；右上为 ALFTemporal 及其 FiLM 参数头（3.3节）；右下为 ALFGraph，包括 OS 路由的图编码器、FiLM 调制、残差自回归解码、参考恢复与角色缩放图修正（3.4节）。
 
@@ -275,11 +289,11 @@ $$
 
 ## 4 实验
 
-OS 的变化不仅改变输入的缺失模式，也改变可用历史与空间信息参与预测的方式。实验围绕四个问题展开：**RQ1**，ALFNet 能否在动态 OS 下取得跨数据集、跨场景的预测收益；**RQ2**，哪些条件化组件贡献了这些收益；**RQ3**，模型是否利用 OS 的生命周期与时间布局，而不仅是重建缺失输入；**RQ4**，样本层面的预测行为如何。实验覆盖 METR-LA、PEMS-BAY、PEMS04 和 PEMS08 四个数据集。总体比较与消融使用测试集；固定权重的配对机制分析与单因素敏感性实验使用验证集，分别回答预测能力、行为解释与参数作用三类问题。
+OS 的变化不仅改变输入的缺失模式，也改变可用历史与空间信息参与预测的方式。实验围绕四个问题展开：**RQ1**，ALFNet 能否在动态 OS 下取得跨数据集、跨场景的预测收益；**RQ2**，哪些条件化组件贡献了这些收益；**RQ3**，在预测目标不变时，模型的预测如何响应本地历史的加入与中断以及可见读数的时间布局；**RQ4**，样本层面的预测行为如何。实验覆盖 METR-LA、PEMS-BAY、PEMS04 和 PEMS08 四个数据集。总体比较与消融使用测试集；固定权重的配对机制分析与单因素敏感性实验使用验证集，分别回答预测能力、行为解释与参数作用三类问题。
 
 ### 4.1 实验设置
 
-**数据集与任务。** METR-LA 与 PEMS-BAY 来自 [18]，PEMS04 与 PEMS08 来自 [23]。四个数据集均以5分钟为采样间隔，使用过去12步预测未来12步。METR-LA 与 PEMS-BAY 预测交通速度，PEMS04 与 PEMS08 预测交通流量；速度与流量在各自原始单位下评价，不跨数据集平均绝对误差。
+**数据集与任务。** METR-LA 与 PEMS-BAY 来自 [23]，PEMS04 与 PEMS08 来自 [46]。四个数据集均以5分钟为采样间隔，使用过去12步预测未来12步。METR-LA 与 PEMS-BAY 预测交通速度，PEMS04 与 PEMS08 预测交通流量；速度与流量在各自原始单位下评价，不跨数据集平均绝对误差。
 
 | 数据集 | 节点数 | 时间点数 | 预测变量 | 空间分区依据 |
 |---|---:|---:|---|---|
@@ -292,7 +306,7 @@ OS 的变化不仅改变输入的缺失模式，也改变可用历史与空间�
 
 **场景与阶段协议。** Unseen、Steady、Join 与 Fault 四类场景（3.1节）等配额。评价时，Unseen 与 Join 在对应阶段的保留节点上构造，Steady 与 Fault 在已知节点上构造。为观察本地证据的积累与流失，再按事件持续步数 $m$ 划分阶段：Join 分为冷启动（Cold，$m=1$）、预热（Warm，$2\le m\le 11$）与就绪（Ready，$m=12$），Fault 按相同区间分为中断初期（Onset）、证据衰减（Decay）与完全中断（Outage）。Ready 与 Steady 的整个窗口都处于可读状态，Outage 与 Unseen 的窗口内都没有本地读数，但它们并不是相同的评价条件：Ready 与 Unseen 在训练中没有动态信号的保留节点上评价，Steady 与 Outage 在已知节点上评价；四者的观测角色与状态进度输入也不同，Ready 为 NAS 且状态进度由 $1/12$ 增至1，Steady 为 AAS 且状态进度恒为1，Outage 为 FS 且状态进度由 $1/12$ 增至1，Unseen 为 VS 且状态进度为0。因此，场景之间的误差差异同时来自窗口内的 OS 与评价节点群体，不能只归因于前者。自然缺失与协议共同决定最终掩码，因此阶段长度不总等于有效观测数。所有方法共享划分、预测目标、数据暴露边界与评价掩码。由于场景构造、保留节点与 LifeAvg 汇总方式不同于常见的全节点直推设置，本文的数值不能与各基线原论文报告的结果直接比较。
 
-**比较方法。** 比较方法依据第2节的三个研究方向选取，共八个。不完整观测下的预测（2.1）选取 UIGNN 与 GinAR，分别代表面向缺失位置的不确定性预测和面向变量缺失的插值注意力—自适应图卷积递归预测；归纳与部分感知预测（2.2）选取 MoGERNN 与 SLPF，分别代表图专家混合的归纳预测和长期部分感知的空间转移预测；空间依赖与时空表示学习（2.3）选取 STGCN、STID、PatchSTG 与 STBP，分别代表固定图卷积、时空身份表示、空间分块交互和持续上下文模式库。
+**比较方法。** 比较方法共八个，按第2节的方向归为三组。未观测位置的归纳预测与部分感知（2.1）选取 MoGERNN、UIGNN 与 SLPF，分别代表图专家混合的归纳预测、带不确定性的无历史位置预测和部分感知的空间转移预测；其中 SLPF 只运行其预测主干，原方法的历史重建与聚合两个阶段在训练中需要未感知位置的监督，与本文的训练信号边界不符，未予执行。不完整观测下的时空预测（2.2）选取 GinAR，代表变量整段缺失下的插值注意力—自适应图卷积递归预测。时空表示主干（2.4）选取 STGCN、STID、PatchSTG 与 STBP，分别代表固定图卷积、时空身份表示、空间分块交互与频域—图注意力主干；其中 STBP 的逐节点模式库替换为共享的结构编码，不执行模式库扩展与持续训练，因此不代表其持续学习流程。GinAR、SLPF、STID、PatchSTG 与 STBP 中逐节点可训练的身份参数，统一替换为由冻结路网的度数与可用坐标计算的共享结构编码，使保留节点不获得可训练的身份参数。
 
 **评价指标。** MAE、均方根误差（RMSE）与平均绝对百分比误差（MAPE）均在原速度（流量）尺度上计算，MAPE 以百分比表示，其分母为目标值的绝对值并以 $10^{-6}$ 为下限，因此流量数据的 MAPE 对低流量目标很敏感，部分基线的 MAPE 超过100%。各场景内按日历与事件进展分层平衡汇总，再对四类场景等权平均得到 LifeAvg；LifeAvg RMSE 是场景级 RMSE 的平均。三项指标分别反映绝对误差、大残差和相对误差。
 
@@ -307,7 +321,7 @@ OS 的变化不仅改变输入的缺失模式，也改变可用历史与空间�
 
 ### 4.2 总体预测性能（RQ1）
 
-在所列八个比较方法中，ALFNet 在速度与流量数据上均取得三项 LifeAvg 最优，表明围绕 OS 组织预测计算的综合收益能够覆盖不同预测变量与路网。表1中，四个数据集相对各指标最强基线的 MAE 降幅依次为15.63%、11.95%、8.66%和7.86%；RMSE 降幅为7.51%–10.56%，MAPE 降幅为15.49%–21.42%。三类误差同步改善，说明收益并非来自对某一种误差尺度的优化。
+在所列八个比较方法中，ALFNet 在速度与流量数据上均取得三项 LifeAvg 最优，表明 ALFNet 的综合收益覆盖了不同的预测变量与路网。表1中，四个数据集相对各指标最强基线的 MAE 降幅依次为15.63%、11.95%、8.66%和7.86%；RMSE 降幅为7.51%–10.56%，MAPE 降幅为15.49%–21.42%。三类误差同步改善，说明收益并非来自对某一种误差尺度的优化。
 
 **表1　四个数据集的总体预测性能（测试集 LifeAvg）。** 最优加粗，次优加下划线，排名与正文降幅均按未舍入值计算；各数据集独立比较，速度与流量的绝对误差不可横向比较。
 
@@ -340,7 +354,7 @@ OS 的变化不仅改变输入的缺失模式，也改变可用历史与空间�
   </tbody>
 </table>
 
-一个值得注意的现象是，各数据集上的最强基线并不相同：次优 MAE 在 METR-LA 上来自 MoGERNN，在 PEMS-BAY 与 PEMS04 上来自 UIGNN，在 PEMS08 上来自 STID。缺失感知、归纳预测与通用时空表示三类已有能力各自在某些路网上有竞争力，而 ALFNet 在全部数据集上保持领先，与引言的判断一致：缺失处理、空间传递与归纳迁移是互补而非充分的，关键在于让预测计算随可用信息而调整。LifeAvg 对四类场景等权汇总，反映的是跨场景的综合表现；收益是否覆盖不同 OS，由下一节检验。
+一个值得注意的现象是，各数据集上的最强基线并不相同：次优 MAE 在 METR-LA 上来自 MoGERNN，在 PEMS-BAY 与 PEMS04 上来自 UIGNN，在 PEMS08 上来自 STID。归纳预测方法与时空表示主干各自在某些路网上有竞争力，而 ALFNet 在全部数据集上保持领先。这一总体比较只说明综合收益，不能单独说明收益来自哪一部分设计，收益来源由4.4–4.6节检验。LifeAvg 对四类场景等权汇总，反映的是跨场景的综合表现；收益是否覆盖不同 OS，由下一节检验。
 
 ### 4.3 不同场景与阶段下的预测性能（RQ1）
 
@@ -427,13 +441,13 @@ ALFNet 在 METR-LA、PEMS-BAY、PEMS04、PEMS08 上分别取得33/33、29/33、2
 
 条件平均无法区分交通目标变化和观测变化的影响。为隔离 OS 变化，每个数据集固定64个历史与未来自然完整的已知节点验证窗口，保持预测目标、图结构和其他节点输入不变，只干预焦点节点；样本按固定随机规则选取，不依据预测误差筛选。加入干预保留最近3步或6步，以完整12步为参照；中断干预删除最近3步、6步或全部历史，并同步更新观测角色与状态进度。模型参数固定，因此结果反映对可用证据的响应而非在线学习效果；这是已知节点上的受控输入实验，不等同于保留节点上的 Join 或 Unseen 场景。
 
-对比的代表基线按各数据集完整验证集 LifeAvg MAE 在三类方法中各取最优：前两类为 UIGNN 与 MoGERNN，第三类在速度数据上为 STBP，在流量数据上为 PatchSTG。后文4.6与4.8沿用这一选择。图3、图4与图6均使用与表1一致的最终权重；正文统一展示验证集，按相同抽样与干预规则得到的测试集结果在4.8节末段核验。两套结果完整保留，不在不同图或数据集之间按结果择优切换划分。
+对比的代表基线沿用机制分析冻结时的选择规则：在当时的三组比较方法（UIGNN 与 GinAR；MoGERNN 与 SLPF；STGCN、STID、PatchSTG 与 STBP）中，按各数据集完整验证集 LifeAvg MAE 各取最优，结果为 UIGNN、MoGERNN，以及速度数据上的 STBP 和流量数据上的 PatchSTG。这一分组早于第2节的现行组织；按现行组织，UIGNN 与 MoGERNN 都属于2.1节，2.2节的 GinAR 未进入机制分析。后文4.6与4.8沿用这一选择。图3、图4与图6均使用与表1一致的最终权重；正文统一展示验证集，按相同抽样与干预规则得到的测试集结果在4.8节末段核验。两套结果完整保留，不在不同图或数据集之间按结果择优切换划分。
 
 ![四数据集观测轨迹响应](../../final_figures_20261017/validation/fig3_trajectory.png)
 
 **图3　固定目标下的观测加入与中断（验证集）。** 每行为一个数据集，左列为加入，右列为中断。点为同一组64个窗口、全部12个预测步上的平均 MAE，越靠左越好；同一行共享横轴尺度，离散干预点不连成在线学习曲线。
 
-在加入干预下，ALFNet 在四个数据集的三个设置中均低于三个代表基线，其误差在 METR-LA 与 PEMS08 上随近期历史增加而下降。在中断干预下，速度数据的全部设置中 ALFNet 保持最低误差，完全中断时 MAE 分别为3.628（METR-LA）和2.979（PEMS-BAY）；流量数据上，PEMS08 在完全中断时仍优于三个代表基线，PEMS04 则在部分历史可用时保持优势，完全中断端点略高于 MoGERNN。PEMS08 的部分中断劣于 PatchSTG：中断3步与6步时 MAE 分别为23.126／22.232和24.270／22.880，误差高约4.0%与6.1%，因此不能概括为所有中断强度均占优。整体上，新增本地观测的利用与失去本地观测后的空间补偿共同决定模型响应，而不是单一的缺失率决定性能。这些受控响应与条件化设计相符，可与表2的消融结果结合理解。
+在加入干预下，ALFNet 在四个数据集的三个设置中均低于三个代表基线，其误差在 METR-LA 与 PEMS08 上随近期历史增加而下降。在中断干预下，速度数据的全部设置中 ALFNet 保持最低误差，完全中断时 MAE 分别为3.628（METR-LA）和2.979（PEMS-BAY）；流量数据上，PEMS08 在完全中断时仍优于三个代表基线，PEMS04 则在部分历史可用时保持优势，完全中断端点略高于 MoGERNN。PEMS08 的部分中断劣于 PatchSTG：中断3步与6步时 MAE 分别为23.126／22.232和24.270／22.880，误差高约4.0%与6.1%，因此不能概括为所有中断强度均占优。整体上，新增本地观测的利用与失去本地观测后的空间补偿共同决定模型响应，而不是单一的缺失率决定性能。这些受控响应与条件化设计相符，可与表2的消融结果结合理解，但仅凭这些响应不能区分条件化计算与补全质量各自的作用。
 
 ### 4.6 观测数量与时间布局（RQ3）
 
@@ -482,56 +496,100 @@ ALFNet 在 METR-LA、PEMS-BAY、PEMS04、PEMS08 上分别取得33/33、29/33、2
 
 本文研究路网拓扑已知、部分节点不参与动态信号训练时，窗口内 OS 变化下的归纳时空预测，并提出 ALFNet。ALFNet 以逐步的观测角色、状态进度和观测掩码描述 OS：SAHC 为两个分支提供同一份历史，ALFTemporal 从跨节点历史生成条件特征并经 FiLM 调制图编码状态，ALFGraph 依据生命周期上下文组合图传播算子并解码，输出端再施加由末步观测角色控制的有界修正。
 
-在 METR-LA、PEMS-BAY、PEMS04 与 PEMS08 上，ALFNet 的 LifeAvg 三项指标均优于八个比较方法，Join 与 Fault 场景的优势在四个数据集上一致；组件消融表明，跨节点时间上下文与时间条件分支的作用最大，OS 条件化传播与状态进度带来较小但方向基本一致的改进；在预测目标与非干预输入保持不变的配对干预中，加入或删除本地历史、改变可见读数的时间位置都伴随相应的预测响应。这些结果支持本文的核心认识：OS 应同时作为输入有效性的描述和预测计算的条件，而不能仅由训练身份或掩码比例刻画。
+在 METR-LA、PEMS-BAY、PEMS04 与 PEMS08 上，ALFNet 的 LifeAvg 三项指标均优于八个比较方法，Join 与 Fault 场景的优势在四个数据集上一致；组件消融表明，跨节点时间上下文与时间条件分支的作用最大，OS 条件化传播与状态进度带来较小但方向基本一致的改进；在预测目标与非干预输入保持不变的配对干预中，加入或删除本地历史、改变可见读数的时间位置都伴随相应的预测响应。这些结果与本文的核心认识一致：OS 不仅描述输入是否有效，也可以作为组织预测计算的条件。需要说明的是，四项消融分别以掩码替代状态进度、以全局权重替代 OS 路由、以逐节点上下文替代跨节点上下文和去除整个时间条件分支，共享补全与观测角色编码没有单独消融；配对干预反映的是预测对 OS 变化的响应。因此，现有结果尚不能确定各 OS 入口的独立贡献。
 
 后续工作可从两方面展开。其一，在本地历史完全缺失的 Unseen 场景下，ALFNet 的优势依赖数据集，在两个流量数据集上尚未取得最优，需要进一步加强对空间证据的利用。其二，本文的观测角色与状态进度由评价协议给出，实际应用中它们来自接入记录与故障检测，可能存在延迟或误判；考察这类误差的影响，并在预测窗口内建模观测角色的演变，有助于模型在真实传感网络中的应用。
 
 ## 参考文献
 
-[1] Cini et al. Filling the G_ap_s: Multivariate Time Series Imputation by Graph Neural Networks. ICLR, 2022.
+[1] Yin et al. XXLTraffic: Expanding and Extremely Long Traffic Forecasting beyond Test Adaptation. ACM SIGSPATIAL, 2025, pp. 511–521. doi:10.1145/3748636.3762762.
 
-[2] Liu et al. PriSTI: A Conditional Diffusion Framework for Spatiotemporal Imputation. ICDE, 2023.
+[2] Zhou et al. MoGERNN: An Inductive Traffic Predictor for Unobserved Locations. Transportation Research Part C, 2025. doi:10.1016/j.trc.2025.105080.
 
-[3] Zuo et al. Graph Convolutional Networks for Traffic Forecasting with Missing Values. Data Mining and Knowledge Discovery, 2023.
+[3] Roth, Liebig. Forecasting Unobserved Node States with spatio-temporal Graph Neural Networks. IEEE ICDM Workshops (ICDMW), 2022, pp. 740–747. doi:10.1109/ICDMW58026.2022.00101.
 
-[4] Yu et al. GinAR: An End-To-End Multivariate Time Series Forecasting Model Suitable for Variable Missing. KDD, 2024.
+[4] Mei et al. Uncertainty-aware Traffic Prediction under Missing Data. ICDM, 2023.
 
-[5] Wu et al. Inductive Graph Neural Networks for Spatiotemporal Kriging. AAAI, 2021.
+[5] Gupta, Kodamana, Ranu. Frigate: Frugal Spatio-temporal Forecasting on Road Networks. KDD, 2023, pp. 649–660. doi:10.1145/3580305.3599357.
 
-[6] Mei et al. Uncertainty-aware Traffic Prediction under Missing Data. ICDM, 2023.
+[6] Lei et al. ST-FiT: Inductive Spatial-Temporal Forecasting with Limited Training Data. AAAI, 2025, 39(11): 12031–12039. doi:10.1609/aaai.v39i11.33310.
 
-[7] Zhou et al. MoGERNN: An Inductive Traffic Predictor for Unobserved Locations. Transportation Research Part C, 2025. doi:10.1016/j.trc.2025.105080.
+[7] Yu et al. GinAR: An End-To-End Multivariate Time Series Forecasting Model Suitable for Variable Missing. KDD, 2024.
 
-[8] Liu et al. Spatio-temporal Partial Sensing Forecast of Long-term Traffic. TMLR, 2025.
+[8] Yu et al. Merlin: Multi-View Representation Learning for Robust Multivariate Time Series Forecasting with Unfixed Missing Rates. KDD, 2025, pp. 3633–3644. doi:10.1145/3711896.3737046.
 
-[9] Zhao et al. Structure-inductive Meta-learning Empowers Partial-to-global Traffic State Forecasting in Dynamic Sensor Networks. Transportation Research Part C, 2026.
+[9] Marisca, Alippi, Bianchi. Graph-based Forecasting with Missing Data through Spatiotemporal Downsampling. ICML, 2024, PMLR 235: 34846–34865.
 
-[10] Yu et al. Spatio-Temporal Graph Convolutional Networks: A Deep Learning Framework for Traffic Forecasting. IJCAI, 2018.
+[10] Che et al. Recurrent Neural Networks for Multivariate Time Series with Missing Values. Scientific Reports, 2018, 8: 6085. doi:10.1038/s41598-018-24271-9.
 
-[11] Wu et al. Graph WaveNet for Deep Spatial-Temporal Graph Modeling. IJCAI, 2019.
+[11] Chen, Wang, Xie. TrafficStream: A Streaming Traffic Flow Forecasting Framework Based on Graph Neural Networks and Continual Learning. IJCAI, 2021, pp. 3620–3626. doi:10.24963/ijcai.2021/498.
 
-[12] Bai et al. Adaptive Graph Convolutional Recurrent Network for Traffic Forecasting. NeurIPS, 2020.
+[12] Wang et al. Pattern Expansion and Consolidation on Evolving Graphs for Continual Traffic Prediction. KDD, 2023, pp. 2223–2232. doi:10.1145/3580305.3599463.
 
-[13] Jiang et al. PDFormer: Propagation Delay-Aware Dynamic Long-Range Transformer for Traffic Flow Prediction. AAAI, 2023.
+[13] Liu et al. A General Spatio-Temporal Backbone with Scalable Contextual Pattern Bank for Urban Continual Forecasting. ICLR, 2026.
 
-[14] Fang et al. Efficient Large-Scale Traffic Forecasting with Transformers: A Spatial Data Management Perspective. KDD, 2025.
+[14] Wang et al. Cold-Start Traffic State Forecasting at Unseen Sensor Locations via Support-Conditioned Meta-Graph Learning. Sensors, 2026.
 
-[15] Shao et al. Spatial-Temporal Identity: A Simple yet Effective Baseline for Multivariate Time Series Forecasting. CIKM, 2022.
+[15] Zhao et al. Structure-inductive Meta-learning Empowers Partial-to-global Traffic State Forecasting in Dynamic Sensor Networks. Transportation Research Part C, 2026.
 
-[16] Perez et al. FiLM: Visual Reasoning with a General Conditioning Layer. AAAI, 2018.
+[16] Wang et al. STONE: A Spatio-temporal OOD Learning Framework Kills Both Spatial and Temporal Shifts. KDD, 2024, pp. 2948–2959. doi:10.1145/3637528.3671680.
 
-[17] Liu et al. A General Spatio-Temporal Backbone with Scalable Contextual Pattern Bank for Urban Continual Forecasting. ICLR, 2026.
+[17] Ma et al. Robust Spatio-Temporal Centralized Interaction for OOD Learning. ICML, 2025, PMLR 267: 42165–42192.
 
-[18] Li, Yu, Shahabi, Liu. Diffusion Convolutional Recurrent Neural Network: Data-Driven Traffic Forecasting. ICLR, 2018. arXiv:1707.01926.
+[18] Cini et al. Filling the G_ap_s: Multivariate Time Series Imputation by Graph Neural Networks. ICLR, 2022.
 
-[19] Cho et al. Learning Phrase Representations using RNN Encoder–Decoder for Statistical Machine Translation. EMNLP, 2014, pp. 1724–1734. doi:10.3115/v1/D14-1179.
+[19] Fang et al. Efficient Large-Scale Traffic Forecasting with Transformers: A Spatial Data Management Perspective. KDD, 2025.
 
 [20] Zhang, Yan. Crossformer: Transformer Utilizing Cross-Dimension Dependency for Multivariate Time Series Forecasting. ICLR, 2023.
 
-[21] Shazeer et al. Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer. ICLR, 2017. arXiv:1701.06538.
+[21] Perez et al. FiLM: Visual Reasoning with a General Conditioning Layer. AAAI, 2018.
 
-[22] Wang et al. Graph Mixture of Experts: Learning on Large-Scale Graphs with Explicit Diversity Modeling. NeurIPS, 2023. arXiv:2304.02806.
+[22] Wang et al. Graph Mixture of Experts: Learning on Large-Scale Graphs with Explicit Diversity Modeling. NeurIPS, 2023, pp. 50825–50837. doi:10.52202/075280-2211.
 
-[23] Guo et al. Attention Based Spatial-Temporal Graph Convolutional Networks for Traffic Flow Forecasting. AAAI, 2019, 33(01): 922–929. doi:10.1609/aaai.v33i01.3301922.
+[23] Li, Yu, Shahabi, Liu. Diffusion Convolutional Recurrent Neural Network: Data-Driven Traffic Forecasting. ICLR, 2018. arXiv:1707.01926.
 
-[24] Wang et al. Cold-Start Traffic State Forecasting at Unseen Sensor Locations via Support-Conditioned Meta-Graph Learning. Sensors, 2026.
+[24] Wu et al. Inductive Graph Neural Networks for Spatiotemporal Kriging. AAAI, 2021.
+
+[25] Zheng et al. INCREASE: Inductive Graph Representation Learning for Spatio-Temporal Kriging. WWW, 2023, pp. 673–683. doi:10.1145/3543507.3583525.
+
+[26] Xu et al. KITS: Inductive Spatio-Temporal Kriging with Increment Training Strategy. AAAI, 2025, 39(12): 12945–12953. doi:10.1609/aaai.v39i12.33412.
+
+[27] Su et al. Spatial-temporal Forecasting for Regions without Observations. EDBT, 2024. doi:10.48786/edbt.2024.42.
+
+[28] Su et al. Generalising Traffic Forecasting to Regions Without Traffic Observations. AAAI, 2026, 40(18): 15761–15769. doi:10.1609/aaai.v40i18.38607.
+
+[29] Prabowo et al. Traffic Forecasting on New Roads Using Spatial Contrastive Pre-Training (SCPT). Data Mining and Knowledge Discovery, 2024, 38: 913–937. doi:10.1007/s10618-023-00982-0.
+
+[30] Liu et al. Spatio-temporal Partial Sensing Forecast of Long-term Traffic. TMLR, 2025.
+
+[31] Liu et al. PriSTI: A Conditional Diffusion Framework for Spatiotemporal Imputation. ICDE, 2023.
+
+[32] Cui et al. Graph Markov Network for Traffic Forecasting with Missing Data. Transportation Research Part C, 2020, 117: 102671. doi:10.1016/j.trc.2020.102671.
+
+[33] Wang et al. Traffic Prediction With Missing Data: A Multi-Task Learning Approach. IEEE Transactions on Intelligent Transportation Systems, 2023, 24: 4189–4202. doi:10.1109/TITS.2022.3233890.
+
+[34] Zuo et al. Graph Convolutional Networks for Traffic Forecasting with Missing Values. Data Mining and Knowledge Discovery, 2023.
+
+[35] Huang, Chang. MAS-Mamba: A Compact Missing-Aware Selective State-Space Model With Calibrated Uncertainty for Short-Term Traffic Forecasting Under Sensor Outages. IET Intelligent Transport Systems, 2026, 20: e70304. doi:10.1049/itr2.70304.
+
+[36] Yu et al. GinAR+: A Robust End-to-End Framework for Multivariate Time Series Forecasting With Missing Values. IEEE Transactions on Knowledge and Data Engineering, 2025, 37: 4635–4648. doi:10.1109/TKDE.2025.3569649.
+
+[37] Chen, Liang. Expand and Compress: Exploring Tuning Principles for Continual Spatio-Temporal Graph Forecasting. ICLR, 2025. arXiv:2410.12593.
+
+[38] Yu et al. Spatio-Temporal Graph Convolutional Networks: A Deep Learning Framework for Traffic Forecasting. IJCAI, 2018.
+
+[39] Wu et al. Graph WaveNet for Deep Spatial-Temporal Graph Modeling. IJCAI, 2019.
+
+[40] Bai et al. Adaptive Graph Convolutional Recurrent Network for Traffic Forecasting. NeurIPS, 2020.
+
+[41] Cini et al. Taming Local Effects in Graph-based Spatiotemporal Forecasting. NeurIPS, 2023, pp. 55375–55393. doi:10.52202/075280-2417.
+
+[42] Shao et al. Spatial-Temporal Identity: A Simple yet Effective Baseline for Multivariate Time Series Forecasting. CIKM, 2022.
+
+[43] Jiang et al. PDFormer: Propagation Delay-Aware Dynamic Long-Range Transformer for Traffic Flow Prediction. AAAI, 2023.
+
+[44] Lee, Ko. TESTAM: A Time-Enhanced Spatio-Temporal Attention Model with Mixture of Experts. ICLR, 2024. arXiv:2403.02600.
+
+[45] Yun et al. Flex-MoE: Modeling Arbitrary Modality Combination via the Flexible Mixture-of-Experts. NeurIPS, 2024, pp. 98782–98805. doi:10.52202/079017-3135.
+
+[46] Guo et al. Attention Based Spatial-Temporal Graph Convolutional Networks for Traffic Flow Forecasting. AAAI, 2019, 33(01): 922–929. doi:10.1609/aaai.v33i01.3301922.

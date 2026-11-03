@@ -1,0 +1,1201 @@
+Spatial-temporal Forecasting for Regions without Observations
+
+          Xinyu Su                   Jianzhong Qi                                                        Egemen Tanin
+
+ The University of Melbourne  The University of Melbourne                                          The University of Melbourne
+             Australia                    Australia                                                            Australia
+
+suxs3@student.unimelb.edu.au  jianzhong.qi@unimelb.edu.au                                             etanin@unimelb.edu.au
+
+                              Yanchuan Chang                                                 Majid Sarvi
+
+                          The University of Melbourne                                 The University of Melbourne
+                                       Australia                                                  Australia
+
+                        yanchuan.chang@unimelb.edu.au                                 majid.sarvi@unimelb.edu.au
+
+ABSTRACT                                                                              (scattering) locations [1, 30, 39]: observations are missing because
+                                                                                      the locations of interest do not have historical data recorded at
+Spatial-temporal forecasting plays an important role in many                          all (e.g., no sensors have been deployed at those locations). For
+real-world applications, such as traffic forecasting, air pollutant                   the latter category, recent studies revisit Kriging [7]. The aim is
+forecasting, crowd-flow forecasting, and so on. State-of-the-art                      to generate fine-grained records through coarse-grained obser-
+spatial-temporal forecasting models take data-driven approaches                       vations by inserting derived data for the unobserved locations.
+and rely heavily on data availability. Such models suffer from                        The state-of-the-art models [30, 39] adopt neural networks as a
+accuracy issues when data is incomplete, which is common in re-                       solution. Both categories assume some data available for the region
+ality due to the heavy costs of deploying and maintaining sensors                     of interest, shown in Fig. 1 (a) and 1 (b).
+for data collection. A few recent studies attempted to address
+the issue of incomplete data. They typically assume some data                         space        space                                       space
+availability in a region of interest either for a short period or at a
+few locations. In this paper, we further study spatial-temporal                              time                     time                            time
+forecasting for a region of interest without any historical obser-
+vations, to address scenarios such as unbalanced region devel-                        (a) Data missing at times (b) Data missing at            (c) Our problem: data
+opment, progressive deployment of sensors or lack of open data.                                                          scattering locations  missing at continuous
+We propose a model named STSM for the task. The model takes                                                                                    time and locations
+a contrastive learning-based approach to learn spatial-temporal
+patterns from adjacent regions that have recorded data. Our key                       Figure 1: Problem setting comparison. Coloured maps and
+insight is to learn from the locations that resemble those in the
+region of interest, and we propose a selective masking strategy to                    grey maps indicate data observed and unobserved, respec-
+enable the learning. As a result, our model outperforms adapted
+state-of-the-art models, reducing errors consistently over both                       tively. Our focus is Case (c).
+traffic and air pollutant forecasting tasks. The source code is
+available at https://github.com/suzy0223/STSM.                                           Existing studies fail to consider a "continuous" data scarcity
+                                                                                      scenario, where all locations without any data observations are
+1 INTRODUCTION                                                                        skewed towards a continuous sub-region (i.e., the region of interest
+                                                                                      has no available data) while the region boundary is adjacent to the
+Spatial-temporal forecasting is an important component of many                        locations with data observations. Fig. 1 (c) illustrates this scenario,
+real-world applications, e.g., Intelligent Transportation Systems                     which may occur when (1) sensors are deployed progressively
+(ITS) and air quality monitoring systems. Current state-of-the-                       from one region to another (one such scenario has been observed
+art methods for spatial-temporal forecasting are data-driven.                         in Hong Kong [25]), (2) some regions do not have resources to
+They leverage sequential models, e.g., 1-D convolutional neu-                         deploy the sensors (e.g., Shanghai traffic congestion data only
+ral networks (CNN) [20, 22, 31] or recurrent neural networks                          covers the core city region [37]), or (3) regions are not willing
+(RNN) [16], to capture temporal features, along with spatial mod-                     to open their data (e.g., the Tom-Tom traffic index [27] does not
+els, e.g., graph neural networks (GNN), which model spatial re-                       have data from mainland China).
+lations [20, 22, 31]. However, data scarcity is ubiquitous due to
+high deployment and maintenance costs of sensors and unstable                            To fill this gap, we propose a new problem ­ spatial-temporal
+transmission mediums. Hence, developing a model that enables                          forecasting for a region of interest without historical data.
+accurate forecasting without complete historical data is critical.
+                                                                                         This new problem is challenging, and existing Kriging-based
+   Prior attempts to address the data scarcity issue for spatial-                     approaches [30, 39] do not address the problem directly. This is
+temporal tasks fall into two categories: (1) data missing at times [14,               because the core idea of the Kriging-based approach is to perform
+17, 25, 32, 36]: observations at locations of interest are incom-                     data interpolation for the locations without observations based on
+plete for all time due to complex environments and/or faulty                          nearby locations (or time) with observations, which is unavailable
+sensors, or a short sensor deployment time; (2) data missing at                       under our setting.
+
+© 2024 Copyright held by the owner/author(s). Published in Proceedings of the            For example, an earlier model, IGNNK [30], represents the
+27th International Conference on Extending Database Technology (EDBT), 25th           region of interest as a graph and exploits GNNs for Kriging. It
+March-28th March, 2024, ISBN 978-3-89318-095-0 on OpenProceedings.org.                reports substantial performance drops in our setting (detailed
+Distribution of this paper is permitted under the terms of the Creative Commons       in Section 5.2) because GNNs become ineffective when the local
+license CC-by-nc-nd 4.0.                                                              neighbourhood of a location does not have historical observa-
+                                                                                      tions to help infer the data. The state-of-the-art Kriging model,
+                                                                                      INCREASE [39], also uses a graph-based region representation.
+                                                                                      It aggregates information from nearest neighbours in advance
+
+Series ISSN: 2367-2005                                                           488                                  10.48786/edbt.2024.42
+and then uses GRUs (which is a type of RNN) to capture the tem-        similarity [20]. Some studies [11­13, 18] adopt self-supervised
+poral correlation of the data. This model fails to utilise the global  learning to enhance spatial-temporal pattern representations.
+features of the graph as it only considers the nearest neighbours.     Meanwhile, DeepSTUQ [21] considers prediction uncertainty
+                                                                       when forecasting traffic. These models assume fully available
+   We propose a spatial-temporal forecasting model with a selective    historical data and suffer in learning capability when data is
+masking strategy, named STSM, to enable learning from the loca-        incomplete.
+tions that resemble those in the region of interest and forecasting
+for the region of interest without observations. We mask observed      2.2 Spatial-temporal Forecasting with
+data from sub-regions (which are near the region of interest and             Incomplete Data
+have historical data) and train STSM to make predictions for the
+sub-regions. Then, at testing time, we exploit the similarity be-      Existing spatial-temporal forecasting methods for incomplete
+tween the region of interest and the sub-regions used at training      data can be divided into two categories from the data perspective:
+to make predictions for the region of interest.                        data missing at times and data missing at (scattering) locations.
+
+   Unlike existing studies that use random masking [30], STSM             Data missing at times: Observations at locations of interest
+incorporates a selective masking module to mask sub-regions            are incomplete for all time. For this category, one dominant
+that are more similar to the region of interest. This strategy         class of studies focuses on random or continuous data missing
+makes it easier for STSM to extend its forecasting capability from     at times caused by harsh environments [14, 17], e.g., extreme
+the masked sub-regions to the region of interest. The selective        weather or transmission device issues. Generative adversarial
+masking module fuses regional features, road network features          networks (GAN) are applied to address this issue [32, 36]. An-
+and spatial distance to compute similarity scores between the          other study [25] uses transfer learning for settings where sensors
+masked sub-region (i.e., masked locations) and the region of           have only been deployed for a short period of time (e.g., 10 days).
+interest (i.e., unobserved locations). The similarity scores are
+normalised into the range of [0,1] and serve as the probabilities         Data missing at (scattering) locations: Some locations of interest
+for drawing the sub-regions (or locations) to be masked.               do not have observations at all. Problems considering this setting,
+                                                                       i.e., Kriging [7], aim to impute fine-grained records via coarse-
+   Further, we use the observed locations' historical data to gen-     grained records, which is to recover signals for unobserved loca-
+erate pseudo-observations for the unobserved locations and the         tions. Gaussian process regression [29] is a classic solution, while
+masked locations, which enables computing a temporal similarity        it suffers from low efficiency and poor scalability. Tensor/matrix
+based adjacency matrix, i.e., we build links between observed          completion algorithms [2, 24, 41] show better efficiency on large
+locations and unobserved locations that have high temporal sim-        datasets. They combine the low-rank structure and regularisers
+ilarities. This helps identify more similar neighbours.                to maintain local and global consistency. Most tensor/matrix com-
+                                                                       pletion algorithms are transductive. They cannot process a new
+   Overall, this paper makes the following contributions:              location of interest without re-training. Recent studies [30, 39]
+                                                                       propose inductive structures. For example, IGNNK [30] utilises
+     · We propose a new spatial-temporal forecasting task - fore-      the inductive nature of GNNs together with 1-D CNN to recover
+        casting for regions without historical observations. This      records for unobserved locations. This model struggles to handle
+        task can be applied to addressing issues of unbalanced         high data missing ratios where there is little information to learn
+        region development and lack of open data.                      from the neighbourhood. INCREASE [39] adopts an RNN for
+                                                                       inductive imputation. This method uses heterogeneous relations
+     · We design a selective masking module to guide our model         for more accurate estimation, while it struggles in capturing
+        STSM to mask observed locations that have high similarity      global spatial-temporal patterns.
+        with the unobserved region to enable STSM to generalise
+        predictions to the unobserved region.                          2.3 Graph Contrastive Learning
+
+     · We design an efficient pseudo-observation generating strat-     Our proposed STSM is based on contrastive learning, in particu-
+        egy and compute a temporal adjacency matrix based on           lar, graph contrastive learning (GCL), which applies contrastive
+        it to help identify the more informative neighbours and        learning to graph data. The basic idea of contrastive learning
+        enhance model learning efficacy.                               is to maximize the similarity between positive samples while
+                                                                       minimizing that between negative samples.
+     · Extensive experiments show that our model outperforms
+        the state-of-the-art model that we adapt to this new prob-        A series of studies [34, 35, 42] focuses on graph augmentation
+        lem, in terms of forecasting accuracy.                         modules that generate positive and negative samples. For exam-
+                                                                       ple, GraphCL [35] introduces four augmentation methods, such
+2 RELATED WORK                                                         as node dropping and edge perturbation, to create positive graph
+                                                                       pairs. Later, GCA [42] and JOAO [34] improve the augmentation
+2.1 Spatial-temporal Forecasting                                       strategies by taking the node weights and the edge weights into
+                                                                       consideration. Besides, some studies [23, 28] aim to maximize
+Current state-of-the-art spatial-temporal forecasting models are       the mutual information between graph inputs at different scales,
+mainly based on deep neural networks. DCRNN [16] introduces            e.g., nodes vs. graphs.
+a diffusion convolutional recurrent neural network to model the
+spatial correlation between locations and adapts gated recurrent          A few studies [5, 18] introduce GCL into spatial learning tasks.
+units (GRU) to model the temporal dependency. GRUs and other           For example, SARN [5] learns road network embeddings via con-
+RNN models have a recurrent structure that suffers in model run-       trastive learning, STGCL [18] applies GCL to predict traffic flow
+ning time and in the effectiveness of modelling longer sequences.      assuming complete data. Unlike STGCL, our model can process
+To overcome this limitation, GraphWaveNet [31] utilises 1-D            incomplete data because of the proposed selective masking mod-
+temporal convolutional modules to capture the temporal depen-          ule that can adaptively augment spatial-temporal graphs based on
+dency. In addition, the attention mechanism [33] is widely used
+in spatial-temporal forecasting [6, 8, 10, 38]. A series of recent
+studies further embed heterogeneous relations into adjacency
+matrices, including temporal similarity [15, 22] and embedding
+
+489
+the heterogeneous similarities between observed and unobserved                        adjacency matrix for spatial correlation modelling. To compute
+locations.
+                                                                                      the temporal similarity for the unobserved locations, we first
+3 PROPOSED BASE MODEL
+                                                                                      compute pseudo-observations for all unobserved locations. Then,
+We start with a basic version of our proposed model, named
+STSM-RNC (Fig. 2). We first define basic concepts and our studied                     we use dynamic time warping (DTW) [3, 15] to compute temporal
+problem. Then, we present our base model and its training and
+testing procedures.                                                                   similarities among all observed locations, and the temporal simi-
+
+3.1 Concepts and Problem Statement                                                    larities between the observed and the unobserved locations. Be-
+
+Region and Region Graph. We represent a region as a graph                             sides, for the masked locations in each model training epoch, we
+
+ = ( , ). The set of graph vertices  represents  locations of                         compute pseudo-observations for them and compute the tempo-
+
+interest in the region, and the set of graph edges  represents the                    ral similarities between masked locations and observed locations.
+                                                                                      After these steps, we obtain X- +1: and X- +1: for train-
+connection between the locations. Graph  has a feature matrix                         ing and testing, respectively, where both X- +1: and X- +1:
+L  R × for the locations, where  is the dimensionality of the                         contain the pseudo-observations for the masked or unobserved
+
+location features. The features of a location consist of two parts,                   locations in  or .
+                                                                                         We feed X- +1: into a spatial-temporal modelling module to
+i.e., region information and road network information, which
+                                                                                      generate the prediction result X+1:+  (Section 3.4) and compute
+will be detailed in Section 4.1.                                                      the mean squared error between the prediction and the ground
+
+For each location               ,          R       represents  the observations       truth as prediction loss to optimise the spatial-temporal model.
+                                                                                      After the model is trained, we feed X- +1: into the model to
+                                                                                      obtain predictions for the unobserved locations (Section 3.5).
+
+at  at time step , where  is the number of different types of
+
+observations, e.g., traffic speed, PM2.5, etc.                                        3.3 Sub-graph Masking
+
+Observed and unobserved regions. Region graph  can                                    STSM-RNC learns to predict values for masked locations during
+                                                                                      training and then extends this capability to predict values for
+be further divided into two adjacent sub-regions based on the                         unobserved locations at testing. To simulate the setting of a
+                                                                                      continuous region without data observations, which we focus
+availability of observations for the sub-regions, i.e., the observed                  on, we mask the sub-graph formed by each selected location and
+                                                                                      its 1-hop neighbours instead of a set of scattering locations.
+region and the unobserved region. The locations in these two re-
+                                                                                         Defining a sub-graph. The sub-graph of an observed location
+gions are referred to as observed locations (i.e., with observations)                 is formed by its 1-hop neighbours. We compute a location's 1-
+                                                                                      hop neighbours based on a spatial adjacency matrix A, which
+and unobserved locations (i.e., without observations), respectively.                  is defined by Eq. 2, where  is a hyper-parameter, and the
+                                                                                       (,   ) denotes the distance between locations  and  (
+We use  to denote the region that contains all and only the                           and   are their geo-coordinates.) We use Euclidean distance in
+                                                                                      this paper for efficiency considerations, though road network
+observed locations. Similarly, we use  to denote the region                           distance can also be used.
+
+that contains all and only the unobserved locations. These two
+
+regions have no overlap with each other, i.e.,    = . We use
+
+ = (,  ) to represent the graph on the observed locations,
+
+where    denotes the set of the observed locations, and
+
+    ( ×  ) denotes the set of the edges over  . We
+
+use  to denote the size of  . Similarly, we define the graph
+
+on the unobserved locations, which is denoted as  , and the
+
+nodes  (and its size  ) and edges  on this graph. Note
+
+that,   =            +   ;  X   =  (1 ,    ...,      )    R ×  denotes the                               ( ,    )  2
+                                                                                                          2
+                                                                                            1      (-                 )  
+
+                                                                                      ,  =                                 ,  (2)
+
+observations of the observed locations in  at time steps ; and                              0 otherwise.
+
+X^   =  (^1 ,  ...,  ^  )     R ×        denotes estimated values for the
+
+                                                                                         Sub-graph masking. We use a masking ratio  to define the
+                                                                                      percentage of observed locations to be masked. The number of
+unobserved locations in  at time step .                                               locations masked is expected to be  · . Since the sub-graph
+                                                                                      of each location may have a different size, STSM-RNC iteratively
+Problem definition. Given a region graph  as defined above,                           and randomly selects a location and masks the location and its
+                                                                                      1-hop neighbours until the number of masked locations reaches
+with location features L and past observations on the observed                         · .
+
+locations for a time window of length  , we aim to learn a func-
+
+tion  to predict the values for the unobserved locations over the
+next   time steps:
+
+           X^ +1, ..., X^ +     =    (X - +1, ..., X ; ; L)    (1)
+                                                          
+                                                                                      3.4 Spatial-temporal Modelling
+3.2 Overview of Our Base Model
+                                                                                      The spatial-temporal modelling module of our base model STSM-
+We next present a basic model (i.e., STSM-RNC in Section 5.2.2)                       RNC contains the 1-D convolution networks for temporal corre-
+that directly combines spatial-temporal modelling with random                         lation modelling and the graph convolutional networks (GCNs)
+sub-graph masking to forecast for regions without observations                        for spatial correlation modelling. The spatial-temporal modelling
+as Fig. 2 shows. The main idea of STSM-RNC is to learn a model                        module stacks multiple blocks to compute the final output. Fig. 3
+that can forecast observations (e.g., traffic speed or PM2.5) for                     shows the structure of the spatial-temporal modelling module
+masking sub-graphs and to extend this capacity to forecast for                        and details the th block of the module. Each block contains a
+unobserved locations.                                                                 temporal correlation modelling module and a spatial correlation
+                                                                                      modelling module. These two modules are parallel in each block.
+   We denote the full graph with those unobserved locations as                        We first describe the input features and the adjacency matrices
+. We mask a subset of the locations of  to generate a masked                          used in the spatial-temporal modelling module. Then, we detail
+view  (Section 3.3). Following previous studies [9, 16], we use                       the temporal and spatial correlation modelling modules.
+temporal similarity-based adjacency matrix and spatial-based
+
+                                                                                 490
+               Input Graph                                                                                                                                 Spatial-temporal Modelling Module
+
+      5        67                                            "!,!&#$:"                                     Random Masking on -                        555  666 777             ST-Model          !!"#!"$:"#&' L()*+
+                  9                                                                                                                       !",!"&#$:"  888     999
+-
+      8                                                                                                            Generate
+
+                                                                                                           Pseudo-observations
+
+                        Pseudo observations                                                                             Observed Locations
+                        Real observations                                                                               Locations with Pseudo-observations
+
+Figure 2: Model architecture of STSM-RNC. The model contains a sub-graph masking module and a spatial-temporal
+modelling module.
+
+                                                                                                                                                      (A      R ×   in the training process      and A     R ×       in
+
+      . = !.,- + /. ,-                                       When  <                                                                                      
+!. ,-
+                                                                                                                                                      the testing process) by assigning an edge weight of 1 for these
+
+                                                                                                                                                      pairs, and 0 for the rest of the location pairs. Since the locations
+
+Dropout                 /. ,-                                                                                                                         are masked dynamically in each training epoch, A is updated
+
+    RELU            Max Pooling                                                                                                                                                                                                 
+     Conv.
+                                                                                                                                                      in each model training epoch.
+Stack  levels
+                                                                                                           Max Pooling                                     Further, we use temporal attention to capture periodic pat-
+
+               /. ,-,)                                              /. ,-,*!+                                                                         terns, which can significantly impact the observed values of
+               Concatenate                                   Concatenate
+                                                                                                                                                      spatial-temporal data, e.g., rush hours. Given the length of a time
+                                                                                                                GCN
+                   BBGBGBGBGlGlCloCloCloCoCcoNcNcNckNckNkkk      BBGBGBGBGlGlCloCloCloCoCcoNcNcNckNckNkkk  GCN                                        interval that the spatial-temporal observations are recorded (e.g.,
+                                                             
+Dropout                                                                                                    Stack  levels                              5 minutes), we can compute the number of intervals in a day,
+ RELU                      )                                          *!+
+ Conv.                                                                                                                                                denoted as . Now each observation interval in a day gets an in-
+
+                                                                                                           GCN  GCN                                   terval ID in [0, - 1]. Given an input of length  , we compute a
+                                                                                                                GCN Layer
+         !"#$%:!,(                                                                                                                                    time-of-day embedding    R , which stores the interval IDs in
+
+                                                                                                                                                      the input time window. For example,   = [0, 1, 2, 3] represents
+
+ Linear               Linear                                                                                                                          an input observation sequence that starts at the first interval of
+!"#$%:!             !"#$%:!
+                                                                                                                                                      a day and ends at the fourth interval of a day.
+
+Figure 3: The structure of the spatial-temporal model                                                                                                    To attach the time embedding   to the model input, we first
+                                                                                                                                                      project TE - +1:  R × ×1 and the input features X - +1: 
+                                                                                                                                                      R × × into the same latent space and then multiply them as
+
+                                                                                                                                                      formulated by Eq. 4:
+
+3.4.1 Input Features and Adjacency Matrices. The input fea-                                                                                                   H - +1:,0 = 1 (X - +1: )  2 (TE - +1: )
+
+tures of STSM-RNC consist of historical observations for the                                                                                                                                                         (4)
+
+observed locations, pseudo-observations for the unobserved and                                                                                        Here, X - +1:  R × × is the input observation sequence of
+                                                                                                                                                      the observed graph (i.e.,  or ), while TE - +1: is the cor-
+the masked locations, and temporal attention which is used to
+                                                                                                                                                      responding time embedding; 1 (·) and 2 (·) are linear functions
+indicate the time of a day. Besides, we compute two types of                                                                                          that project the input observation sequence and time embedding
+
+adjacency matrices for the GCNs in our model.
+
+We compute pseudo-observations for the -th unobserved or                                                                                              into the same latent space for element-wise multiplication. We
+                                                                                                                                                      now obtain the features H - +1:,0  R × × , which serve as
+masked location from real observations  =                                                                       ,             .  The
+                                                                                                                            
+                                                              
+
+weight for each observed location is determined by its spatial                                                                                        the inputs to the spatial-temporal model.
+
+distance to location , as defined by Eq. 3:
+
+                                                              (,   )-1                                                                                   3.4.2 Temporal Correlation Modelling. 1-D convolution neu-
+                    , =    (, )-1                                                                                                (3)                  ral networks have shown strong performance in temporal feature
+                                                                                                                                                      modelling. We adopt 1-D dilated convolution neural networks
+   This step can introduce more information into an unobserved                                                                                        to embed the temporal features. For ease of presentation, we
+or masked location based on that of its neighbours.                                                                                                   simplify the notation of the input features of the first layer of the
+                                                                                                                                                      spatial-temporal model, H - +1:,0, to H0.
+   Then, we build a temporal similarity-based adjacency matrix.
+We follow a prior work [15] and adopt DTW to compute the                                                                                                            H       =      (       H -1)                     (5)
+temporal similarity. Since pseudo-observations can be regarded
+as real observations with noises, we only build links among the                                                                                                                        
+observed locations and from observed locations to unobserved                                                                                                                             
+(masked) locations (i.e., unobserved locations cannot send mes-
+sages to observed locations directly during GCN training). This                                                                                       Here, H -1  R × × is the output of the previous layer;
+way, we avoid polluting the embeddings of the observed loca-                                                                                          H  R × ×,  = 1, 2, . . . ,  is the output of the -th layer's
+tions by those of the unobserved (masked) locations. We com-                                                                                          1-D temporal convolution networks;  means to stack 1-D di-
+pute  and  most similar pairs of observed locations and
+pairs of observed and unobserved (or masked) locations, respec-                                                                                       lated temporal convolution networks, where  represents the
+tively. We establish a temporal similarity-based adjacency matrix
+                                                                                                                                                                                                                              
+
+                                                                                                                                                      exponential dilation rate,  = 2 . To keep the same dimensional-
+
+                                                                                                                                                                                              
+
+                                                                                                                                                      ity for the time sequence representation, we use zero-padding.
+
+                                                                                                                                                      Function  (·) is the activation function (e.g., ReLU or sigmoid).
+
+                                                                                                                                      491
+   3.4.3 Spatial Correlation Modelling. We use a graph convo-                         into the trained model to produce the predicted observations
+lutional network (GCN) to model spatial correlations. The basic                       X^ +1:+  for the unobserved locations.
+idea of GCN is to aggregate features from neighbours:
+
+                  (A, H) = D-1/2AD-1/2ZW                                   (6)        4 PROPOSED FULL MODEL
+
+where A = A + I, and D is a diagonal matrix. Matrix Z  R ×                            Section 3 introduced our base model. In this section, we will
+is the input graph node features. Matrix W  R× contains
+                                                                                      introduce two modules - selective masking module and contrastive
+the parameters to be learned by the model, where  is the input
+dimensionality and  is the output dimensionality. Next, we                            learning module that enhance our proposed model performance.
+
+define GCN layers with two parallel GCNs, denoted as  :                               These two modules together with our base model STSM-RNC
+
+                                                                                      form our full model STSM. Figure 4 shows its overall structure.
+
+        (A, Z) =  (A, Z)  sigmoid( (A, Z)) (7)                                        Recall that our core idea is to learn a model that can extend
+
+                                                                                      the forecasting capability for masked locations to unobserved
+
+   We stack GCN layers to build a GCN block. The output of each                       locations.
+GCN layer is the input of the next GCN layer, as shown in Eq. 8,
+where   [1, ]. The first layer input is H,-,,0 = H -1, - ,                            The generalisability of STSM on performance on the full graph
+where   [ - 1, 0] and   {,  } represents two types of
+adjacency matrices (i.e., spatial proximity-based matrix and a                         depends on the similarity between the masked locations in
+temporal similarity-based matrix).
+                                                                                       and the unobserved locations in . To mask the locations
+
+                                                                                      that have higher similarity with the unobserved locations, we
+
+                                                                                      propose a selective masking module, to enhance the sub-graph
+
+            H,-,, =  ,-1 (A , H,-,,-1)                                     (8)        masking, exploiting the similarity between the observed locations
+
+                                                                                      and the unobserved locations to help forecast the values (e.g.,
+
+We use  (·) to aggregate the outputs of the GCN layers to                             traffic speed or PM2.5) at the unobserved locations. This module
+obtain the output of -th GCN block (Eq. 9)
+                                                                                      leverages the regional information and the road network infor-
+
+       H,-, = =1,..., ( , (A , H,-,, ))                                    (9)        mation surrounding the locations, as well as the spatial distance
+
+                                                                                      to compute the masking probabilities of the locations. We mask
+
+Then, we concatenate the output from each time slot:                                  the locations based on such probabilities at each model training
+
+                   H, = ||  [ -1,0] H,-,                                   (10)       epoch to generate . This module can guide STSM to learn to
+
+                                                                                      predict values for the locations that have higher similarities with
+
+After that, we use  (·) again to aggregate the outputs corre-                         the unobserved locations, thus enhancing the generalisability of
+sponding to the two different adjacency matrices, as shown in
+Eq. 11, to obtain the output of the -th layer:                                        the model.
+
+                                                                                      We further design a contrastive learning module that takes a
+
+                   H =   {,  } (H, )                                       (11)       graph contrastive learning-based approach and constructs two
+
+                                                                                      views of the graph - one view contains complete spatial-temporal
+
+  We follow previous studies [9, 16] and adopt Eq. 2 with differ-                     data (the original view), and the other view contains incomplete
+
+ent threshold -  to compute the spatial-based adjacency matrix.                       spatial-temporal data (the augmentation view). The view with
+Meanwhile, we follow another work [15] and adopt DTW [3] to
+                                                                                      complete data is used to guide the prediction for the view with
+
+compute A , as described earlier.                                                     incomplete data. The augmentation view  is generated by the
+   We combine the output of TCN and GCN to obtain the output
+                                                                                      selective masking module. Using contrastive learning, we learn a
+
+of the -th layer:                                                                     model that generates similar predictions for both graph views.
+
+                         H = H + H                                         (12)       The trained model is then applied on the full graph  to make
+
+  Finally, we obtain the output H+1:+ , at the -th layer fol-                         predictions for the unobserved locations.
+
+lowing the steps described above and linear functions to project                      We     feed  X - +1:  and  X- +1:  into    the proposed   spatial-
+H+1:+ , to a lower dimension (as Eq. 13 shows).
+                                                                                                     
+
+                                                                                      temporal modelling module (described in Section 3.4) to obtain the
+                                                                                                              Z +        Z+ 
+            X^ +1:+  =  (4 ( (3 (H+1:+ ,))))                                          graph  representations        and       for  contrastive  learning
+                                                                                                                
+                                                                           (13)
+                                                                                      and generating the prediction result X+1:+  .
+Here, 3 and 4 are linear functions, and  is an activation func-
+tion. X^ +1:+   R × × represents the prediction values.                               When the model is trained, we feed X- +1: into the model
+
+                                                                                      to obtain predictions for the unobserved locations (Section 3.5).
+
+3.5 Model Training and Testing                                                        4.1 Selective Masking
+
+Model Training: We obtain predicted values X^ +1:+  on the                            STSM learns to predict values for masked locations during train-
+graph view  that is generated by sub-graph masking. Then, we                          ing, and then extends this capability to predict values for unob-
+                                                                                      served locations at testing. Intuitively, the higher the similarity
+compute the mean squared error between the prediction values                          between the masked locations and unobserved locations, the
+^  +                               +                                                  easier it is for the trained model to make predictions for the un-
+       and  the  ground  truth        as  the  prediction      loss  (Eq.  18).       observed locations. We compute similarities between those 1-hop
+                                                                                      sub-graphs (defined in Section 3.3) and the unobserved region.
+                                                                                      After that, we use our proposed selective masking module to
+                                                                                      guide STSM to mask a sub-region formed by the sub-graphs of
+                                                                                      observed locations that are the most similar to the unobserved
+                       1              | |^  +          +       |22                    region. Heuristically, this strategy leads to more accurate fore-
+                                                                                      casting results for the locations in the unobserved region.
+                                                   
+
+                   =                            -           |              (14)
+
+                          =1 =1
+
+   Model Testing: During model testing, we first compute pseudo-
+observations for the unobserved locations, and let the graph
+ with pseudo-observations be . Then, we build the tem-
+poral similarity-based adjacency matrix utilising these pseudo-
+observations. After that, we feed the features X - +1:  R × ×
+
+                                                                    
+
+                                                                                 492
+           Input Graph G                                     Selective Masking Module                   Spatial-temporal Modelling and Contrastive Learning
+
+   Graph                               
+
+   01      2                                                                                                    555 666 777
+
+#  34                                          Merge $                  #          Selective Masking on 2 "%1"#)&':% 888                           ."%&"#':%&)* L-./0
+                                         Sub-graphs and #              !4$
+                                                                                                                          999
+                                                                     !"%"
+      5  67                                                   Generate                                                                   ST-Model  "%"#
+            9                                                                                                                                                  L+,
+2              %"1")&':%                                      ...                       Generate                555 666 777
+      8                                                                                                                                            "%"
+                                                                                   Pseudo-observations  %"1")&':% 888
+                                                                                                                          999
+
+                                                                                                                                      Positive Pair for Contrastive Learning
+
+              Pseudo observations                             Pseudo-observations       Selective Masking
+              No observations                                                            Spatial Distance Region and Road Similarity
+              Real observations                                                                                                       Obtain  and geo-coordinates
+              $
+                                                              5 for Testing
+   Unobserved Region
+   Unobserved Locations                    555 666 777                                                                                Merge $ to generate !"! and #
+   Observed Locations                      888 999 25
+   Locations with Pseudo-observations                                                                   434               $34             Compute  Compute spatial
+                                         Pseudo-observations                                                                          (!"!, #)     distance ($, )
+                                                                                        56 7            56 7
+
+                                         Example of pseudo-                             89              89                            Aggregating the similarity score
+
+                                         observations for                               Different       Similar                Sub-graph Normalize the score as the marking probability
+                                         masked locations
+
+Figure 4: Model architecture of STSM. The model contains three main parts. (1) The selective masking module leverages the
+regional and road network representations and the spatial distances to compute the similarity between observed locations
+(i.e., their sub-graphs) and the unobserved region. Masking probabilities are assigned based on the similarity scores. (2) The
+contrastive learning module guides STSM to make similar predictions for location graphs with complete data and graphs
+with incomplete data. (3) The spatial-temporal modelling module (as described in Section 3.4) utilises GCNs and 1-D TCNs
+to model spatial and temporal features, together with a contrastive learning loss to optimise the model. To enhance model
+performance, STSM generates pseudo-observations for unobserved locations and computes a temporal similarity-based
+adjacency matrix. During the testing process, STSM fills unobserved locations with pseudo-observations and then feeds the
+graph into ST-Model to obtain the prediction results.
+
+                                                       Table 1: Categories of Points of Interest
+
+Categories Subcategories                                                           Categories Subcategories
+
+#1             university, college, school, kindergarten, research #2                                   commercial, office, studio
+
+               institute, language school, childcare
+
+#3             retail, supermarket                                                 #4                   hotel, motel, guest house, hostel
+
+#5             arts centre, library, events venue, community cen- #6                                    clinic, hospital, veterinary, pharmacy, doctors, nurs-
+
+               tre, conference centre, theatre, exhibition centre,                                      ing home, dentist, social facility, baby hatch
+
+               planetarium, music venue, gallery, artwork, mu-
+
+               seum, social centre, zoo, aquarium, theme park
+
+#7             bridges                                                             #8                   cinema
+
+#9             fountain, garden, park, trampoline park, water #10                                       casino, gambling, nightclub, stripclub, dance
+
+               park, ranger station, dog park, viewpoint, nature
+
+               reserve, attraction, bbq
+
+#11            church, chapel, cathedral, kingdom hall, monastery, #12                                  cafe, ice cream, restaurant, pub, bar, food court, fast
+
+               mosque, presbytery, religious, shrine, synagogue,                                        food, biergarten
+
+               temple, place of worship
+
+#13            parking, parking entrance, parking exit, parking #14                                     taxi, bus station, transportation, stop position, stop
+
+               space, carport, motorcycle parking                                                       area, train station, platform, station
+
+#15            warehouse                                                           #16                  industrial
+
+#17            residential, apartment, apartments                                  #18                  construction
+
+#19            marketplace                                                         #20                  caravan site, camp site, camp pitch, picnic site, pic-
+
+                                                                                                        nic table
+
+#21            pitch, sports centre, sports hall, stadium, swimming #22                                 civic, government, public
+
+               area, swimming pool, track, grandstand, pavilion,
+
+               riding hall, sports, fitness centre, fitness station
+
+#23            fuel, car wash, car repair, vehicle inspection, car #24                                  atm, bank, bureau de change
+
+               rental, car sharing
+
+#25            boat rental, ferry terminal, boat sharing                           #26                  barn, conservatory, cowshed, farm auxiliary, green-
+
+                                                                                                        house, slurry tank, stable, sty
+
+   Sub-graph representation. To measure the similarity be-                              locations, we need to first compute a representation for the sub-
+tween a sub-graph and the region formed by the unobserved                               graph of each observed location. We form such a representation
+                                                                                        (i.e., an embedding) with three components:
+
+                                                                                   493
+(1) Point of interest (POI) features. For each observed location,                                sub-graphs more similar to the unobserved region, based on
+                                                                                                 a masking probability  , drawn from a Bernoulli distribution
+          we draw a circle centered at the location with radius  (a                                ( ) to generate a graph with masked locations ().
+
+          system parameter) and collect all POIs inside the circle
+
+          from OpenStreetMap [19]. We classify the POIs into 
+
+          categories (cf. Table 1). The POI feature component of                                 4.2 Graph Contrastive Learning
+
+          the   sub-graph        embedding,       denoted       by                R, is a        Based on Section 4.1, we use  (i.e., the graph with complete
+
+                                                                     
+
+                                                                     
+
+          vector that keeps a count of the POIs of each category.                                data) to generate a graph  with incomplete data (i.e., a graph
+
+          We further obtain the number of floors of the buildings                                with  masked  locations).  Graph       can  be   regarded         as         with
+
+                                                                                                                                   
+
+          and the areas of the parks in the circular region from                                 perturbations (i.e.,  and  are two views of the observed
+
+          OpenStreetMap [19] to indicate the prosperity of the sub-                              graph, and  is an augmentation of  ). To guide STSM to
+
+          graph, as   R1. For example, a sub-graph (i.e., a local                                produce similar predictions on  and  , we apply contrastive
+
+                                                                                                 learning in the training process on these two views of the graph.
+
+          region) with a 60-level building is more prosperous than
+
+          a sub-graph with only a 4-level building. We concatenate                               STSM adopts graph-level contrastive learning. We use the
+
+                and              to  obtain    a  sub-graph's     region  embedding,             original graph  to explain our graph representation generat-
+                      
+          
+
+                                                                                                 ing steps. First, [X - +1, . . . , X ] is inputted into the spatial-
+
+          denoted     as             =  [ || ]                R+1.   Here,    ||  denotes                                          
+                                            
+                          
+
+                           
+
+          concatenation.                                                                         temporal model (as described in Section 3.4) to generate an output
+                                                                                                 for each time slot, denoted as H:+ ,, where  is the number
+(2) Road network features. We select the nearest road of the                                                                       
+
+          location. To represent the road network corresponding to                               of layers in the spatial-temporal model. Then, STSM takes the
+
+          the sub-graph, we use a 4-dimensional vector   R4                                      last layer output of the spatial-temporal model for the last time
+                                                                                                 step, i.e., H+ ,, to obtain a graph representation Z+  . We
+                                                                                 
+
+          where the dimensions represent highway_level, maxspeed,
+
+          is_oneway and number of lanes.                                                                                                                             
+
+                                                                                                 aggregate all locations' representations and project them into
+
+Finally, we concatenate the regional representation and the                                      a new latent space, formulated as Eq. 16, where  (·) is a linear
+
+road network representation of location  to form its embedding,                                  function. We follow the same steps to generate the representation
+                                                                                                 Z+  of  .
+i.e.,     =    [ || ]                       R+5. The embedding of the sub-
+                             
+
+graph of location , denoted by  , is computed as the average                                                   Z +                                ,
+
+embedding of the embeddings of all locations in the sub-graph,                                                       =   ( ( (                 +     )  )  )                  (16)
+
+                                                                                                                                         
+
+i.e.,  = 1/| |     .                                                                                                                         ,
+   Similarity between sub-graphs and the unobserved re-
+                                                                                                                                      
+
+                                                                                                 A batch of  input time windows are sampled at training,
+gion. Following the same strategy, we can compute an embed-                                                                                  (Z+ ,        Z+  )
+                                                                                                 which  form  2  representations,  where                               is  a  posi-
+ding  for the full unobserved region by averaging the em-                                                                                       
+
+beddings of all unobserved location. Then, the similarity be-                                    tive pair (i.e., graph  and graph  from the same time slot
+
+tween the sub-graph of location  and the unobserved region                                       form a positive pair). Negative Paris are generated from the other
+
+is computed as the cosine similarity of the two embeddings,                                       - 1 graphs in the batch (i.e., graph  and graph  from
+
+i.e.,     =   ( ,  )),                  combined        with  the    spatial  proximity          different time slots in a batch form negative pairs), denoted as
+                                                                                                 (Z+ ,  Z+  ).
+                                                                                                                 We  adopt  the   contrastive     loss  to    maximise        the
+                                                                                                    
+        
+
+       =  1/ (,  )               to  guide  the   masking     process.                           mutual information of the sample pairs:
+
+
+
+   
+
+We compute the embedding similarities between all sub-graphs
+
+and    the  unobserved           region,   denoted      as        =  [1,          ],  and                                         (  (  Z +       Z+      )  /  )
+
+                                                                          ...,                          1                                      ,
+
+                                                                              
+
+the    spatial  proximity               =   [1,               ].                                  = -                                        (Z +       Z+                    (17)
+
+                                                  ...,                                                                                 (           ,                 )/    )
+
+                                                                                                                            ,        
+
+Sub-graph masking. We use a masking ratio  to define
+
+the percentage of observed locations to be masked. Since the sub-                                The final loss function to optimise STSM is:
+
+graph of each location may have a different size, we compute the                                                           =  +                                               (18)
+
+average     size  of  all  sub-graphs,         denoted  as        =   1     | |.
+                                                                     
+
+If we mask sub-graphs with the same probability  = / ,                                           where  is a coefficient to balance the prediction loss and the
+                                                                                                 contrastive learning loss.
+the final number of locations masked is expected to be  · .
+
+Since we want to use similarity to guide STSM to mask the ob-
+
+served locations, we combine the similarities , the spatial                                      5 EXPERIMENTS
+
+proximity  and the sub-graph masking ratio  to com-                                              5.1 Experimental Setup
+
+pute the masking probability for each location as Eq. 15 shows.                                     5.1.1 Datasets. We conduct experiments on three highway
+                                                                                                 traffic datasets, an urban traffic dataset and an air quality dataset.
+This equation normalises  and  to make them contribute
+                                                                                                      · PEMS-Bay [16] contains traffic speed data collected from
+equally.                                                                                                 325 sensors on highways in the Bay Area, California, be-
+                                                                                                         tween January and June 2017.
+        = ( · 1                             +        ·          )/2                   (15)
+                                                                                                      · PEMS-07 [4] contains traffic speed data collected by sen-
+                                                         1                                               sors on highways in Los Angeles. Following a previous
+                                                                                                         study [20], we randomly sample 400 sensors and use their
+                                                                                                         collected data between September and December 2022 as
+                                                                                                         the dataset.
+                                                                        
+                                                                                                      · PEMS-08 [4] contains traffic speed data collected by sen-
+The sub-graph size and the size of graph  impact the value                                               sors on highways in the San Bernardino area, California.
+  . When they are large,  can become very small, such that
+all sub-graphs have very close probability values. To address this
+issue, we only keep the top- most similar sub-graphs and set
+the similarity values as 0 for the remaining sub-graphs, where
+ is a hyper-parameter. This strategy reduces the number of
+sub-graphs that can be masked in a graph. Then, we mask the
+
+                                                                                            494
+        Similarly, we use data collected by 400 randomly sampled           We change their ground truth to the future time window rather
+        sensors between September and December 2022.                       than the past time window to train the models and obtain the
+     · Melbourne contains traffic speed data collected by 182              prediction.
+        sensors in Melbourne City, Australia, between July and
+        September 2022, from the AIMES project [26].                          We train our model using the Adam optimiser with the learn-
+     · AirQ [40] contains pollutant concentration data (PM2.5)             ing rate starting at 0.01. The batch size is 32. For the hyper-
+        collected by 63 sensors in Beijing and Tianjin, which are          parameters in our models,  is 0.5,  is 0.5,  is 0.05 and 
+        two adjacent cities in China, between May 2014 and April           and  are set to 1. We leave the details of the other model
+        2015.                                                              hyper-parameters (i.e., , ,  and ) in Table 3. These pa-
+                                                                           rameter values are obtained through grid search on the validation
+All traffic records collected from PEMS are given in 5-minute              set, except  which is fine-tuned only based on the similarity
+windows, i.e., 288 time slots per day, while the traffic records of        between sub-graphs and the unobserved regions (i.e., ). Also,
+the Melbourne dataset are given in 15-minute windows, i.e., 96             parameter values can be shared among datasets with similar dis-
+time slots per day. The air quality records are given in hourly win-       tributions, e.g., when only the number or the density of sensors
+dows, i.e., 24 time slots per day. Table 2 summarises the dataset          is changed (cf., Table 6 and Table 7). In the experiments, we use
+statistics and Fig. 5 visualises the sensor distribution among all         different thresholds for the spatial-based matrices  and .
+datasets. The region and road network information used for se-             Fig. 7 visualises the two adjacency matrices on PEMS-Bay.
+lective masking is obtained from OpenStreetMap [19].
+                                                                              The experiments are run on an NVIDIA Tesla V100 GPU.
+   Following a baseline work [30], we use the records in the past
+two hours to make predictions for the next two hours, i.e.,  =                        Table 3: Parameter settings
+  = 2 in Eq. 1 for the traffic datasets. Following another
+baseline work [39], we use the records in the past 24 hours to             Parameter  PEMS-Bay  PEMS-07  PEMS-08  Melbourne  AirQ
+make predictions for the next 24 hours, i.e.,  =   = 24
+in Eq. 1 for the air quality dataset. We split each dataset into                          0.01      1       0.5       0.5      1
+three sets by 4:1:5 for training, validation and testing, where                           0.5      0.7      0.5       0.4     0.6
+the locations within each set are adjacent to each other. Note              (m)           200      500      500        50    500
+that, the locations in the training set and the validation set are                         35       35       35        45      5
+considered as observed locations, while those in the test set are
+considered as unobserved locations. Dataset split is space-based,             We adopt four commonly used metrics to evaluate model per-
+where the sensors are divided horizontally or vertically into three        formance, including root mean squared error (RMSE), mean ab-
+sets based on the sensor geo-coordinates. For each dataset, we             solute error (MAE), mean absolute percentage error (MAPE) and
+create four different splits and report the average performance            R-square (R2). The first three measure the forecasting errors,
+on each dataset. We use the data recorded during the first 70% of          while R2 measures how much better the model prediction results
+the time for the training, and the last 30% of the time for testing.       are compared with just using average observations as results [39].
+Fig. 6 shows a dataset partitioning on PEMS-Bay and its temporal
+partitioning.                                                              5.2 Experimental Results
+
+                      Table 2: Dataset Statistics                          We first compare the overall performance of our model with
+                                                                           those of the baseline methods. Then, we report the results of
+Dataset    Time period              Interval  #Sensors                     an ablation study to verify the effectiveness of each module in
+                                                                           STSM. Finally, we study the impact of parameters to test model
+PEMS-Bay   01/01/2017 - 30/06/2017    5 min         325                    robustness.
+PEMS-07    01/09/2022 - 31/12/2022    5 min         400
+PEMS-08    01/09/2022 - 31/12/2022    5 min         400                       5.2.1 Model Performance Comparison. We first compare STSM
+Melbourne  01/07/2022 - 30/09/2022   15 min         182                    with the baseline methods.
+AirQ       01/05/2014 - 30/04/2015                    63
+                                        1 hr                                  (1) Overall Results.: Table 4 summarises the overall perfor-
+                                                                           mance results. STSM and its variants including the base model
+   5.1.2 Competitors. There are no existing models for our pro-            STSM-RNC (detailed in Section 5.2.2) outperform all the com-
+posed problem. We adopt the following adapted models for an                petitors on all four datasets, except for the MAPE measure on
+empirical comparison with our proposed model STSM:                         AirQ.
+
+     · GE-GAN [32] is a transductive data imputation method                   GE-GAN is a transductive method that generates values for
+        based on generative adversarial networks (GAN) that utilise        unobserved locations utilising their similar locations based on
+        a generator to generate estimating values and a discrimi-          graph embeddings. It is difficult to find similar locations when
+        nator to classify the real and generated values.                   there are many unobserved locations in a large area, resulting in
+                                                                           poor forecasting accuracy. In urban areas such as Melbourne City,
+     · IGNNK [30] is an inductive graph neural network for                 GE-GAN outperforms the other two baseline models because this
+        spatial-temporal Kriging.                                          area is relatively small.
+
+     · INCREASE [39] is an inductive graph representation                     IGNNK is an inductive model with GNNs to model spatial
+        learning network based on GRUs and the state-of-the-art            correlations and 1-D convolution neural networks to capture
+        for spatial-temporal Kriging.                                      temporal correlations. It struggles in our task because data miss-
+                                                                           ing at continuous locations makes it difficult for the GNNs to
+   5.1.3 Implementation Details. We use the default settings of            learn the spatial correlation patterns. Although it has a slightly
+the baseline models from their source code. The baseline models            low MAPE on AirQ, its MAE and RMSE are still much larger than
+were proposed for data imputation, while we aim for prediction.            those of our model STSM on this dataset. This can be explained
+
+                                                                      495
+(a) PEMS-Bay        (b) PEMS-07                      (c) PEMS-08         (d) Melbourne              (e) AirQ
+
+                              Figure 5: Visualisations of sensor distribution
+
+Table 4: Overall model performance. "" (and "") indicates that lower (and larger) values are better. The best baseline
+results are underlined, and the best results of the proposed model STSM are in bold. Improvement computes the errors
+reduced by the best variant of the proposed model compared with the best baseline model, where N/A indicates that the
+improvement results cannot be calculated, because of negative measurement values on the baseline methods.
+
+Dataset     Metric  GE-GAN    IGNNK     INCREASE              STSM-RNC   STSM-NC   STSM-R   STSM    Improvement
+PEMS-Bay
+PEMS-07    RMSE      31.184    9.611       8.820                 8.626      8.642   8.628   8.610           +2.38%
+PEMS-08     MAE      26.020    5.616       5.243                 5.352      5.352   5.120    5.237          +0.11%
+Melbourne  MAPE       0.432    0.145       0.133                 0.130      0.131   0.128    0.130          +2.26%
+AirQ                 -9.042    0.063       0.195                 0.228      0.226   0.230   0.231         +18.46%
+             R2      21.103   11.556       8.465                 8.516      8.512   8.444   8.390           +0.89%
+           RMSE      15.647    9.167       5.495                 5.352      5.411   5.417   5.111           +6.99%
+            MAE       0.273    0.181       0.125                 0.125      0.126   0.125   0.123           +1.60%
+           MAPE      -4.351   -0.715       0.155                 0.156      0.142   0.157   0.169           +9.03%
+                     23.409   10.599       8.275                 8.021      7.937   8.018   7.925           +4.23%
+             R2      17.611    7.934       5.019                 4.982      4.962   5.006   4.899           +2.39%
+           RMSE       0.299    0.158       0.116                 0.115      0.115   0.116   0.114           +1.72%
+            MAE      -6.531   -0.678       0.056                 0.114      0.134   0.115   0.136        +142.86%
+           MAPE      10.064   14.635      10.321                 9.844      9.884   10.07   9.175           +8.83%
+                      7.780   12.511       8.302                 7.803     7.188    7.882    7.308          +7.61%
+             R2       0.369    0.746       0.453                 0.399     0.366    0.389    0.388          +0.81%
+           RMSE      -0.175   -2.355       -0.266                -0.120    0.027    -0.171  0.027
+           MAE      295.579   74.873      73.977                 69.956    68.126   68.968  67.571             N/A
+           MAPE     244.824   52.726      56.165                 50.301    48.451   49.302  48.141          +8.66%
+                      9.142    1.459       2.168                 1.789     1.643    1.737    1.692        +14.29%
+             R2      -17.917  -0.067       -0.024                0.074      0.123   0.099   0.141          -12.61%
+           RMSE
+           MAE                                                                                                 N/A
+           MAPE 
+
+             R2
+
+                    Speed     Training
+
+                    Speed               Validation
+
+                    Speed                   Testing                      (a)                (b) 
+                                 Time
+                                                                   Figure 7: Visualization of adjacency matrices. The blank
+Figure 6: Data partitioning on PEMS-Bay from spatial (left;        density in these figures reflects the sparsity of the adja-
+horizontal partitioning) and temporal (right) perspectives.        cency matrix. The right figure has more blank space due
+The red, pink and blue dots on the map represent the ob-           to we use a larger threshold to limit sub-graph size.
+served locations for training, the observed locations for
+validation and the unobserved locations for testing, respec-          INCREASE, the state-of-the-art spatial-temporal Kriging model,
+tively.                                                            learns heterogeneous spatial relations and diverse temporal pat-
+                                                                   terns, which presents the best performance among the baseline
+by that a lower MAE happens on smaller observations while a        models. However, it is still outperformed by our model STSM.
+higher MAE happens on larger observations.                         Our model reduces forecasting errors by up to 14% on the AirQ
+                                                                   dataset and increases R2 by up to 142% on the PEMS-08 dataset
+
+                                                              496
+because of our temporal adjacency matrix to model the temporal                       9.5  ISNTCSRMEASE                        9.0      ISNTCSRMEASE
+similarity, our selective masking module to model spatial and                        9.0                                      8.5
+semantic similarity, and contrastive learning to enhance model
+robustness.                                                                    RMSE  8.5                                      RMSE8.0
+
+   We also report the model training and testing time over the                       8.0                                      7.5
+traffic datasets. We omit the running time results on AirQ due to
+its small scale. The training time of all models is at the same scale.               7.5 0.2 Uno0b.3served0R.4atio 0.5            7.0 0.2 Uno0b.3served0R.4atio 0.5
+GE-GAN requires more training epochs to converge. However,
+when it comes to testing time, GE-GAN and STSM are faster than                            (a) PEMS-Bay                                 (b) PEMS-07
+IGNNK and INCREASE.
+                                                                                   9.0                                        11.0
+                                                                                   8.5    SINTCSRMEASE                        10.5     ISNTCSRMEASE
+
+          Table 5: Model training time                                                                                  RMSE  10.0
+
+                                                                               RMSE8.0                                        9.5
+
+Model     Time PEMS-Bay PEMS-07 PEMS-08 Mel.                                   7.5                                            9.0
+
+GE-GAN    Train (h)  4.4  4.1           4.1  0.3                                   7.0 0.2 Uno0b.3served0R.4atio 0.5          8.5 0.2 Uno0b.3served0R.4atio 0.5
+          Test (s)   0.9
+                          0.7           0.8  0.1
+
+IGNNK     Train (h)  0.3  0.2           0.2  0.1
+          Test (s)   8.3
+                          7.8           8.8  2.4                                          (c) PEMS-08                                  (d) Melbourne
+
+INCREASE  Train (h)  0.3  0.2           0.2  0.2
+          Test (s)   9.5
+                          7.3           7.5  4.0                                                            75  ISNTCSRMEASE
+                                                                                                            70
+STSM      Train (h)  1.1  1.9           2.2  0.3
+
+          Test (s)   1.6  1.3           1.2  0.3                                                        RMSE65
+
+                                                                                                            60
+
+   (2) Varying the unobserved ratio. We vary the unobserved ratio                                           55
+from 0.2 to 0.5 on all datasets, i.e., from 20% to 50% of all the sensor
+locations in a dataset are treated as unobserved locations. Same as                                     50 0.2 Uno0b.3served0R.4atio 0.5
+before, we split each dataset horizontally or vertically and report
+the average performance on the four setups (each split creates two                                              (e) AirQ
+alternative settings of training and testing sets). Fig. 8 presents
+the results. Since INCREASE has the best performance among the                       Figure 8: Model performance vs. unobserved ratio
+baselines when varying the unobserved ratio, we only show its
+results for this set of experiments. STSM outperforms INCREASE                 Table 6: Varying the number of sensors. "" (and "") in-
+in all settings, except when 20% of the locations are considered               dicates that lower (and larger) values are better. The best
+unobserved on PEMS-08. We notice that sometimes the prediction                 baseline results are underlined, and the best model results
+errors drop even with a higher ratio of unobserved locations. This             are in bold.
+is because some unobserved locations are easier than others to
+predict. Including such unobserved locations reduces the mean                  #Sensor number           Model           RMSE           MAE     MAPE        R2
+prediction error. Here, we have only shown results in RMSE.                           200
+Results on other metrics show similar patterns, which are omitted                     400               GE-GAN           24.442        18.348     0.309  -7.828
+for conciseness. The same applies to the experiments below.                           600               IGNNK            10.845         7.774     0.157  -0.950
+                                                                                      800               INCREASE          7.800         4.816     0.110   0.129
+   (3) Varying the number of sensors. We merge PEMS08 and                                               STSM             7.775         4.649     0.109   0.133
+PEMS07 into a larger region, such that we can vary the number                                           GE-GAN           21.929        16.244     0.283  -4.702
+of sensors from 200 to 800 by vertically splitting the space (and                                       IGNNK            15.896        12.709     0.238  -2.998
+hence the sensor locations) into four equal-sized partitions (i.e.,                                     INCREASE          8.880        5.115     0.130    0.115
+each partition contains 200 sensors) based on geo-coordinates.                                          STSM             8.718          5.384     0.131  0.141
+Table 6 shows reports how the model prediction errors change                                            GE-GAN           23.105        17.043     0.296  -5.243
+with more sensors are added into the dataset. We see that our                                           IGNNK            11.492         9.428     0.229  -1.089
+model STSM consistently outperforms all three baseline models                                           INCREASE          8.658        5.494     0.129    0.142
+in terms of RMSE and R2.                                                                                STSM             8.629          5.548     0.130  0.148
+                                                                                                        GE-GAN           21.801        15.867     0.280  -4.349
+   (4) Varying the density of sensors. We further vary the number                                       IGNNK            12.113         8.530     0.172  -1.295
+of sensors from 200 to 964 (which is the maximum number of                                              INCREASE          8.370         5.055     0.119   0.113
+sensors) on PEMS-08, to test the impact of the density of the                                           STSM             8.134         5.008     0.118   0.165
+sensors. The results in Table 7 show that STSM again outperforms
+all baseline models in almost all cases (i.e., 19 out of 20), further             STSM-RNC (our base model as described in Section 3) replaces
+confirming the robustness of the model.                                        the selective masking module with the random masking module
+                                                                               and disables contrastive learning.
+   5.2.2 Ablation Study. We conduct an ablation study with
+three variants of STSM:                                                           (1) Impact of selective masking. As Table 4 shows, STSM out-
+                                                                               performs STSM-R among all datasets, except for the MAPE and
+   STSM-NC disables the contrastive learning module.                           MAE on PEMS-Bay. We further compare the similarity between
+   STSM-R replaces the selective masking module with a random                  the masked sub-graphs and the unobserved region in the training
+masking module that randomly chooses a location and its 1-hop                  process. Table 8 presents the results, which shows that selective
+neighbours to be masked until the target masking ratio is reached.
+
+                                                                          497
+Table 7: Varying the density of sensors. "" (and "") in-                  10       SSTTSSMM-NC                     10       SSTTSSMM-NC
+dicates that lower (and larger) values are better. The best
+baseline results are underlined, and the best model results               RMSE  9                                  RMSE  9
+are in bold.
+
+#Sensor number  Model     RMSE     MAE     MAPE        R2                       8                                        8
+       200                                                                       15 25 3K5 45 55                          15 25 3K5 45 55
+       400      GE-GAN     24.293  18.102     0.306  -7.201
+       600      IGNNK      13.847   9.981     0.194  -2.623                        (a) PEMS-Bay                             (b) PEMS-07
+       800      INCREASE    8.391   5.188     0.117   0.016
+       964      STSM       7.889   4.707     0.111   0.134                10       SSTTSSMM-NC                     11       SSTTSSMM-NC
+                GE-GAN     23.409  17.611     0.299  -6.531                                                        10
+                IGNNK      10.599   7.934     0.158  -0.678                     9
+                INCREASE    8.275   5.019     0.116   0.056               RMSE                                     RMSE  9
+                STSM       7.925   4.899     0.114   0.136
+                GE-GAN     23.933  17.695     0.298  -7.400                     8                                        8
+                IGNNK      12.348   9.198     0.175  -1.745                      15 25 3K5 45 55                          15 25 3K5 45 55
+                INCREASE    7.982   5.109     0.110   0.061
+                STSM       7.708   4.936     0.110   0.127                         (c) PEMS-08                              (d) Melbourne
+                GE-GAN     22.711  17.016     0.288  -6.405
+                IGNNK      13.172  10.203     0.191  -2.006                                   70      SSTTSSMM-NC
+                INCREASE    8.055  4.847      0.114   0.072                                   69
+                STSM       7.841    4.942    0.114   0.119                                    68RMSE
+                GE-GAN     22.180  16.685     0.283  -6.186                                   67
+                IGNNK      12.476   9.735     0.184  -1.639                                   66 5
+                INCREASE    8.052   4.851     0.114   0.064
+                STSM       7.831   4.757     0.111   0.113
+
+masking can guide the model to mask sub-graphs with higher                                            10 K 15 20
+similarities to the unobserved regions.
+                                                                                                      (e) AirQ
+   We also compare the performance of STSM-NC and STSM-
+RNC. STSM-NC outperforms STSM-RNC on PEMS-08, Melbourne                            Figure 9: Model performance vs. K
+and AirQ. On PEMS-Bay and PEMS-07, STSM-NC and STSM-RNC
+yield similar performance. These results confirm the importance           STSM and its variants all mask locations based on the sub-graphs,
+of the selective masking module.                                          and we test the impact of  on all of them. Fig. 10 shows the
+                                                                          results. STSM and its variants are again robust about this parame-
+   (2) Impact of contrastive learning. Table 4 shows that STSM            ter, especially on the freeway traffic datasets. For Melbourne and
+outperforms STSM-NC over all freeway traffic datasets. On the             AirQ, their smaller numbers of sensors and the complex urban
+urban datasets (i.e., Melbourne and AirQ), STSM has better RMSE           road network information lead to more sensitivities. Note that
+while STSM-NC is better at MAE or MAPE. Besides, STSM-R                   the fluctuations are quite small compared with the traffic and air
+outperforms STSM-RNC in most cases (14 out of 20). These results          pollutant observation values.
+confirm that contrastive learning is also an important component
+that contributes to the strong model performance.                            5.2.4 Impact of Space Splits. The relative position of the un-
+                                                                          observed and observed regions can impact the model result. Our
+Table 8: Similarity gain compared with random masking                     experiments above use horizontal or vertical space splits. To
+                                                                          further verify the robustness of STSM, considering the circular
+Dataset PEMS-Bay PEMS-07 PEMS-08 Mel. AirQ                                nature of many city layouts, we study another space splitting
+                                                                          strategy (i.e., "ring" splitting) as shown in Fig. 11 - the centre
+Sim. Gain (%) 9.35        14.76    5.39 6.87 19.66                        region is the observed region (red dots) for training, the region
+                                                                          in the middle ring (pink dots) is for validation, and the outer
+   5.2.3 Parameter Study. We test the impact of  and .                    regions are unobserved (blue dots) for testing. We conduct ex-
+   (1) Impact of the number of top similar locations (sub-graphs) .       periments on PEMS-Bay with this strategy. As shown in Table 9,
+This parameter determines the number of sub-graphs that may               STSM again outperforms all baseline models consistently, with
+be masked (i.e., impacts the value of  in Eq. 15). It impacts the         an advantage of up to 9% in terms of R2.
+performance of STSM and STSM-NC because these two model
+variants use the selective masking module. The results in Fig. 9             5.2.5 Impact of Temporal Correlation Learning. The techniques
+show that the performance of both STSM and STSM-NC is more                used to capture temporal correlation patterns can impact the
+stable on freeway traffic datasets than on the other datasets. The        model effectiveness. We have used 1-D CNN in STSM for its
+reason is that the freeway datasets contain more sensors than             simplicity. In this set of experiments, we further explore the ex-
+the Melbourne and AirQ datasets (i.e., the parameter changing             tensibility of STSM to incorporate advanced temporal correlation
+ratio impacts models' sensitivity).                                       modelling techniques. We replace 1-D CNN with a transformer
+   (2) Impact of the spatial-based matrix's threshold . This pa-          encoder (which is an advanced sequence learning model) and a
+rameter is used to control the size of sub-graphs. When  be-              gated fusion module [38] to fuse each block's spatial and tempo-
+comes larger, the sub-graph size becomes smaller (i.e., fewer             ral embeddings. We denote this variant as STSM-trans. Table 10
+locations in each sub-graph) because of fewer links in the graph.
+
+                                                                     498
+10.0       SSSSTTTTSSSSMMMM---RRNNCC                             10.0  SSSSTTTTSSSSMMMM---NRRNCC                Table 10: Model performance with advanced temporal cor-
+ 9.5                                                              9.5                                           relation learning modules on PEMS-Bay
+
+RMSE  9.0                                     RMSE               9.0                                            Model      RMSE MAE MAPE R2
+
+      8.5                                                        8.5                                            STSM       8.610 5.237 0.130 0.231
+
+      8.00.4 0.5 Thre0s.6hold 0.7 0.8                            8.00.4 0.5 Thre0s.6hold 0.7 0.8                STSM-trans 8.562 5.251 0.129 0.240
+
+           (a) PEMS-Bay                                                (b) PEMS-07                                 5.2.6 Impact of Distance Functions. We used Euclidean dis-
+                                                                                                                tance in our model for efficiency consideration. Road network
+RMSE10.0   SSSSTTTTSSSSMMMM---RRNNCC          RMSE               13.0  SSSSTTTTSSSSMMMM---RNRNCC                distance is an alternative choice. To study the impact of the dis-
+     9.5                                                         12.0                                           tance function, we compare STSM (using the Euclidean distance)
+     9.0                                                         11.0                                           with two variants: STSM-rd-a uses road network distances for
+                                                                                                                computing the adjacency matrices (i.e.,  and ) and pseudo-
+      8.5                                                        10.0                                           observations, while STSM-rd-m uses road network distance for
+                                                                                                                computing the adjacency matrices (i.e.,  and ) only. Ta-
+      8.0                                                        9.0                                            ble 11 shows that STSM has the best performance among all
+                                                                                                                variants, which verifies that Euclidean distance is efficient and
+      7.50.4 0.5 Thre0s.6hold 0.7 0.8                            8.00.4 0.5 Thre0s.6hold 0.7 0.8                effective for our model. STSM-rd-m performs better than STSM-
+                                                                                                                rd-a because Euclidean distance leads to better quality of the
+           (c) PEMS-08                                                 (d) Melbourne                            pseudo-observations.
+
+           RMSE      72.0             SSSSTTTTSSSSMMMM---RRNNCC
+                     71.0
+                     70.0                                                                                       Table 11: Model performance when using different distance
+                     69.0                                                                                       functions on PEMS-Bay
+                     68.0
+                     67.00.4          0.5 Thre0s.6hold 0.7 0.8                                                  Model      RMSE    MAE    MAPE       R2
+
+                                      (e) AirQ                                                                  STSM       8.610   5.237   0.130  0.231
+                                                                                                                STSM-rd-a   8.993  5.426   0.134  0.158
+           Figure 10: Model performance vs.                                                                     STSM-rd-m   8.708  5.339   0.132  0.213
+
+Figure 11: Visualization of different types of sensor distri-                                                   6 CONCLUSIONS AND FUTURE WORK
+bution on PEMS-Bay
+                                                                                                                We proposed a new task - spatial-temporal forecasting for a
+Table 9: Model performance on PEMS-Bay (Ring Split)                                                             region of interest without historical observations while this re-
+                                                                                                                gion's adjacent region has such data. We design a novel model
+      Model                           RMSE     MAE                     MAPE                            R2       named STSM for the task. We propose a selective masking mod-
+                                                                                                                ule based on region, road network and spatial distance features.
+      GE-GAN                          32.674  26.740                    0.447                     -10.612       This module can guide STSM to mask locations in the adjacent
+      IGNNK                           12.625  10.233                       0.2                     -0.737       region that have higher similarity with those in the region of
+      INCREASE                         8.558   4.807                                                0.190       interest, which is beneficial for extending the forecasting capa-
+      STSM                            8.462   4.757                     0.125                      0.208        bility of STSM to the region of interest. Besides, STSM exploits
+      Improvement                     +1.1%   +1.0%                     0.124                      +9.5%        contrastive learning to enhance model forecasting efficacy. Ex-
+                                                                       +0.8%                                    tensive experimental results on real-world datasets, including
+                                                                                                                traffic data and air quality data, show that STSM outperforms
+presents the experimental results on PEMS-Bay. Overall, STSM-                                                   adapted state-of-the-art models consistently in forecasting ac-
+trans outperforms STSM, which verifies the extensibility of STSM                                                curacy. This advantage benefits from (1) the selective masking
+to incorporate advanced correlation pattern learning models.                                                    module which guides the model to mask regions more similar to
+                                                                                                                the region of interest, resulting in better generalization of predic-
+                                                                                                                tions, (2) contrastive learning which enhances model accuracy
+                                                                                                                over incomplete data, and (3) temporal similarity based adjacency
+                                                                                                                matrix computation which strengthens the learning capability
+                                                                                                                of GCNs, allowing messages passing from observed locations to
+                                                                                                                unobserved locations.
+
+                                                                                                                   We only considered one unobserved region. In the future, we
+                                                                                                                plan to extend STSM to deal with multiple unobserved regions
+                                                                                                                at the same time.
+
+                                                                                                                ACKNOWLEDGMENTS
+
+                                                                                                                This work is partially supported by Australian Research Council
+                                                                                                                (ARC) Discovery Project DP230101534.
+
+                                                                                                           499
+REFERENCES                                                                                   [32] Dongwei Xu, Chenchen Wei, Peng Peng, Qi Xuan, and Haifeng Guo. 2020. GE-
+                                                                                                   GAN: A Novel Deep Learning Framework for Road Traffic State Estimation.
+ [1] Gabriel Appleby, Linfeng Liu, and Li-Ping Liu. 2020. Kriging Convolutional                    Transportation Research Part C: Emerging Technologies 117 (2020), 102635.
+      Networks. In AAAI, Vol. 34. 3187­3194.
+                                                                                             [33] Kelvin Xu, Jimmy Ba, Ryan Kiros, Kyunghyun Cho, Aaron Courville, Ruslan
+ [2] Mohammad Taha Bahadori, Qi Rose Yu, and Yan Liu. 2014. Fast Multivariate                      Salakhudinov, Rich Zemel, and Yoshua Bengio. 2015. Show, attend and tell:
+      Spatio-Temporal Analysis via Low Rank Tensor Learning. In NeurIPS, Vol. 27.                  Neural image caption generation with visual attention. In ICML. 2048­2057.
+      3491­3499.
+                                                                                             [34] Yuning You, Tianlong Chen, Yang Shen, and Zhangyang Wang. 2021. Graph
+ [3] Donald J Berndt and James Clifford. 1994. Using Dynamic Time Warping to                       Contrastive Learning Automated. In ICML. 12121­12132.
+      Find Patterns in Time Series.. In KDD workshop. 359­370.
+                                                                                             [35] Yuning You, Tianlong Chen, Yongduo Sui, Ting Chen, Zhangyang Wang, and
+ [4] California Transportation Agencies (CalTrans) Performance Measurement                         Yang Shen. 2020. Graph Contrastive Learning with Augmentations. In NeurIPS,
+      System (PeMS). 2001. https:// pems.dot.ca.gov.                                               Vol. 33. 5812­5823.
+
+ [5] Yanchuan Chang, Egemen Tanin, Xin Cao, and Jianzhong Qi. 2023. Spatial                  [36] Weibin Zhang, Pulin Zhang, Yinghao Yu, Xiying Li, Salvatore Antonio Bian-
+      Structure-Aware Road Network Embedding via Graph Contrastive Learning.                       cardo, and Junyi Zhang. 2021. Missing Data Repairs for Traffic Flow with
+      In EDBT, Vol. 26. 144­156.                                                                   Self-Attention Generative Adversarial Imputation Net. TITS 23 (2021), 7919­
+                                                                                                   7930.
+ [6] Razvan-Gabriel Cirstea, Bin Yang, Chenjuan Guo, Tung Kieu, and Shirui Pan.
+      2022. Towards Spatio-temporal Aware Traffic Time Series Forecasting. In                [37] Yang Zhang. 2013. Data Imputation for Regional Traffic Index Based on
+      ICDE. 2900­2913.                                                                             GSO-NN. Advanced Materials Research. 658 (2013), 587­591.
+
+ [7] Noel Cressie and Christopher K Wikle. 2015. Statistics for Spatio-Temporal              [38] Chuanpan Zheng, Xiaoliang Fan, Cheng Wang, and Jianzhong Qi. 2020. GMAN:
+      Data.                                                                                        A Graph Multi-Attention Network for Traffic Prediction. In AAAI, Vol. 34.
+                                                                                                   1234­1241.
+ [8] Yuchen Fang, Yanjun Qin, Haiyong Luo, Fang Zhao, Bingbing Xu, Liang Zeng,
+      and Chenxing Wang. 2023. When Spatio-Temporal Meet Wavelets: Disentan-                 [39] Chuanpan Zheng, Xiaoliang Fan, Cheng Wang, Jianzhong Qi, Chaochao Chen,
+      gled Traffic Forecasting via Efficient Spectral Graph Attention Networks. In                 and Longbiao Chen. 2023. INCREASE: Inductive Graph Representation Learn-
+      ICDE. 517­529.                                                                               ing for Spatio-Temporal Kriging. In WWW. 673­683.
+
+ [9] Zheng Fang, Qingqing Long, Guojie Song, and Kunqing Xie. 2021. Spatial-                 [40] Yu Zheng, Xiuwen Yi, Ming Li, Ruiyuan Li, Zhangqing Shan, Eric Chang, and
+      Temporal Graph ODE Networks for Traffic Flow Forecasting. In KDD. 364­373.                   Tianrui Li. 2015. Forecasting Fine-grained Air Quality Based on Big Data. In
+                                                                                                   KDD. 2267­2276.
+[10] Shengnan Guo, Youfang Lin, Ning Feng, Chao Song, and Huaiyu Wan. 2019.
+      Attention based Spatial-Temporal Graph Convolutional Networks for Traffic              [41] Tinghui Zhou, Hanhuai Shan, Arindam Banerjee, and Guillermo Sapiro. 2012.
+      Flow Forecasting. In AAAI, Vol. 33. 922­929.                                                 Kernelized Probabilistic Matrix Factorization: Exploiting Graphs and Side
+                                                                                                   Information. In SDM. 403­414.
+[11] Shengnan Guo, Youfang Lin, Letian Gong, Chenyu Wang, Zeyu Zhou, Zekai
+      Shen, Yiheng Huang, and Huaiyu Wan. 2023. Self-Supervised Spatial-Temporal             [42] Yanqiao Zhu, Yichen Xu, Feng Yu, Qiang Liu, Shu Wu, and Liang Wang. 2021.
+      Bottleneck Attentive Network for Efficient Long-term Traffic Forecasting. In                 Graph Contrastive Learning with Adaptive Augmentation. In WWW. 2069­
+      ICDE. 1585­1596.                                                                             2080.
+
+[12] Jiahao Ji, Jingyuan Wang, Chao Huang, Junjie Wu, Boren Xu, Zhenhe Wu,
+      Junbo Zhang, and Yu Zheng. 2022. Spatio-Temporal Self-Supervised Learning
+      for Traffic Flow Prediction. In AAAI, Vol. 37. 4356­4364.
+
+[13] Jiawei Jiang, Chengkai Han, Wayne Xin Zhao, and Jingyuan Wang. 2023.
+      PDFormer: Propagation Delay-aware Dynamic Long-range Transformer for
+      Traffic Flow Prediction. In AAAI, Vol. 37. 4365­4373.
+
+[14] Ibai Laña, Ignacio Iñaki Olabarrieta, Manuel Vélez, and Javier Del Ser. 2018.
+      On the Imputation of Missing Data for Road Traffic Forecasting: New Insights
+      and Novel Techniques. Transportation Research part C: emerging technologies
+      90 (2018), 18­33.
+
+[15] Mengzhang Li and Zhanxing Zhu. 2021. Spatial-Temporal Fusion Graph
+      Neural Networks for Traffic Flow Forecasting. In AAAI, Vol. 35. 4189­4196.
+
+[16] Yaguang Li, Rose Yu, Cyrus Shahabi, and Yan Liu. 2018. Diffusion Convolu-
+      tional Recurrent Neural Network: Data-Driven Traffic Forecasting. In ICLR.
+
+[17] Yuebing Liang, Zhan Zhao, and Lijun Sun. 2022. Memory-Augmented Dy-
+      namic Graph Convolution Networks for Traffic Data Imputation with Diverse
+      Missing Patterns. Transportation Research Part C: Emerging Technologies 143
+      (2022), 103826.
+
+[18] Xu Liu, Yuxuan Liang, Chao Huang, Yu Zheng, Bryan Hooi, and Roger Zim-
+      mermann. 2022. When Do Contrastive Learning Signals Help Spatio-Temporal
+      Graph Forecasting?. In SIGSPATIAL. 1­12.
+
+[19] OpenStreetMap US Northeast data dump. 2018. https:// download.geofabrik.de/ .
+[20] Jianzhong Qi, Zhuowei Zhao, Egemen Tanin, Tingru Cui, Neema Nassir, and
+
+      Majid Sarvi. 2022. A Graph and Attentive Multi-Path Convolutional Network
+      for Traffic Prediction. TKDE 35 (2022), 6548­6560.
+[21] Weizhu Qian, Dalin Zhang, Yan Zhao, Kai Zheng, and James J.Q. Yu. 2023.
+      Uncertainty quantification for traffic forecasting: A unified approach. In ICDE.
+      992­1004.
+[22] Chao Song, Youfang Lin, Shengnan Guo, and Huaiyu Wan. 2020. Spatial-
+      Temporal Synchronous Graph Convolutional Networks: A New Framework
+      for Spatial-Temporal Network Data Forecasting. In AAAI, Vol. 34. 914­921.
+[23] Fan-Yun Sun, Jordon Hoffman, Vikas Verma, and Jian Tang. 2020. InfoGraph:
+      Unsupervised and Semi-supervised Graph-Level Representation Learning via
+      Mutual Information Maximization. In ICLR.
+[24] Koh Takeuchi, Hisashi Kashima, and Naonori Ueda. 2017. Autoregressive
+      Tensor Factorization for Spatio-Temporal Predictions. In ICDM. 1105­1110.
+[25] Yihong Tang, Ao Qu, Andy HF Chow, William HK Lam, SC Wong, and Wei
+      Ma. 2022. Domain Adversarial Spatial-Temporal Network: A Transferable
+      Framework for Short-Term Traffic Forecasting Across Cities. In CIKM. 1905­
+      1915.
+[26] The Australian Integrated Multimodal EcoSystem. 2016. https:// eng.unimelb.
+      edu.au/ industry/ aimes.
+[27] TomTom International BV. 2023. https:// www.tomtom.com/ traffic-index/ .
+[28] Petar Velickovic, William Fedus, William L Hamilton, Pietro Liò, Yoshua
+      Bengio, and R Devon Hjelm. 2019. Deep Graph Infomax. In ICLR.
+[29] Christopher KI Williams and Carl Edward Rasmussen. 2006. Gaussian Processes
+      for Machine Learning. Vol. 2.
+[30] Yuankai Wu, Dingyi Zhuang, Aurelie Labbe, and Lijun Sun. 2021. Inductive
+      Graph Neural Networks for Spatiotemporal Kriging. In AAAI, Vol. 35. 4478­
+      4485.
+[31] Zonghan Wu, Shirui Pan, Guodong Long, Jing Jiang, and Chengqi Zhang.
+      2019. Graph WaveNet for Deep Spatial-Temporal Graph Modeling.. In IJCAI.
+      1907­1913.
+
+                                                                                        500
+
