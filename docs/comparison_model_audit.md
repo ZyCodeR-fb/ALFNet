@@ -1,5 +1,60 @@
 # Comparison-model source and v4 adaptation audit
 
+## 2026-11-05: two 2026 extension baselines (MCPST-FSL, MetaDG)
+
+Task `T-20261103-extension-experiments` (second batch). Same rules as the
+2026-11-03 section: byte-identical sources under `model/comparison_model/<name>/source/`
+(SHA256 in `SOURCE_MANIFEST.json`), all changes in `adapter.py` and the study
+module `experiments/extension2_baselines_20261105.py`; common masked input,
+calendar and frozen graph only; no ALFNet component; validation selection; max
+100 epochs / patience 10; no parameter update at inference.
+
+| registered model | local core | checked source | retained | adaptation differences |
+|---|---|---|---|---|
+| MCPST | `MCPST/source/{models/model.py,datasets.py}` | `references/MCPST` (MCPST-FSL, arXiv 2602.01936; files dated 2026-08-26) | released `MCPST_FSL` network at the active config (hidden 64, diffusion 6, oscillator 10, eigenvectors 8, spatial 2, dropout .1, node chunks 1024/4096): input projection, StabilizingGCN, thermodynamic/Kuramoto/spectral modules, adaptive fusion, multi-scale LSTM+Transformer encoder, horizon heads with uncertainty, 0.7/0.3 learned/physics output; six input channels (two original + four released physics features); robust adjacency normalisation; Adam 3e-4 / wd 1e-4, clip 1.0, plateau(.7, 10, 1e-6); MSE flow loss ×2, uncertainty ×.01, physics ×.03, consistency ×.015 | **only the source-domain training stage is run**: FOMAML meta-learning and target-domain fine-tuning update parameters on target-city data and are outside the fixed-parameter protocol (as for STBP's continual learning); spatial/temporal pseudo-target losses (×.08 each) dropped because their targets are built from every node's future values; whole-data global scalar normalisation → common train-K scalar scaler (applied to both channels, then the released ±5 clip); released physics features computed by the released function on the 12-step window instead of the whole series (the whole-series call reads outside the window and, via `np.gradient`, the first future step); second original channel inferred as time-of-day (LFS payload size = two float64 channels; data not downloadable); spectral eigendecomposition of the identical per-copy Laplacian computed once (GPU copies differ by ≤1.2e-7) — the earlier, retired 2026-09 MCPST adapter stalled in the per-copy `eigh` and had used reduced structural settings and no physics features; batch 8 (released legacy step) instead of the active 2048-sample path; full epochs instead of 26-step epochs; 100/10 instead of 250/20 |
+| MetaDG | `MetaDG/source/model/{MetaDG.py,MetaDG.yaml}` | `references/MetaDG` (AAAI 2026) | released MetaDG encoder–decoder (dynamic node generation, STCE, dynamic graph qualification, meta-parameter GCRU, masks, variational dropout), released per-dataset blocks (PEMS04, PEMS08; METR-LA→PEMS08 block, PEMS-BAY→PEMS04 block by node count, the release has no speed block); curriculum teacher forcing with the released schedule; Adam 1e-3 / eps 1e-3 / released wd, clip 5, ExponentialLR(.97), batch 16; Huber (flow) / masked MAE (speed) on the original scale | node-identity table `node_emb` → `StructuralNodeEncoder` (or released table; per-run `node_identity`, see plan); curriculum-forced decoder steps feed the legal target only where `decoder_available_mask` allows and the model's own output elsewhere (released code feeds the full label tensor); `init_hidden_state` created on the model device (released code creates it on CPU and fails on GPU); 100/10 instead of 200/20 |
+
+CPU checks: `tests/test_extension2_20261105.py` (byte identity, synthetic
+forward/backward and inference blindness, window physics features equal the
+released function on that window, cached spectral decomposition, legal-only
+teacher input, node-identity switch, both objectives).
+
+Runs (2026-11-06): training plan `a8d285aa`; METR-LA MCPST from recovery
+`034802bd` (two all-unsupervised validation batches are skipped by the common
+runner; no other change), PEMS08 MetaDG from recovery `b136d9b6` (an optimiser
+step whose gradients are not all finite is skipped and recorded -- one event,
+epoch 0 batch 137; not in the released code, disclosed). Test plan `60b911dd`,
+one pass per checkpoint after an exact validation replay (8/8, difference 0.0).
+
+## 2026-11-03: four extension baselines (Merlin, HD-TTS, STONE, STOP)
+
+Task `T-20261103-extension-experiments`. Source cores are byte copies under
+`model/comparison_model/<name>/source/` (SHA256 in each `SOURCE_MANIFEST.json`,
+equal to `references/`); only `adapter.py` is new. Registration, released
+optimiser/scheduler/clipping and STONE's objective live in the study module
+`experiments/extension_baselines_20261103.py` (patched in; `v4_runner.py` and
+`train_v4.py` unchanged). All four receive only the common masked input
+(unavailable = train-K mean = 0), common calendar, common frozen graph and,
+where the source uses them, static structure; no role, progress, S, SAHC,
+ALFTemporal, ALFGraph, FiLM, role-balanced or Focal term. Common protocol:
+v4 split, train-K scaler, 12→12 stride 1, K-only training signals/labels,
+v4 metrics, validation 33-cell LifeAvg MAE selection (strict, earlier epoch),
+max 100 epochs / patience 10 (per stage for Merlin). Inference never updates
+parameters.
+
+| registered model | local core | checked source | retained | adaptation differences |
+|---|---|---|---|---|
+| Merlin | `Merlin/source/{stid_arch,mlp,Loss,mask_metric}.py` | `references/Merlin` = upstream main (2026-11-03) | released STID teacher (CL 4) / STID_CL student (CL 16), widths 64, 3 layers, dropout .15, tod 288; teacher→student two stages; four point-missing rates .25/.5/.75/.9 drawn per node over the whole series, independent, fixed (released `random_mask_matric_all`); loss 2·ΣMAE + 2·decay·(hidden KD + response KD) + decay·CL, threshold 3, decay 1/(epoch−3); Adam 2e-4 / wd 1e-4, clip 5, batch 16, released milestones | node-ID tables → `StructuralNodeEncoder` (parametrization; original tensor frozen, unused); teacher reads clean **train-K** natural history only (V/T zero), student reads the common masked input with the released extra deletions; label terms on the common loss mask; response/hidden KD on K (all horizons) instead of all nodes; CL projection (a node-spanning Conv2d used only by CL) sees K only in training; zero-as-null sentinels replaced by explicit masks; per stage 100/10 instead of fixed 200/104 epochs; teacher selected on the common masked validation input (no clean V history); released day-of-week quirk kept (dow fed as day/7 fraction, embedding indexed without ×7 → row 0), unlike the 2026-10-01 adapter which fed integer weekdays; the 2026-10-01 adapter also used per-window nested masks, retained node IDs and cohort-masked response KD |
+| HDTTS | `HDTTS/source/lib/**` (40 files) | `references/hdtts` | `HDTTSModel` hd_tts_imp: hidden 64, dilation 3, 4 GRU layers, 3 k-MIS pooling layers, diffconv+propconv, mp both, recursive lifting, fully connected multi-step attention readout, ELU, dropout 0; mask as encoder input; exogenous day sin/cos + weekday one-hot; AdamW 1e-3 / wd 1e-2, ReduceLROnPlateau(.5, 10, 1e-4, min 1e-6), clip 5, batch 32; MAE on the original scale | released whole-series `ffill().bfill()` (reads outside and after the window) → the same fill inside each 12-step window, empty windows keep mean fill; window 24 → 12; node embedding → `StructuralNodeEncoder` (width 32); common graph without self-loops instead of the Gaussian-threshold dataset graph; k-MIS hierarchy computed once on CPU (deterministic constant scorer) and reused; plateau scheduler monitors the selection metric; full epochs instead of 300-batch epochs, 100/10 instead of 200/30; released `lib` imported under a namespace swap (project `lib` restored); PyG 2.7 compiles `propagate` from subclass source, so the released `MessagePassing` subclasses are pointed at the generic `MessagePassing.propagate` (the PyG 2.4 path; same messages); dependencies tsl 0.9.5 / torch_scatter / torch_sparse from a private `--target` directory, HD-TTS processes only |
+| STONE | `STONE/source/src/{base/stone,base/model,utils/graph_edite,utils/spatial_side_information,utils/metrics}.py` | `references/STONE-KDD-2024` | released STONE (2 attention MLP + 5 gated temporal conv blocks, adaptive interaction graphs, gated fusion), dropout .3, Kt 3, Ks 1/3; Fréchet side information from adjacency-row Manhattan distances with anchor sets on observed nodes (c=10, the SD setting); N(0,1) side-information noise in training; two graph editors (KK 2, 1% nodes) trained by the released score-function term; objective mean + variance of absolute errors over environments; Adam 1e-3 / wd 1e-4 (model and editors), StepLR(10, .95), clip 5 on model only, batch 64 | full node axis in canonical order (`node_num_ob=N`, `node_num_un=0`) instead of observed/new reordering; side information on the common graph (self-loops removed) with K as observed set, computed once for all phases; variance taken over supervised positions only (released mask is dense; the common loss mask is sparse); editors are submodules (checkpointed); their mask `M` accumulates deletions across iterations as released and is moved to the input device lazily; import-time `set_detect_anomaly(True)`, `CUDA_LAUNCH_BLOCKING=1` and `mp.set_start_method('spawn')` are restored after import; per-node editor logits exist only for training-time perturbation and do not enter inference |
+| STOP | `STOP/source/src/{models/stop,base/model}.py` (TrafficStream) | `references/STOP` | released MLP backbone (seasonal/trend decomposition, tod 288, dow), Core_Adaptive centralized interaction (8 cores, 8 heads), separate trainable copy of the backbone encoder for the residual branch (`stmodel_detach`), decoder hid 256; Adam 2e-3 / wd 1e-5 / eps 1e-8, MultiStepLR([30,80,160,250], .5), clip 5, batch 64; MAE on the original scale | released code has no node identity and no graph input, so none is added; the released engine contains no message perturbation / DRO (commented out), so none is added; patience 50, max 1000 → 10, 100; year-based OOD split replaced by the v4 split |
+
+CPU checks: `tests/test_extension_20261103.py` (byte identity, window fill vs
+pandas, synthetic forward/backward for all four, inference blindness to
+targets/lifecycle/loss masks, structural identity, STONE side-information
+determinism, STONE objective vs released formula, clipped optimiser). Real-data
+leakage audit and GPU smoke: preflight of `configs/paper/extension_20261103/plan.json`.
+
 ## 2026-09-27: flow GinAR numerical recovery
 
 Original flow transfer LR.006 fails on PEMS03 at training batch4 (zero-based):

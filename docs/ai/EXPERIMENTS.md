@@ -1,5 +1,13 @@
 # Experiment evidence index
 
+## 2026-11-06 Second 2026 batch (MCPST, MetaDG) and three-seed comparison study (running)
+
+MCPST/MetaDG: plan `a8d285aa` with recoveries `034802bd` (METR-LA MCPST: two empty validation batches at batch 8) and `b136d9b6` (PEMS08 MetaDG: non-finite-gradient step guard, one skipped step); test plan `60b911dd`, 8/8 replays exact. Neither beats ALFNet on any LifeAvg metric; test ALFNet first cells existing 8 + MCPST + MetaDG → 33/28/27/30 (118/132; MetaDG wins only three MAPE cells, MCPST none); + Merlin + STONE unchanged. Results: `paper/extension_baselines_20261105/`, `paper/latex_neurips_20261020/results_extension2_20261105/`. Three-seed study of the ten comparison methods (seeds 42/52 new, seed 32 reused after exact replay): plan `839232c9`, chain `alfnet_ext_seeds_chain`; see the task handoff checkpoint 5.
+
+## 2026-11-05 Extension comparison methods and whole-mechanism ablations
+
+Plan `5867446b` (22 trainings, seed 32, max 3 concurrent) and test plan `4742c349` (one test per validation-selected checkpoint, 22/22 replays exact). Merlin/HD-TTS/STONE/STOP adapted from byte-identical sources (`docs/comparison_model_audit.md` 2026-11-03). Test ALFNet first cells: existing 8 → 33/29/29/30; +Merlin or +STONE unchanged; +HD-TTS 33/29/26/30; +STOP 31/15/13/11 (STOP better LifeAvg on PEMS-BAY/PEMS04/PEMS08, almost entirely from Unseen; counterfactual leakage check passed). w/o SAHC and w/o OS worsen almost all LifeAvg metrics (exception PEMS04 w/o SAHC RMSE −0.85%). Results: `paper/extension_baselines_20261103/`, `paper/extension_ablations_20261103/`, `paper/latex_neurips_20261020/results_extension_20261103/`. Manuscript unchanged.
+
 ## 2026-09-22 Metric audit and all-window residual visualization
 
 Offline plan1dcdf704 reuse: all3metric rankings audited;MAE/RMSE/MAPE held-out best4/3/3of14. Keep originalMAE andUIGNN. Figure6replaced by4condition×4model residualatlas over64windows×12steps,12288cellsverified;allvalues/rawpredictions unchanged. `paper/support_metric_audit_20260922/` report,CSV,NPZ,PNG/PDF,provenance,audit. CorrectedMask-only/LocalContext/GRIN/Focaldefinitions;paperpositiveevidence-focused,limitationsretained;appendixA.13metrics. No training/newtest/modelchanges.

@@ -1,0 +1,18 @@
+{
+ "date": "2026-11-06",
+ "purpose": "diagnostic only; no checkpoint, no test access; preflight-style 20 training batches, 4 validation batches, max_epochs 1",
+ "config": "artifacts/models/main/METRLA/GinAR/seed32/config.original.yaml (lr 0.006, clip 5, MultiStepLR as released)",
+ "script": "artifacts/experiments/seeds_20261106/diagnostics/diag_ginar_20261106.py",
+ "unguarded": {
+  "METRLA seed 32": "20 steps, no non-finite gradient",
+  "METRLA seed 42": "optimiser step 13: 58 parameters with non-finite gradients (clip total norm NaN) -> all 58 parameters NaN; validation refused (no finite prediction)",
+  "METRLA seed 52": "20 steps, no non-finite gradient",
+  "PEMSBAY seeds 32/42/52": "20 steps each, no non-finite gradient"
+ },
+ "with_nonfinite_gradient_step_guard (plan 5e70abfa code)": {
+  "METRLA GinAR seed 42": "4 guarded steps in 20 batches (58 parameters each); validation MAE 1.16e15 (finite but exploded) -> guard insufficient; a full epoch would exceed the 1% rule",
+  "METRLA Merlin seed 42": "0 events, validation MAE 8.90",
+  "PEMS04 STID seed 52": "0 events, validation MAE 100.51"
+ },
+ "precedent": "paper/baseline_extension_20260927/RECOVERY.md: PEMS03 GinAR lr .006 gradient-norm overflow at batch 4; flow GinAR lr .006 -> .001 only, full first epoch + full validation check before freezing"
+}
