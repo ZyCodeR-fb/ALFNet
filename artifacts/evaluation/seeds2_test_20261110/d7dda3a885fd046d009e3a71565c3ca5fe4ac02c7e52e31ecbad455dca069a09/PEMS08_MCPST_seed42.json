@@ -1,0 +1,141 @@
+{
+  "passed": true,
+  "plan_sha256": "d7dda3a885fd046d009e3a71565c3ca5fe4ac02c7e52e31ecbad455dca069a09",
+  "checkpoint_sha256": "311e6a75b3834f4396839617812dcd2c7e5518c5b1e5bc4a75823978f1e48d67",
+  "dataset": "PEMS08",
+  "model": "MCPST",
+  "seed": 42,
+  "split": "test",
+  "table": {
+    "schema_version": 1,
+    "split": "test",
+    "note": "A development diagnostic on the validation split. Same shape as the reported tables on purpose; not a result.",
+    "aggregation": {
+      "row_metrics": "sum/count per cell (v4_metrics.row_metrics)",
+      "within_k": "mean inside calendar stratum, then 5/7-2/7 weighted",
+      "across_k": "equal-weight mean over evidence lengths",
+      "LifeAvg": "mean(Unseen, Steady, Join, Fault)",
+      "mape_denominator": "clamp(|target|, min=1e-06)",
+      "scale": "original units (normalised * std + mean)"
+    },
+    "main": {
+      "Unseen": {
+        "MAE": 82.49705452589016,
+        "RMSE": 100.39609211293977,
+        "MAPE": 106.29169826681284,
+        "valid_target_count": 97999,
+        "origin_count": 888,
+        "sample_count": 888,
+        "finite": true
+      },
+      "Steady": {
+        "MAE": 25.45270013442877,
+        "RMSE": 33.65461961955274,
+        "MAPE": 26.844079215592338,
+        "valid_target_count": 98079,
+        "origin_count": 887,
+        "sample_count": 887,
+        "finite": true
+      },
+      "Join": {
+        "MAE": 29.805789279591995,
+        "RMSE": 38.84862270355173,
+        "MAPE": 34.458912843602896,
+        "valid_target_count": 95664,
+        "origin_count": 887,
+        "sample_count": 887,
+        "finite": true
+      },
+      "Fault": {
+        "MAE": 42.220574482674095,
+        "RMSE": 53.33742203544538,
+        "MAPE": 50.564767594004756,
+        "valid_target_count": 95702,
+        "origin_count": 887,
+        "sample_count": 887,
+        "finite": true
+      },
+      "LifeAvg": {
+        "MAE": 44.994029605646254,
+        "RMSE": 56.55918911787241,
+        "MAPE": 54.53986448000321,
+        "valid_target_count": 387444,
+        "origin_count": 3549,
+        "sample_count": 3549,
+        "finite": true,
+        "derived_from": [
+          "Unseen",
+          "Steady",
+          "Join",
+          "Fault"
+        ]
+      }
+    },
+    "phase": {
+      "Cold": {
+        "MAE": 36.75277453711015,
+        "RMSE": 45.500497319354004,
+        "MAPE": 64.9774293483465,
+        "valid_target_count": 7880,
+        "origin_count": 74,
+        "sample_count": 74,
+        "finite": true
+      },
+      "Warm": {
+        "MAE": 29.110856886842278,
+        "RMSE": 38.1656309717066,
+        "MAPE": 31.7729886776848,
+        "valid_target_count": 79991,
+        "origin_count": 740,
+        "sample_count": 740,
+        "finite": true
+      },
+      "Ready": {
+        "MAE": 29.808127949571105,
+        "RMSE": 39.02666540620085,
+        "MAPE": 30.79963799804032,
+        "valid_target_count": 7793,
+        "origin_count": 73,
+        "sample_count": 73,
+        "finite": true
+      },
+      "Onset": {
+        "MAE": 33.71398393250297,
+        "RMSE": 42.888612139819045,
+        "MAPE": 39.716117272070534,
+        "valid_target_count": 7820,
+        "origin_count": 73,
+        "sample_count": 73,
+        "finite": true
+      },
+      "Decay": {
+        "MAE": 38.58064885542139,
+        "RMSE": 48.87954134159143,
+        "MAPE": 43.468804959993875,
+        "valid_target_count": 79872,
+        "origin_count": 740,
+        "sample_count": 740,
+        "finite": true
+      },
+      "Outage": {
+        "MAE": 87.12642130537229,
+        "RMSE": 108.36503886961123,
+        "MAPE": 132.37304425604785,
+        "valid_target_count": 8010,
+        "origin_count": 74,
+        "sample_count": 74,
+        "finite": true
+      }
+    }
+  },
+  "scaler": {
+    "mean": 236.37462183693214,
+    "std": 148.29461785344907,
+    "fitted_on": "train window, training-known nodes only",
+    "n_values": 1366474
+  },
+  "test_exposure_hash": "6f577c97ea5b871ca0c1568616e0d9556a4d467ca03fe00016c5d8659ac126de",
+  "test_samples": 3549,
+  "evaluation_runtime_seed": 2733585228,
+  "validation_replay_max_abs_difference": 0.0
+}

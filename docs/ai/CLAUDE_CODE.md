@@ -19,38 +19,42 @@
 |---|---|---|
 | 写/改代码、调试、补测试 | 无专门技能，按 WORKFLOW 与 §4.1 | 用户要求代码审查时用内置 `code-review`；`simplify` 只在用户要求清理时使用 |
 | 涉及 PyG（`torch_geometric`、`MessagePassing`、`ChebConv`、`SparseTensor` 等） | `torch-geometric` | 技能按 PyG 2.8 / PyTorch 2.9+ 编写，本项目环境为 PyG 2.7.0 / torch 2.8.0：先核对已装版本的 API；不执行技能中的安装命令 |
-| 研究问题梳理、相关工作、文献矩阵、近邻方法比较 | `deep-research`：`lit-review`、`three-way-scan`、`quick` | 不默认 `full`、`systematic-review`、`socratic`；输出按 ML 论文习惯组织，不套 APA 报告 |
-| 核实具体论断（某论文是否这样做、报告了什么） | `deep-research` 的 `fact-check`；需要逐式、逐实验精读时配合 `nature-paper-xray` | 回到原文与官方代码，记录版本与位置 |
+| 研究问题梳理、相关工作、文献矩阵、近邻方法比较 | `academic-research-skills:deep-research`：`lit-review`、`three-way-scan`、`quick` | 不默认 `full`、`systematic-review`、`socratic`；输出按 ML 论文习惯组织，不套 APA 报告 |
+| 核实具体论断（某论文是否这样做、报告了什么） | `academic-research-skills:deep-research` 的 `fact-check`；需要逐式、逐实验精读时配合 `nature-paper-xray` | 回到原文与官方代码，记录版本与位置 |
 | 精读单篇论文的方法、公式、实验依据 | `nature-paper-xray` | 声明实际阅读范围（正文/附录/补充材料）；它不是审稿，也不是摘要 |
-| 参考文献、DOI、BibTeX 元数据核查 | `nature-ref-verifier`；核对正文引用与文献表一致性时加 `academic-paper` 的 `citation-check` | 只发送题名、作者、DOI 等元数据；元数据正确不等于引用支持论断；批量核查默认串行，用户同意后才拆给子代理 |
-| 论文结构、章节写作、段落修改 | `academic-paper`：`outline-only`、`revision`；用户想逐步讨论时用 `plan` | 短段落直接局部修改，不调用整套流程；不默认 `full`，不采用 `abstract-only` 的繁中双语输出 |
-| 把审稿或导师意见整理成修改路线、检查回应稿 | `academic-paper` 的 `revision-coach`、`rebuttal-audit` | Codex 意见按 §5 处理 |
-| 交 Codex 前自检 | `academic-paper-reviewer` 的 `quick` 或 `methodology-focus` | 不默认 `full` 五人模拟审稿；自检不等于独立审核 |
+| 参考文献、DOI、BibTeX 元数据核查 | `nature-ref-verifier`；核对正文引用与文献表一致性时加 `academic-research-skills:academic-paper` 的 `citation-check` | 只发送题名、作者、DOI 等元数据；元数据正确不等于引用支持论断；批量核查默认串行，用户同意后才拆给子代理 |
+| 论文结构、章节写作、段落修改 | `academic-research-skills:academic-paper`：`outline-only`、`revision`；用户想逐步讨论时用 `plan` | 短段落直接局部修改，不调用整套流程；不默认 `full`，不采用 `abstract-only` 的繁中双语输出 |
+| 把审稿或导师意见整理成修改路线、检查回应稿 | `academic-research-skills:academic-paper` 的 `revision-coach`、`rebuttal-audit` | Codex 意见按 §5 处理 |
+| 交 Codex 前自检 | `academic-research-skills:academic-paper-reviewer` 的 `quick` 或 `methodology-focus` | 不默认 `full` 五人模拟审稿；自检不等于独立审核 |
 | 读取 PDF | `anthropic-skills:pdf`（可用时）或 Read 工具 | 记录已读页码 |
 | 科研绘图 | 默认交给 Codex | — |
 
-以下只在用户明确要求时使用：`academic-pipeline` / `/ars-full`、`sr-screener`、`deep-research` 的 `systematic-review`、ARS 跨模型核验（`ARS_CROSS_MODEL`，当前未设置）、自动调用 Codex 或其他模型、多代理并行审核。`academic-pipeline` 与 `sr-screener` 目前未暴露为技能（见 §3）。
+以下只在用户明确要求时使用：`academic-research-skills:academic-pipeline` / `/ars-full`、`academic-research-skills:sr-screener`、`deep-research` 的 `systematic-review`、ARS 跨模型核验（`ARS_CROSS_MODEL`，当前未设置）、自动调用 Codex 或其他模型、多代理并行审核。`academic-pipeline` 与 `sr-screener` 已作为技能存在，但不默认使用。
 
-## 3. 技能安装位置（2026-11-06 配置）
+`/ars-*` 是用户输入的命令（16 个，其中 13 个带 `disable-model-invocation: true`）。其中 12 个的 frontmatter 带 `model: sonnet`，执行该命令的那一轮改用 Sonnet；这一设置不写入配置，下一条消息恢复会话模型。`/ars-full`、`/ars-reviewer`、`/ars-citation-check`、`/ars-revision-coach` 没有 `model` 字段。5 个核心技能未指定模型，4 个 agent 为 `model: inherit`，都沿用会话模型。日常直接描述需求即可，由 Claude 按上表调用对应技能和模式，无需输入 `/ars-*`。
 
-用户级安装，固定版本，不自动更新。`~/.claude/skills/<名称>` 是指向下列源码目录的符号链接：
+## 3. 技能安装位置（2026-11-06 最终配置）
 
-| 来源 | 运行时名称 | 源码目录（`~/.claude/skill-repos/`） | 版本 |
-|---|---|---|---|
-| ARS | `deep-research`、`academic-paper`、`academic-paper-reviewer` | `academic-research-skills/`（完整仓库，含 `shared/`、`scripts/`、`commands/`、`agents/`、`hooks/`） | tag `v3.23.1`，commit `4c54490` |
-| Nature Skills | `nature-paper-xray`、`nature-ref-verifier`、`nature-shared`（共享资源，不单独调用） | `nature-skills/skills/`（sparse checkout） | commit `d774add` |
-| K-Dense | `torch-geometric` | `scientific-agent-skills/skills/torch-geometric/`（sparse checkout） | commit `a25cf9e` |
+Windows 本机和服务器各装一份，互相独立：本机会话用 Windows 上的安装，桌面 SSH 会话和服务器 CLI 会话用服务器上的安装。两端固定同一版本，不自动更新。
 
-- ARS 的 SKILL.md 以**仓库根目录**为基准引用 `shared/...`、`scripts/...`，应解析为 `~/.claude/skill-repos/academic-research-skills/shared/...` 等，不在 `~/.claude/skills/` 下查找。`nature-paper-xray` 引用的 `../nature-shared/...` 在链接路径和真实路径下都能解析。
-- 桌面端同步的 ARS 插件（`academic-research-skills@inline`，v3.23.1）只提供 `/ars-*` 命令和 4 个 agent；它的 5 个核心技能没有被发现，原因是 Windows 端检出时符号链接变成了文本文件。`/ars-*` 命令要求调用 `academic-research-skills:<skill>` 而该名称不存在时，改用同名用户级技能 `<skill>`。
-- 若运行时同时出现 `academic-research-skills:deep-research` 和 `deep-research`（说明桌面端插件已修复或更新），优先用插件版本，并提醒用户可以移除用户级重复链接；不要自行删除。
-- 服务器另有官方插件安装（`/plugin install`，user scope，v3.24.2，`~/.claude/plugins/cache/academic-research-skills/`）。桌面 SSH 会话中它被桌面同步的同名副本覆盖，只在服务器纯 CLI 会话生效。
+| 来源 | 类型 | 运行时名称 | 服务器安装位置 | Windows 本机 | 版本 |
+|---|---|---|---|---|---|
+| ARS | 插件（marketplace `Imbad0202/academic-research-skills`，user scope） | `academic-research-skills:<skill>`：`deep-research`、`academic-paper`、`academic-paper-reviewer`、`academic-pipeline`、`sr-screener`；另有 16 个 `/ars-*` 命令、4 个 agent | `~/.claude/plugins/cache/academic-research-skills/academic-research-skills/3.24.2/` | user scope 插件 | 3.24.2，commit `a1687d5` |
+| Nature Skills | 独立技能 | `nature-paper-xray`、`nature-ref-verifier`、`nature-shared`（共享资源，不单独调用） | `~/.claude/skills/<名称>` → `~/.claude/skill-repos/nature-skills/skills/`（sparse checkout） | `~/.claude/skills/` 下完整复制 | commit `d774add` |
+| K-Dense | 独立技能 | `torch-geometric` | `~/.claude/skills/torch-geometric` → `~/.claude/skill-repos/scientific-agent-skills/skills/torch-geometric/`（sparse checkout） | 未安装 | commit `a25cf9e` |
+
+- ARS 的 SKILL.md 以**插件根目录**为基准引用 `shared/...`、`scripts/...`，在服务器上解析为上表的 cache 目录（如 `shared/references/routing_core.md`）。`nature-paper-xray` 引用的 `../nature-shared/...` 在链接路径和真实路径下都能解析（2026-11-06 实测）。
+- 服务器 ARS 安装有 2 个 hooks（`plugin details` 显示 Hooks (2)）：SessionStart 在会话开始时注入 ARS 加载与路由提示（2026-11-06 实测出现）；PreToolUse 对 `Write|Edit|MultiEdit|Bash` 运行写入范围守卫 `hooks/run_guard.sh`，找不到可用 Python 时放行。
+- 服务器 `~/.claude/settings.json` 中的 `extraKnownMarketplaces.academic-research-skills` 和 `enabledPlugins` 条目是这份安装所需的，不要删除；安装前的备份为 `~/.claude/backups/settings.json.before-ars-plugin-20261106`。
 
 两端共存规则（Windows 本机 + 桌面 SSH 连接的服务器）：
 
-- 桌面端会把 Windows 上已安装的**插件**同步到服务器，并以 `--plugin-dir` 注入 SSH 会话；同名时同步副本优先于服务器上的安装。所以插件类技能（用 `/plugin install` 安装的）只在 Windows 装一份，由桌面同步到服务器，不在两端重复安装同名插件。
-- Windows 检出会破坏符号链接、改为 CRLF 换行，同步时 hooks 可能丢失。插件依赖符号链接或 shell hooks 时，先核对同步后的副本（`claude --plugin-dir <同步目录> plugin details <插件名>` 可离线清点组件）。
-- **独立技能**（只有 SKILL.md 目录，放在 `~/.claude/skills/`）不经插件同步，两端各装一份，使用同一 commit。
+- 桌面端会把 Windows 上已安装的**插件**复制到服务器 `~/.claude/remote/plugins/<id>/<hash>/`。官方 Desktop 文档列出了该目录（“Plugins that Desktop copies from the user's computer”），但没有说明关闭复制的开关、同名插件的优先级和 hooks 的处理。`~/.claude/remote/` 由桌面端管理，不修改。
+- 实测（2026-11-06，两次会话对比，属观测推断）：服务器没有安装 ARS 时，桌面以 `--plugin-dir` 注入同步副本；服务器 user scope 装有同名插件后，不再注入同步副本，会话只加载服务器安装，技能清单中没有重复。但桌面端仍会在会话启动时把副本写到磁盘（3.24.2 副本创建于 14:57:47，晚于服务器安装 14:19:36），旧哈希副本也不会自动清理；这些副本未注入，不影响使用，不必删除。核验时以 cmdline 中的 `plugin-dir` 为准，不以磁盘上是否存在副本为准。
+- 同步副本缺少整个 `hooks/` 目录（3.23.1 和 3.24.2 两份同步副本都是 Hooks (0)），文件为 CRLF 换行；忽略 CR 后，其余文件与服务器安装一致。因此依赖 hooks 的插件（如 ARS）在服务器上单独安装，不依赖同步副本。卸载服务器安装后，下个会话预计会改为注入无 hooks 的同步副本。
+- **独立技能**（只有 SKILL.md 目录，放在 `~/.claude/skills/`）不经同步：官方文档说明 SSH 会话从服务器的 `~/.claude/skills/` 读取，不读取本机的。两端各装一份，使用同一 commit。Windows 检出为 CRLF（`core.autocrlf=true`），跨机比较时先统一换行符或按 git blob 比较。
+- 升级由用户提出，两端一起升到同一版本：服务器在非项目目录执行 `claude plugin update academic-research-skills@academic-research-skills`，然后用 `plugin details` 和 `~/.claude/plugins/installed_plugins.json` 核对版本与 commit；独立技能先展示差异，再更新到同一 commit。
+- 怀疑出现重复或用错副本时：用 `tr '\0' '\n' < /proc/$CLAUDE_PID/cmdline | grep plugin-dir` 查看注入目录，用 `ls ~/.claude/plugins/cache/academic-research-skills/academic-research-skills/*/.in_use/` 查看哪份副本被当前 PID 占用，用 `claude --plugin-dir <目录> plugin details <插件名>` 离线清点组件。
 - 新增技能前先说明打算装在哪一端、用哪种方式，以及与已有技能是否重名。
 - 源码目录是第三方资料：不在其中运行安装脚本、`autoupdate` 或 `git pull`，不修改其中文件。更新须由用户提出，并先展示差异。
 - 本轮未安装：`networkx`（项目有效代码只有 `stgcn_n` 中一个未使用的导入，图算法调用只出现在 `references/` 第三方仓库）、`pytorch-lightning`（只有 1 个测试使用）、`aeon`（未使用）、matplotlib/scientific-visualization（绘图交 Codex）。确有需要时先请用户确认。

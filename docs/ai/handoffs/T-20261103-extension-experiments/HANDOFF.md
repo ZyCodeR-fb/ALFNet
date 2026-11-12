@@ -91,3 +91,57 @@
 - **三种子计划 v3**：`configs/paper/seeds_20261106/plan.json`，plan_sha256 `58eecfb5cf25829b4d963a07c91c1eba8a04b2ecb297d8dd5743ba1c675cf448`，82 个新训练。规则（看到任何恢复结果前写入）：(1) 全部运行带非有限梯度步守卫（跳过并记录；任一轮事件 >1% 整轮批数即失败；无事件时为空操作）；(2) GinAR 在 METR-LA、PEMS-BAY 按 2026-09-27 流量数据集先例 lr .006→.001（仅改该行与 variant 标签，配置 `configs/paper/seeds_20261106/GinAR_lr0.001/`），使四个数据集一致；这两对的种子 32/42/52 全部新训练，预检跑完整首轮 + 完整验证；论文现有 lr .006 种子 32 结果不改动、不计入三种子均值。其余 38 对种子 32 复用（重放门槛不过则加训）。
 - **重启**：tmux `alfnet_ext_seeds_chain`（chain PID 437987），2026-11-06 11:58；链脚本对已完成的第二批测试不重跑。
 - **2026-11-06 13:00 预检 v3 通过并开始训练**：40/40 通过；38 对种子 32 重放全部在容差内（最大差 2.2e-5，STGCN），无需加训；冒烟无守卫事件；GinAR lr .001 完整首轮验证 MAE：METR-LA 6.57、PEMS-BAY 4.81。训练队列 PID 438017（82 个，≤4 并发），首批 worker 505769/506167/506556/506953（Merlin）；实时 PID/日志见 `artifacts/experiments/seeds_20261106/58eecfb5…/queue_status.json`。
+
+## 检查点 6：三种子完成与整理 — 2026-11-10
+
+- **Facts**：自动链 2026-11-10 08:12 完成（`chain.log`：chain COMPLETE）。训练 82/82（`COMPLETE.json` passed，无 missing/flags），无非有限梯度事件、无训练跳批；METR-LA UIGNN（批 4）每轮跳过 6 个无监督验证批，与种子 32 相同。测试计划 `configs/paper/seeds_test_20261106/plan.json`（`92f8956b…`），82 个测试，测试前验证重放全部一致（最大差 1.4e-5）；38 个种子 32 表复用。
+- **Observed**：METR-LA GinAR 种子 42（lr .001）验证 LifeAvg MAE 7.02，测试 Steady MAE 50.3 → LifeAvg 18.30；按协议不剔除不重跑。GinAR lr .001 种子 32 与论文 lr .006 种子 32 测试相近（METR-LA 7.043/7.092，PEMS-BAY 4.992/5.059）。种子 32 划分在 METR-LA/PEMS-BAY/PEMS08 偏易、PEMS04 偏难（基线中位偏差 −3.5/−2.3/+2.7/−3.1%）。
+- **Completed**（未提交）：`scripts/report_seeds_overview_20261110.py`；`paper/latex_neurips_20261020/results_seeds_20261106/{seeds_overview_20261110.xlsx,seeds_overview_20261110.json,README_CN.md}`（16 行方法，缺失种子留空）。暂定测试第一格（10 个三种子方法）：同种子 32 121/132；对均值 120/132（33/30/27/30）；对最好种子 95/132。
+- **Not started**：ALFNet、HD-TTS、STOP、MCPST、MetaDG 的种子 42/52（用户指示后续补充）。
+- **Next**：补跑后在 `collect()` 中加入新来源并重跑整理脚本；ALFNet 三种子补齐后以均值对均值重算第一格数。
+- **2026-11-10 后台残留**：发现 4 个本任务的后台轮询循环（PID 420328/420443/423832/427110），在等待已作废计划 `839232c9…` 的 `PREFLIGHT_COMPLETE.json`（永不出现），已运行约 4 天，仅 sleep，无 GPU；核对命令行后已 kill。tmux 服务器进程 437986 的命令行显示本任务的 new-session，但它同时承载他人会话（formal、streamlit*），不得 kill。教训：等待循环必须带超时并指向当前计划目录；任务结束前清理自己的后台等待。
+- **2026-11-10 用户下一步指令**：新会话中跑 ALFNet、MCPST、MetaDG 四个数据集三种子（已有结果复用），最多同时 5 个；STOP 不进入报告；ALFNet 先审计四个数据集当前配置是否为已跑超参数组合中的最优（胜格最多），再在最优配置下跑其他种子；后台监控只在会话内确认运行正常前使用，之后不留后台任务。新会话提示词：`docs/ai/handoffs/T-20261103-extension-experiments/NEXT_SESSION_PROMPT_CN.md`。
+
+## 检查点 7：ALFNet 配置审计（三种子前）— 2026-11-10 12:20
+
+- **用户指令（2026-11-10）**：跑 ALFNet、MCPST、MetaDG 四数据集三种子（种子 32 复用须重放一致），最多 5 个进程；训练前先审计 ALFNet 配置并汇报，若当前最终配置不是验证最优或验证与测试结论不一致则停下交由作者决定；不确定的候选可新开测试（对测试使用规则的明确例外）；HD-TTS、STOP 不进报告。
+- **Checked state**：HEAD `c1d1b2c`，分支 `paper/final`；开工时已有未提交改动（`docs/ai/*`、seeds_20261106 产物等），均保留未动。
+- **Facts**：
+  - 审计 `paper/alfnet_config_audit_20261110/`（`README_CN.md`、`candidates.json`、`candidates_summary.md`、`replay/`、`new_tests/`；脚本 `scripts/audit_alfnet_candidates_20261110.py`）。122 个种子 32 设置候选（METR-LA 20、PEMS-BAY 23、PEMS04 39、PEMS08 40），排除 76 个组件消融与 1 个种子 42 运行。选点、数据/划分身份、预算全部一致；当前代码在原研究上下文中重放 122/122 一致（最大差 0.0；`main/METRLA`、`main/PEMSBAY` 用内容相等的 `configs/paper/final_seed32/` 配置，因原嵌套配置已移动）。
+  - 验证第一格（对手集 8+Merlin+STONE+MCPST+MetaDG，GinAR 速度数据集 lr .001；改用 lr .006 计数不变）：当前最终 METR-LA 29（patch12 31、lr_double 30 更高）；PEMS-BAY 24（四方并列，按验证 LifeAvg MAE 排第 4）；PEMS04 26（三方并列，验证 LifeAvg 三项最差，但测试最好）；PEMS08 32（唯一最高）。
+  - 新开测试 1 次（授权）：PEMS-BAY `speed_support_20261004/PEMSBAY_center_half_lr2_wd1e-05`，验证重放 0.0，测试 LifeAvg 2.6790/4.1352/6.2317，测试第一 31/33（当前最终 2.7232/4.2006/6.2761，28/33）。
+  - 已测候选的验证-测试 Spearman：METR-LA 0.10（第一格）/−0.13（MAE）；PEMS-BAY 0.58/0.55；PEMS04 0.89/−0.13；PEMS08 0.87/−0.51。
+- **Completed（未提交）**：上述审计；三种子框架 `scripts/run_seeds2_20261110.py`（select/freeze/check/preflight/queue/worker/collect；ALFNet 按种子 32 研究上下文训练，预检含 1 个完整种子 32 epoch 与原第 0 轮记录比对，容差 rel 1e-3）、`scripts/test_seeds2_20261110.py`、`scripts/chain_seeds2_20261110.sh`、`scripts/report_seeds_overview2_20261110.py`（输出 `paper/latex_neurips_20261020/results_seeds2_20261110/`，试跑仅写 scratchpad）、`tests/test_seeds2_20261110.py`（6 passed、1 skipped：计划未冻结）。
+- **Not started**：选择文件、计划冻结、预检、训练、测试。
+- **Blocked on author decision**：四个数据集各用哪一个种子 32 配置（见审计 README“待作者决定”）。决定后：`run_seeds2_20261110.py select --choice ... --authority "<原话>"` → `freeze` → tmux `alfnet_seeds2_chain` 运行 `scripts/chain_seeds2_20261110.sh`。
+
+## 检查点 8：三种子计划冻结与启动（ALFNet、MCPST、MetaDG）— 2026-11-10 13:10
+
+- **作者决定（AskUserQuestion，2026-11-10）**：METR-LA “保留 patch7 (Recommended)”、PEMS-BAY “保留 combo2 (Recommended)”、PEMS04 “保留 bridge_delta1 (Recommended)”；PEMS08 保留 13_PEMS08_weight_decay_0.001（验证唯一最优）。记录于 `configs/paper/seeds2_20261110/alfnet_selection.json`。
+- **计划 v1 作废（未训练）**：`643ed7a4`（`configs/paper/seeds2_20261110/plan.superseded_643ed7a4_epoch0_validation_tolerance.json`）。预检中 ALFNet 第 0 轮复现门槛把 1 个 epoch 后的验证指标限在 rel 1e-3，PEMS-BAY（2.1e-2）、PEMS08（2.5e-2）未过，队列按设计未开训（`artifacts/experiments/seeds2_20261110/643ed7a4…/ATTENTION_REQUIRED.json`）。诊断 `artifacts/experiments/seeds2_20261110/diagnostics/`：当前代码独立复现彼此前 5–10 批逐位相同、之后漂移，一个 epoch 后验证差 1–4%，原运行落在新运行分布内（≤1.4 sd）；epoch 平均训练损失与原运行差 ≤1.2e-4（新运行之间 ≤3e-4）；负对照（PEMS08 漏掉 flow_unified adapter）训练损失 +24%、验证 +36%。PEMS08/PEMS-BAY/METR-LA/PEMS04 的 ALFNet 代码与配置哈希与原训练计划一致（`v4_runner.py` 等改动只涉及退役模型）。
+- **计划 v2**：`configs/paper/seeds2_20261110/plan.json`，plan_sha256 `d6f66d2073190a15ed4b8e9c6dd7a07dca5c2050c381c18257de4630fd67d06b`；36 条（12 对 × 种子 32/42/52），24 个新训练；种子 32 复用（重放门槛 abs 1e-5 + rel 1e-5，不过则加训）；ALFNet 训练上下文 METR-LA/PEMS-BAY 裸 runner、PEMS04 support、PEMS08 support+unified；第 0 轮复现门槛（对四个数据集一致）：计数/方法契约/参数量精确，epoch 平均训练损失 rel 1e-3 + abs 1e-6，验证指标 rel 0.1 粗检；全部运行带非有限梯度步守卫（每轮事件 >1% 失败）；runner 跳批计数，训练跳批 >1% 标记发散并在测试前停止；最多 5 并发。
+- **预检 v2**：12/12 通过（种子 32 重放全部 0.0；ALFNet 复现训练损失最大偏差 1.4e-4，aux 项按绝对容差；冒烟无守卫事件）。
+- **运行**：tmux `alfnet_seeds2_chain`（chain PID 2934198，`scripts/chain_seeds2_20261110.sh`，日志 `artifacts/experiments/seeds2_20261110/chain.log`），2026-11-10 12:55 启动。顺序：预检（5 分片）→ 训练队列（queue PID 2934211，≤5 并发，最长任务先跑；worker PID/日志/命令在 `artifacts/experiments/seeds2_20261110/d6f66d20…/queue_status.json`，日志 `<该目录>/<key>.log`）→ collect → 若 COMPLETE.passed 则冻结 `scripts/test_seeds2_20261110.py` 测试计划并测试（≤5）→ `scripts/report_seeds_overview2_20261110.py` 汇总到 `paper/latex_neurips_20261020/results_seeds2_20261110/`。首批 worker：PEMSBAY_MCPST_seed42 2939107、PEMSBAY_MCPST_seed52 2939469、PEMSBAY_ALFNet_seed42 2939848、PEMSBAY_ALFNet_seed52 2940226、PEMSBAY_MetaDG_seed42 2940595。
+- **停止方法**：`tmux kill-session -t alfnet_seeds2_chain`（只杀该会话，勿 kill tmux 服务器），再按 `queue_status.json` 中 status=running 的 pid 逐个核对命令行后 kill。中断的 worker 无续跑入口；重启队列会把 running 且无结果的标为 interrupted，不自动重跑。
+- **测试授权**：本轮新检查点各测试一次（用户 2026-11-10）；测试结果不得用于选择、调参、换方法或重跑。
+
+## 检查点 9：MetaDG PEMS-BAY 种子 42 失败与冻结恢复 — 2026-11-10 14:15
+
+- **Facts**：
+  - 13:39 `PEMSBAY_MetaDG_seed42`（worker PID 2940595）在第 0 轮结束时退出：非有限梯度步守卫记录 56 次（约为该轮约 1,950 批的 2.9%），超过计划的 1% 限额（`AssertionError: ('nonfinite-gradient steps', 56)`，日志 `artifacts/experiments/seeds2_20261110/d6f66d20…/PEMSBAY_MetaDG_seed42.log`）；守卫使参数保持有限；逐批事件未落盘。同数据集 `PEMSBAY_MetaDG_seed52` 第 0 轮在 1% 下正常（验证 MAE 3.455）。推测（未验证）：MetaDG DGQ 中 `exp(InstanceNorm(pos_mask)×2)` 在稀疏掩码时溢出，与种子 32 PEMS08 单次事件同类。
+  - 用户决定（AskUserQuestion）：“冻结 10% 恢复方案 (Recommended)”。恢复计划 `configs/paper/seeds2_recovery_metadg_20261110/plan.json`，plan_sha256 `694a8c243cc411b361774d354d8a060b8acee9d166d790d988890f2d3f149290`（`scripts/recover_seeds2_metadg_20261110.py`），在任何恢复结果前冻结：对 MetaDG 全部数据集/种子一致——主队列结束后，凡在 1% 限额下失败的 MetaDG 运行用同一配置/种子/上下文重跑，每轮限额改为 10%，逐事件记录（epoch、优化步序号、参数名），验证须有限；1% 下已完成的不重跑；其他类型失败不覆盖。10% 是在看到 2.9% 之后提出的，须披露。
+  - `scripts/test_seeds2_20261110.py` freeze 改为：主计划只缺恢复覆盖的运行时合并恢复行（并核对同 (数据集, 种子) 计数一致），否则拒绝冻结。
+- **运行中**：
+  - 主链 tmux `alfnet_seeds2_chain`（chain PID 2934198，queue PID 2934211）：14:13 时 5 个 worker 运行（PEMSBAY ALFNet s42/s52 各 5 轮；MCPST s42/s52、MetaDG s52 各 1 轮），18 个排队，1 个失败；显存约 55.8 GiB。主链在主队列结束后因 COMPLETE 缺 1 个运行而在测试前停止（预期）。
+  - 恢复链 tmux `alfnet_seeds2_recovery`（PID 3009623，`scripts/chain_seeds2_recovery_20261110.sh`，日志 `artifacts/experiments/seeds2_recovery_metadg_20261110/chain.log`）：每 5 分钟检查主队列（若主队列进程消失而仍有任务则停止）→ 恢复重跑 → 合并冻结测试计划 → 测试（≤5）→ 汇总 `paper/latex_neurips_20261020/results_seeds2_20261110/`。
+- **停止方法**：`tmux kill-session -t alfnet_seeds2_recovery`、`tmux kill-session -t alfnet_seeds2_chain`（只杀这两个会话），再按两个 `queue_status.json` 中 running 的 pid 核对命令行后 kill。
+- **Next**：训练与测试结束后核对 `COMPLETE.json`、恢复的事件比例、测试重放差，分析 `seeds_overview_20261110b.xlsx`（均值对均值与逐种子第一格）。
+
+## 检查点 10：三种子完成、核验与分析 — 2026-11-12
+
+- **Facts**：主链 2026-11-12 02:57 结束（23/23 完成，缺 `PEMSBAY_MetaDG_seed42`，按设计在测试前停止）；恢复链 05:18 `recovery chain COMPLETE`：恢复 1/1（第 0 轮 56 次守卫事件 = 2.87%，之后 0 次）、测试计划 `configs/paper/seeds2_test_20261110/plan.json`（`d7dda3a885fd046d009e3a71565c3ca5fe4ac02c7e52e31ecbad455dca069a09`，24 个新检查点各测一次，测试前重放差 0，12 个种子 32 表复用）、汇总。2026-11-12 复核：三个计划哈希检查通过；24 个运行验证有限、训练跳批 0；守卫事件另有 PEMS08 MetaDG 种子 52 1 次；测试计数与 2026-11-06 研究逐格一致；两个 tmux 会话已自行退出，无残留进程。
+- **结果**（测试，比较集 8+Merlin+STONE+MCPST+MetaDG）：三种子均值对均值第一格 33/28/30/30 = 121/132，四个数据集均 ≥27；同划分种子 32/42/52 为 118/104/102；只用种子 42/52 均值 31/22/25/28（PEMS-BAY、PEMS04 不足）；LifeAvg 三项均值在四个数据集全部第一，逐种子 35/36。丢失格集中于 Unseen（PEMS08 三项输 UIGNN 15–18%，PEMS04 MAE/RMSE 输 UIGNN）。验证主口径 29/25/30/31。
+- **Completed（未提交）**：`scripts/analyze_seeds2_20261112.py`；`paper/latex_neurips_20261020/results_seeds2_20261110/{seeds_overview_20261110b.xlsx,.json,seeds_analysis_20261112.xlsx,.json,README_CN.md}`。
+- **注意（论文写作）**：“≥80% 第一”依赖均值口径并含种子 32（其配置保留曾参考测试）；不宜写成各划分均成立。ALFNet 早停起始第 40 轮、MoGERNN 第 20 轮、其余第 0 轮，需披露。MetaDG PEMS-BAY 种子 42 的 10% 限额为事后提出，需披露。
+- **Not started**：论文正文与表格更新（需另行授权）；HD-TTS、STOP 的种子 42/52（已决定不进报告）。
+- **2026-11-12 导师版简表**：按作者示例 `___.xlsx` 版式生成 `paper/latex_neurips_20261020/results_seeds2_20261110/{main_phase_3seed_20261112.xlsx,ablation_seed32_20261112.xlsx}`（`scripts/make_advisor_tables_20261112.py`，只读冻结记录）。脚本内校验：示例 8 方法的种子 32 数值与论文现表逐格一致（速度数据集 GinAR 因 lr .001 不同）；两批消融的 Full 均为最终检查点、与论文 ALFNet 测试表一致。消融变差格数：w/o State Progress 25/30/29/24、w/o Adaptive Routing 30/33/29/26、w/o Spatial Context 33/32/28/33、w/o ALFTemporal–FiLM 33/28/31/33、w/o SAHC 33/30/29/31、w/o OS 33/30/30/24。
