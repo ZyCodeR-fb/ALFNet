@@ -8,7 +8,7 @@ The Markdown draft is the editing source; sections/*.tex are regenerated from it
 then uploaded to Overleaf. Re-running overwrites sections/, so merge any edits made
 directly in Overleaf back into the draft first.
 Citations [n] are mapped to BibTeX keys, figures/tables to \ref labels, display
-equations to numbered equation environments, and HTML/pipe tables to the generated
+equations to numbered equation environments, *text* to \\emph, and HTML/pipe tables to the generated
 tabular files under tables/. HTML comments (author notes) become LaTeX comments.
 """
 import os
@@ -28,17 +28,28 @@ for flag in ("--draft", "--out"):
             OUT = value
 
 CITE = {
-    1: "yin2025xxltraffic", 2: "zhou2025mogernn", 3: "roth2022forecasting", 4: "mei2023uncertainty", 5: "gupta2023frigate", 6: "lei2025stfit", 7: "yu2024ginar", 8: "yu2025merlin", 9: "marisca2024graph", 10: "che2018recurrent", 11: "chen2021trafficstream", 12: "wang2023pattern", 13: "liu2026general", 14: "wang2026cold", 15: "zhao2026structure", 16: "wang2024stone", 17: "ma2025robust", 18: "cini2022filling", 19: "fang2025efficient", 20: "zhang2023crossformer", 21: "perez2018film", 22: "wang2023graph", 23: "li2018diffusion", 24: "wu2021inductive", 25: "zheng2023increase", 26: "xu2025kits", 27: "su2024spatial", 28: "su2026generalising", 29: "prabowo2024traffic", 30: "liu2025spatiotemporal", 31: "liu2023pristi", 32: "cui2020graph", 33: "wang2023traffic", 34: "zuo2023graph", 35: "huang2026masmamba", 36: "yu2025ginarplus", 37: "chen2025expand", 38: "yu2018spatio", 39: "wu2019graph", 40: "bai2020adaptive", 41: "cini2023taming", 42: "shao2022spatial", 43: "jiang2023pdformer", 44: "lee2024testam", 45: "yun2024flexmoe", 46: "guo2019attention",
+    1: "yin2025xxltraffic", 2: "zhou2025mogernn", 3: "roth2022forecasting", 4: "mei2023uncertainty", 5: "gupta2023frigate", 6: "lei2025stfit", 7: "yu2024ginar", 8: "yu2025merlin", 9: "marisca2024graph", 10: "che2018recurrent", 11: "chen2021trafficstream", 12: "wang2023pattern", 13: "liu2026general", 14: "wang2026cold", 15: "zhao2026structure", 16: "wang2024stone", 17: "ma2025robust", 18: "cini2022filling", 19: "fang2025efficient", 20: "zhang2023crossformer", 21: "perez2018film", 22: "wang2023graph", 23: "li2018diffusion", 24: "wu2021inductive", 25: "zheng2023increase", 26: "xu2025kits", 27: "su2024spatial", 28: "su2026generalising", 29: "prabowo2024traffic", 30: "liu2025spatiotemporal", 31: "liu2023pristi", 32: "cui2020graph", 33: "wang2023traffic", 34: "zuo2023graph", 35: "huang2026masmamba", 36: "yu2025ginarplus", 37: "chen2025expand", 38: "yu2018spatio", 39: "wu2019graph", 40: "bai2020adaptive", 41: "cini2023taming", 42: "shao2022spatial", 43: "jiang2023pdformer", 44: "lee2024testam", 45: "yun2024flexmoe", 46: "guo2019attention", 47: "fofanah2026pimcst", 48: "zou2026meta",
 }
 FIG = {
     1: ("fig:arch", "figures/ALFNet.pdf", r"\textwidth"),
-    2: ("fig:condition", "figures/fig2_condition_stage_test.pdf", r"\textwidth"),
-    3: ("fig:trajectory", "figures/fig3_trajectory_val.pdf", r"\textwidth"),
-    4: ("fig:layout", "figures/fig4_layout_val.pdf", r"\textwidth"),
-    5: ("fig:hparam", "figures/fig5_hyperparameters_val.pdf", r"\textwidth"),
-    6: ("fig:cases", "figures/fig6_cases_val.pdf", r"\textwidth"),
+    2: ("fig:condition", "figures/fig2_phase_gain_3seed.pdf", r"\textwidth"),
+    3: ("fig:trajectory", "figures/fig3_response_4ds_val.pdf", r"\textwidth"),
+    4: ("fig:layout", "figures/fig4_layout_4ds_val.pdf", r"\textwidth"),
+    5: ("fig:hparam", "figures/fig5_hparams_val.pdf", r"\textwidth"),
+    6: ("fig:ratio", "figures/fig6_ratio_test.pdf", r"\textwidth"),
+    7: ("fig:cases", "figures/fig7_cases_4ds_val.pdf", r"\textwidth"),
+    "A1": ("fig:app-traj-diff", "figures/figA_trajectory_diff_val.pdf", r"\linewidth"),
+    "A2": ("fig:app-router", "figures/figA1_router_gates.pdf", r"\linewidth"),
 }
-TAB = {1: ("tab:main", "tables/main_lifeavg"), 2: ("tab:ablation", "tables/ablation_lifeavg")}
+TAB = {1: ("tab:main_speed", "tables/main_speed"), 2: ("tab:main_flow", "tables/main_flow"),
+       3: ("tab:ablation", "tables/ablation_lifeavg")}
+# appendix: the text is in the draft (sections "附录A", "附录B"); the tabular files come from make_appendix.py
+APP_TAB = {1: "tab:app-lifeavg", 2: "tab:app-phase-metrla", 3: "tab:app-phase-pemsbay", 4: "tab:app-phase-pems04",
+           5: "tab:app-phase-pems08", 6: "tab:app-abl-scenario", 7: "tab:app-abl-phase", 8: "tab:app-ratio"}
+APP_TAB_FILE = {1: "app_lifeavg", 2: "app_phase_metrla", 3: "app_phase_pemsbay", 4: "app_phase_pems04",
+                5: "app_phase_pems08", 6: "app_ablation_scenario", 7: "app_ablation_phase", 8: "app_ratio"}
+APP_TAB_NO_RESIZE = set()
+APP_FIG = {n: FIG[f"A{n}"][0] for n in (1, 2)}
 PIPE_TABLES = ["tables/datasets", "tables/settings", "tables/hparam_grid"]
 FILES = {"摘要": "abstract", "1": "introduction", "2": "related_work", "3": "method",
          "4": "experiments", "5": "conclusion"}
@@ -73,14 +84,20 @@ def inline(text):
         if is_math:
             pieces.append(chunk)
             continue
-        chunk = chunk.replace("%", r"\%").replace("\\*", "*").replace("→", r"$\to$")
+        chunk = chunk.replace("%", r"\%").replace("→", r"$\to$")
         chunk = re.sub(r"\*\*(.+?)\*\*", r"\\textbf{\1}", chunk)
+        chunk = re.sub(r"(?<![\\*])\*([^*]+?)(?<!\\)\*(?!\*)", r"\\emph{\1}", chunk)
+        chunk = chunk.replace("\\*", "*")
         chunk = re.sub(r"\s*\[(\d+(?:\s*[,–]\s*\d+)*)\]", cite, chunk)
         chunk = re.sub(r"第([2-5])节", lambda m: "第\\ref{" + SECTION_LABEL[m.group(1)] + "}节", chunk)
         chunk = re.sub(r"(?<![\d.])([2-5])\.([1-8])(?![\d%\\])",
                        lambda m: "\\ref{sec:" + m.group(1) + "_" + m.group(2) + "}", chunk)
-        chunk = re.sub(r"图([1-6])(?![\d])", lambda m: "图\\ref{" + FIG[int(m.group(1))][0] + "}", chunk)
-        chunk = re.sub(r"表([12])(?![\d])", lambda m: "表\\ref{" + TAB[int(m.group(1))][0] + "}", chunk)
+        chunk = re.sub(r"表A([1-9])–A([1-9])", lambda m: "表\\ref{" + APP_TAB[int(m.group(1))] + "}--\\ref{"
+                       + APP_TAB[int(m.group(2))] + "}", chunk)
+        chunk = re.sub(r"表A([1-9])(?![\d])", lambda m: "表\\ref{" + APP_TAB[int(m.group(1))] + "}", chunk)
+        chunk = re.sub(r"图A([1-9])(?![\d])", lambda m: "图\\ref{" + APP_FIG[int(m.group(1))] + "}", chunk)
+        chunk = re.sub(r"图([1-7])(?![\d])", lambda m: "图\\ref{" + FIG[int(m.group(1))][0] + "}", chunk)
+        chunk = re.sub(r"表([1-3])(?![\d])", lambda m: "表\\ref{" + TAB[int(m.group(1))][0] + "}", chunk)
         chunk = re.sub(r"式\((\d+)\)", lambda m: "式~\\eqref{eq:" + m.group(1) + "}", chunk)
         pieces.append(chunk)
     return "".join(pieces)
@@ -121,11 +138,11 @@ def convert_block(lines, pipe_counter):
                     notes.append(lines[j].replace("<!--", "").replace("-->", "").strip())
                 j += 1
             cap = lines[j]
-            n = int(re.match(r"\*\*图(\d)", cap).group(1))
-            label, path, width = FIG[n]
-            m = re.match(r"\*\*图\d\u3000(.+?)\*\*\s*(.*)", cap)
+            n = re.match(r"\*\*图(A?\d)", cap).group(1)
+            label, path, width = FIG[n if n.startswith("A") else int(n)]
+            m = re.match(r"\*\*图A?\d\u3000(.+?)\*\*\s*(.*)", cap)
             caption = "\\textbf{" + inline(m.group(1)) + "}" + inline(m.group(2))
-            out += ["\\begin{figure}[t]", "\\centering"]
+            out += ["\\begin{figure}[tp]" if n.startswith("A") else "\\begin{figure}[t]", "\\centering"]
             out += ["% " + note for note in notes]
             out += [f"\\includegraphics[width={width}]{{{path}}}",
                     f"\\caption{{{caption}}}", f"\\label{{{label}}}", "\\end{figure}"]
@@ -139,10 +156,18 @@ def convert_block(lines, pipe_counter):
             while not lines[i].startswith("</table>"):
                 i += 1
             i += 1
-            n = int(re.match(r"\*\*表(\d)", pending_caption).group(1))
-            label, path = TAB[n]
-            m = re.match(r"\*\*表\d\u3000(.+?)\*\*\s*(.*)", pending_caption)
+            n = re.match(r"\*\*表(A?\d)", pending_caption).group(1)
+            m = re.match(r"\*\*表A?\d\u3000(.+?)\*\*\s*(.*)", pending_caption)
             caption = "\\textbf{" + inline(m.group(1)) + "}" + inline(m.group(2))
+            if n.startswith("A"):
+                k = int(n[1:])
+                body = f"\\input{{tables/{APP_TAB_FILE[k]}}}"
+                out += ["\\begin{table}[p]", "\\centering", f"\\caption{{{caption}}}", f"\\label{{{APP_TAB[k]}}}",
+                        "\\small", body if k in APP_TAB_NO_RESIZE else f"\\resizebox{{\\linewidth}}{{!}}{{{body}}}",
+                        "\\end{table}"]
+                pending_caption = None
+                continue
+            label, path = TAB[int(n)]
             out += ["\\begin{table}[t]", f"\\caption{{{caption}}}", f"\\label{{{label}}}",
                     "\\centering", "\\small", "\\setlength{\\tabcolsep}{3pt}",
                     f"\\resizebox{{\\linewidth}}{{!}}{{\\input{{{path}}}}}", "\\end{table}"]
@@ -156,7 +181,7 @@ def convert_block(lines, pipe_counter):
             out += ["\\begin{center}", "\\small", f"\\resizebox{{\\linewidth}}{{!}}{{\\input{{{path}}}}}",
                     "\\end{center}"]
             continue
-        heading = re.match(r"^(#{2,3}) (?:(\d)(?:\.(\d))? )?(.+)$", line)
+        heading = re.match(r"^(#{2,3}) (?:([\dAB])(?:\.(\d))? )?(.+)$", line)
         if heading:
             level, major, minor, title = heading.groups()
             if level == "###":
@@ -170,17 +195,23 @@ def convert_block(lines, pipe_counter):
 
 def main():
     text = open(DRAFT, encoding="utf-8").read()
-    text = text.split("## 参考文献")[0]
+    text, _, tail = text.partition("## 参考文献")  # the appendix follows the reference list
+    if "\n## 附录" in tail:
+        text += tail[tail.index("\n## 附录") + 1:]
     head_comment = re.match(r"\s*# .*?\n\n(<!--.*?-->)", text, flags=re.S)
     chunks = re.split(r"^(## .+)$", text, flags=re.M)
     os.makedirs(OUT, exist_ok=True)
     pipe_counter = [0]
-    written = []
+    written, appendix = [], []
     for idx in range(1, len(chunks), 2):
         heading = chunks[idx][3:].strip()
         body = chunks[idx + 1].strip("\n").split("\n")
         number = heading.split(" ")[0]
         name = FILES.get(number, FILES.get(heading))
+        if heading.startswith("附录"):  # "附录A 标题": both appendix sections go to one file
+            letter, title = heading[2], heading.split(" ", 1)[1]
+            appendix += [f"\\section{{{title}}}\\label{{app:{letter}}}"] + convert_block(body, pipe_counter) + [""]
+            continue
         if name is None:
             continue
         lines = []
@@ -198,6 +229,11 @@ def main():
         with open(os.path.join(OUT, name + ".tex"), "w", encoding="utf-8", newline="\n") as handle:
             handle.write(content)
         written.append(name)
+    if appendix:
+        content = re.sub(r"\n{3,}", "\n\n", "\n".join(appendix).strip() + "\n")
+        with open(os.path.join(OUT, "appendix.tex"), "w", encoding="utf-8", newline="\n") as handle:
+            handle.write("% Generated by _scripts/md_to_tex.py from the draft; tables by _scripts/make_appendix.py.\n" + content)
+        written.append("appendix")
     if pipe_counter[0] != len(PIPE_TABLES):
         sys.exit(f"expected {len(PIPE_TABLES)} pipe tables, converted {pipe_counter[0]}")
     print("wrote", ", ".join(written))

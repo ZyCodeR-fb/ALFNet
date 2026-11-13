@@ -1,31 +1,23 @@
 {
   "generated_by": "paper/latex_neurips_20261020/_scripts/make_tables.py",
   "sources": {
-    "selected_tables": {
-      "path": "paper/pems08_wd_test_20261012/selected_tables.json",
-      "sha256": "9dab33bf25cec63b9bdab82b378e48c4c441ecffb8773e6f8e1afdf01134af65"
-    },
-    "summary": {
-      "path": "paper/pems08_wd_test_20261012/summary.json",
-      "sha256": "c99e9996d64fb695df68948d933d982af28e58afeee7d7de0d7a37e450075ebb"
-    },
     "manifest": {
       "path": "paper/pems08_wd_test_20261012/selected_configuration_manifest.json",
-      "sha256": "806a82f9be86c62913d4ebab1501af8dad84da07228a73f4a681c926e1ea59ae"
+      "sha256": "28e6a9b6fc1abcdf00c38d4624d7c3d3366a25510990d87365d72c119e7a23ec"
     },
     "ablation": {
       "path": "paper/pems08_wd_ablation_test_20261012/four_dataset_results.json",
-      "sha256": "6d607e0b58d110cc3b89cb520be76bcd89a5958fe770ad098e2c4b2ab6e9338d"
+      "sha256": "111b732d30f1095f69c891ba52278bd1dd5f9cd2b206b2ce39fb2a64d0f9fb6f"
     },
     "hparams": {
       "path": "paper/final_figures_20261017/validation/fig5_values.csv",
-      "sha256": "0a92eb9619363139dabc375d75563a3acb4d087134448f954de1f3991eb9efd1"
+      "sha256": "63d078678ebe12c1541a5c824d0a3666e7c15a492f6dbe5f23dbcabcbf14b5cd"
     }
   },
   "datasets": {
     "METRLA": {
       "manifest": "configs/paper/v4_data_manifests/METRLA_run_manifest.json",
-      "manifest_sha256": "772822f0888e6825db473362c02c6a4fcf4da49cd5415de082fb5f6f6ae561c0",
+      "manifest_sha256": "207351746a6c5e52fc886171cbed766f93b4c0ae8d53ea65c0cedf44ece5f834",
       "nodes": 207,
       "time_range": [
         "2012-03-01T00:00:00.000000000",
@@ -39,7 +31,7 @@
     },
     "PEMSBAY": {
       "manifest": "configs/paper/v4_data_manifests/PEMSBAY_run_manifest.json",
-      "manifest_sha256": "beda1ac8d62d0be357680ff7bd578db0def7b80de43513a15027ab7874d5f26e",
+      "manifest_sha256": "b644841cfda67d19c171deece8e94affb9899533564e35b74e2f78363bde8bd3",
       "nodes": 325,
       "time_range": [
         "2017-01-01T00:00:00.000000000",
@@ -53,7 +45,7 @@
     },
     "PEMS04": {
       "manifest": "configs/paper/v4_data_manifests/PEMS04_run_manifest.json",
-      "manifest_sha256": "cf2a6dfd7fb11696f05759ef3ca97bea6aa355db665f949c0cbc7011889ee73c",
+      "manifest_sha256": "57798fafc40ff10cd83fda40206004b59918f47248db069965c7825b65b56ac3",
       "nodes": 307,
       "time_range": [
         "2018-01-01T00:00:00.000000000",
@@ -67,7 +59,7 @@
     },
     "PEMS08": {
       "manifest": "configs/paper/v4_data_manifests/PEMS08_run_manifest.json",
-      "manifest_sha256": "be1c08cada669a0dc3ceb2741605581bd422d5afdbac96f733dce043699a0ce2",
+      "manifest_sha256": "dbb807c5d344e5594bb901b753d1c0c9ee633202e430f9d7a53aae2fcd5fca16",
       "nodes": 170,
       "time_range": [
         "2016-07-01T00:00:00.000000000",
@@ -310,37 +302,1275 @@
       }
     }
   },
-  "summary_lifeavg_gain_percent": {
-    "METRLA": {
-      "first": 33,
-      "lifeavg_gain": {
-        "MAE": 15.627393042762105,
-        "RMSE": 10.562471985672662,
-        "MAPE": 16.31751285728037
+  "three_seed_comparison": {
+    "seeds": [
+      32,
+      42,
+      52
+    ],
+    "statistics": "mean and sample std (ddof=1) over seeds, test set",
+    "test_plans_sha256": {
+      "first": "92f8956bf99c8e97d2b0f6fc1b68392016e540d793572756728d870f86575ab1",
+      "second": "d7dda3a885fd046d009e3a71565c3ca5fe4ac02c7e52e31ecbad455dca069a09"
+    },
+    "methods": [
+      "MoGERNN",
+      "SLPF",
+      "GinAR",
+      "Merlin",
+      "STONE",
+      "MCPST",
+      "STBP",
+      "STGCN",
+      "STID",
+      "PatchSTG",
+      "MetaDG",
+      "ALFNet"
+    ],
+    "groups": [
+      [
+        "未观测位置的归纳预测",
+        [
+          "MoGERNN",
+          "SLPF"
+        ]
+      ],
+      [
+        "不完整观测下的预测",
+        [
+          "GinAR",
+          "Merlin"
+        ]
+      ],
+      [
+        "传感网络变化与跨路网泛化",
+        [
+          "STONE",
+          "MCPST",
+          "STBP"
+        ]
+      ],
+      [
+        "时空预测主干",
+        [
+          "STGCN",
+          "STID",
+          "PatchSTG",
+          "MetaDG"
+        ]
+      ]
+    ],
+    "venues": {
+      "MoGERNN": "TR-C, 2025",
+      "SLPF": "TMLR, 2025",
+      "GinAR": "KDD, 2024",
+      "Merlin": "KDD, 2025",
+      "STONE": "KDD, 2024",
+      "MCPST": "arXiv, 2026",
+      "STBP": "ICLR, 2026",
+      "STGCN": "IJCAI, 2018",
+      "STID": "CIKM, 2022",
+      "PatchSTG": "KDD, 2025",
+      "MetaDG": "AAAI, 2026"
+    },
+    "summary": {
+      "METRLA": {
+        "first_scenarios_of_12": 12,
+        "first_lifeavg_of_3": 3,
+        "first_phases_of_18": 18,
+        "first_all_of_33": 33,
+        "cells": {
+          "Unseen/MAE": {
+            "alfnet": 5.739764312023616,
+            "best_baseline": "MoGERNN",
+            "best_value": 6.099885526378498,
+            "gain_percent": 5.9037372553561,
+            "first": true
+          },
+          "Unseen/RMSE": {
+            "alfnet": 8.030534173802366,
+            "best_baseline": "MoGERNN",
+            "best_value": 8.365213304907096,
+            "gain_percent": 4.000843958257527,
+            "first": true
+          },
+          "Unseen/MAPE": {
+            "alfnet": 14.818168681358964,
+            "best_baseline": "MoGERNN",
+            "best_value": 16.27829031111354,
+            "gain_percent": 8.969748062287108,
+            "first": true
+          },
+          "Steady/MAE": {
+            "alfnet": 3.4812345974129943,
+            "best_baseline": "STBP",
+            "best_value": 3.638376916147429,
+            "gain_percent": 4.319022529991978,
+            "first": true
+          },
+          "Steady/RMSE": {
+            "alfnet": 5.663682443227228,
+            "best_baseline": "STBP",
+            "best_value": 5.937467140279124,
+            "gain_percent": 4.611136206456978,
+            "first": true
+          },
+          "Steady/MAPE": {
+            "alfnet": 10.207750323191659,
+            "best_baseline": "STBP",
+            "best_value": 10.555134891110333,
+            "gain_percent": 3.2911428560827294,
+            "first": true
+          },
+          "Join/MAE": {
+            "alfnet": 3.967821313368988,
+            "best_baseline": "MetaDG",
+            "best_value": 4.245872096862301,
+            "gain_percent": 6.548731971902599,
+            "first": true
+          },
+          "Join/RMSE": {
+            "alfnet": 6.318042263753772,
+            "best_baseline": "Merlin",
+            "best_value": 6.908054154326989,
+            "gain_percent": 8.540927407230193,
+            "first": true
+          },
+          "Join/MAPE": {
+            "alfnet": 11.553664136667363,
+            "best_baseline": "Merlin",
+            "best_value": 12.097364807028613,
+            "gain_percent": 4.494372774848932,
+            "first": true
+          },
+          "Fault/MAE": {
+            "alfnet": 3.8291678483968337,
+            "best_baseline": "STBP",
+            "best_value": 4.343619086708582,
+            "gain_percent": 11.843838698608778,
+            "first": true
+          },
+          "Fault/RMSE": {
+            "alfnet": 6.072621535063637,
+            "best_baseline": "MoGERNN",
+            "best_value": 6.705909009631885,
+            "gain_percent": 9.443723045729357,
+            "first": true
+          },
+          "Fault/MAPE": {
+            "alfnet": 11.235476444352216,
+            "best_baseline": "MoGERNN",
+            "best_value": 13.263088524347452,
+            "gain_percent": 15.28763135579686,
+            "first": true
+          },
+          "LifeAvg/MAE": {
+            "alfnet": 4.254497017800608,
+            "best_baseline": "MoGERNN",
+            "best_value": 4.8484396841334885,
+            "gain_percent": 12.25018160536383,
+            "first": true
+          },
+          "LifeAvg/RMSE": {
+            "alfnet": 6.52122010396175,
+            "best_baseline": "MoGERNN",
+            "best_value": 7.056095935052194,
+            "gain_percent": 7.58033671896905,
+            "first": true
+          },
+          "LifeAvg/MAPE": {
+            "alfnet": 11.953764896392551,
+            "best_baseline": "MoGERNN",
+            "best_value": 13.716082734499246,
+            "gain_percent": 12.84855065560403,
+            "first": true
+          },
+          "Cold/MAE": {
+            "alfnet": 4.385552365451893,
+            "best_baseline": "Merlin",
+            "best_value": 4.640236482504517,
+            "gain_percent": 5.48860210062313,
+            "first": true
+          },
+          "Cold/RMSE": {
+            "alfnet": 6.501036859782346,
+            "best_baseline": "MoGERNN",
+            "best_value": 7.090693847169768,
+            "gain_percent": 8.315927892201724,
+            "first": true
+          },
+          "Cold/MAPE": {
+            "alfnet": 12.240067804509962,
+            "best_baseline": "Merlin",
+            "best_value": 13.043527139043535,
+            "gain_percent": 6.159831815188676,
+            "first": true
+          },
+          "Warm/MAE": {
+            "alfnet": 3.960397922994583,
+            "best_baseline": "MetaDG",
+            "best_value": 4.197668324091818,
+            "gain_percent": 5.652433274336155,
+            "first": true
+          },
+          "Warm/RMSE": {
+            "alfnet": 6.333867289419515,
+            "best_baseline": "Merlin",
+            "best_value": 6.91268767102829,
+            "gain_percent": 8.373304410015002,
+            "first": true
+          },
+          "Warm/MAPE": {
+            "alfnet": 11.612503152503272,
+            "best_baseline": "Merlin",
+            "best_value": 12.119208951593498,
+            "gain_percent": 4.1810138030799475,
+            "first": true
+          },
+          "Ready/MAE": {
+            "alfnet": 3.624324165030125,
+            "best_baseline": "MetaDG",
+            "best_value": 3.876879715241511,
+            "gain_percent": 6.5144025288814795,
+            "first": true
+          },
+          "Ready/RMSE": {
+            "alfnet": 5.976797411067772,
+            "best_baseline": "MetaDG",
+            "best_value": 6.512015206570795,
+            "gain_percent": 8.218927298618317,
+            "first": true
+          },
+          "Ready/MAPE": {
+            "alfnet": 10.278870310465662,
+            "best_baseline": "Merlin",
+            "best_value": 10.932761029364846,
+            "gain_percent": 5.981020870600451,
+            "first": true
+          },
+          "Onset/MAE": {
+            "alfnet": 3.6810866659945787,
+            "best_baseline": "STBP",
+            "best_value": 3.9538532721154227,
+            "gain_percent": 6.898753882561404,
+            "first": true
+          },
+          "Onset/RMSE": {
+            "alfnet": 5.883664175281574,
+            "best_baseline": "STBP",
+            "best_value": 6.271849758422081,
+            "gain_percent": 6.189331665976805,
+            "first": true
+          },
+          "Onset/MAPE": {
+            "alfnet": 10.75695841846452,
+            "best_baseline": "Merlin",
+            "best_value": 11.240783042105834,
+            "gain_percent": 4.3041896799270845,
+            "first": true
+          },
+          "Decay/MAE": {
+            "alfnet": 3.8070211798509295,
+            "best_baseline": "STBP",
+            "best_value": 4.296014969769328,
+            "gain_percent": 11.382497346014953,
+            "first": true
+          },
+          "Decay/RMSE": {
+            "alfnet": 6.042162375610791,
+            "best_baseline": "MoGERNN",
+            "best_value": 6.65043959774884,
+            "gain_percent": 9.146421273323801,
+            "first": true
+          },
+          "Decay/MAPE": {
+            "alfnet": 11.14330133574903,
+            "best_baseline": "MoGERNN",
+            "best_value": 13.042407659850975,
+            "gain_percent": 14.561010310604294,
+            "first": true
+          },
+          "Outage/MAE": {
+            "alfnet": 4.198715716258133,
+            "best_baseline": "STGCN",
+            "best_value": 5.043574134753924,
+            "gain_percent": 16.75118469408623,
+            "first": true
+          },
+          "Outage/RMSE": {
+            "alfnet": 6.5661704893741595,
+            "best_baseline": "MoGERNN",
+            "best_value": 7.610955709177579,
+            "gain_percent": 13.727385360337562,
+            "first": true
+          },
+          "Outage/MAPE": {
+            "alfnet": 12.635745556271765,
+            "best_baseline": "MoGERNN",
+            "best_value": 16.247244141075267,
+            "gain_percent": 22.22837641537704,
+            "first": true
+          }
+        }
+      },
+      "PEMSBAY": {
+        "first_scenarios_of_12": 10,
+        "first_lifeavg_of_3": 3,
+        "first_phases_of_18": 15,
+        "first_all_of_33": 28,
+        "cells": {
+          "Unseen/MAE": {
+            "alfnet": 4.596086796210037,
+            "best_baseline": "MoGERNN",
+            "best_value": 4.597954260780585,
+            "gain_percent": 0.040615118477305145,
+            "first": true
+          },
+          "Unseen/RMSE": {
+            "alfnet": 6.5877932780025406,
+            "best_baseline": "MoGERNN",
+            "best_value": 6.480350984576642,
+            "gain_percent": -1.6579702809556673,
+            "first": false
+          },
+          "Unseen/MAPE": {
+            "alfnet": 11.251567829918377,
+            "best_baseline": "MoGERNN",
+            "best_value": 11.491576689042745,
+            "gain_percent": 2.0885633505210555,
+            "first": true
+          },
+          "Steady/MAE": {
+            "alfnet": 1.817238575203499,
+            "best_baseline": "PatchSTG",
+            "best_value": 1.823529669175519,
+            "gain_percent": 0.3449954271851463,
+            "first": true
+          },
+          "Steady/RMSE": {
+            "alfnet": 3.063007586318004,
+            "best_baseline": "PatchSTG",
+            "best_value": 3.0845609364334465,
+            "gain_percent": 0.698749370157159,
+            "first": true
+          },
+          "Steady/MAPE": {
+            "alfnet": 4.329735532541091,
+            "best_baseline": "PatchSTG",
+            "best_value": 4.267853987910207,
+            "gain_percent": -1.4499452138282853,
+            "first": false
+          },
+          "Join/MAE": {
+            "alfnet": 2.3578416989816247,
+            "best_baseline": "Merlin",
+            "best_value": 2.452518928185275,
+            "gain_percent": 3.860407685974765,
+            "first": true
+          },
+          "Join/RMSE": {
+            "alfnet": 3.941695962078443,
+            "best_baseline": "Merlin",
+            "best_value": 4.098414676315314,
+            "gain_percent": 3.8238862246552707,
+            "first": true
+          },
+          "Join/MAPE": {
+            "alfnet": 5.8058502963840795,
+            "best_baseline": "STBP",
+            "best_value": 5.8715393608376045,
+            "gain_percent": 1.1187707416501769,
+            "first": true
+          },
+          "Fault/MAE": {
+            "alfnet": 2.255353978873577,
+            "best_baseline": "PatchSTG",
+            "best_value": 2.3633769864439955,
+            "gain_percent": 4.570705739711601,
+            "first": true
+          },
+          "Fault/RMSE": {
+            "alfnet": 3.651024889538904,
+            "best_baseline": "PatchSTG",
+            "best_value": 3.8569370810803068,
+            "gain_percent": 5.338749043936386,
+            "first": true
+          },
+          "Fault/MAPE": {
+            "alfnet": 5.439578739871514,
+            "best_baseline": "PatchSTG",
+            "best_value": 5.8251267525790125,
+            "gain_percent": 6.618705979862172,
+            "first": true
+          },
+          "LifeAvg/MAE": {
+            "alfnet": 2.7566302623171843,
+            "best_baseline": "MoGERNN",
+            "best_value": 3.188194957952867,
+            "gain_percent": 13.536333296028713,
+            "first": true
+          },
+          "LifeAvg/RMSE": {
+            "alfnet": 4.310880428984473,
+            "best_baseline": "MoGERNN",
+            "best_value": 4.821618683622867,
+            "gain_percent": 10.59267204959965,
+            "first": true
+          },
+          "LifeAvg/MAPE": {
+            "alfnet": 6.706683099678766,
+            "best_baseline": "MoGERNN",
+            "best_value": 7.950739733399977,
+            "gain_percent": 15.64705518525652,
+            "first": true
+          },
+          "Cold/MAE": {
+            "alfnet": 2.4495788689173885,
+            "best_baseline": "Merlin",
+            "best_value": 2.5076528839215335,
+            "gain_percent": 2.315871362280708,
+            "first": true
+          },
+          "Cold/RMSE": {
+            "alfnet": 3.9189373272049064,
+            "best_baseline": "Merlin",
+            "best_value": 4.091493048330172,
+            "gain_percent": 4.217426721418704,
+            "first": true
+          },
+          "Cold/MAPE": {
+            "alfnet": 5.906743946691367,
+            "best_baseline": "Merlin",
+            "best_value": 5.876382472365627,
+            "gain_percent": -0.5166694725627252,
+            "first": false
+          },
+          "Warm/MAE": {
+            "alfnet": 2.354186530942343,
+            "best_baseline": "Merlin",
+            "best_value": 2.454976395181315,
+            "gain_percent": 4.105532926377819,
+            "first": true
+          },
+          "Warm/RMSE": {
+            "alfnet": 3.9507076085840573,
+            "best_baseline": "Merlin",
+            "best_value": 4.108773906205791,
+            "gain_percent": 3.8470429678058915,
+            "first": true
+          },
+          "Warm/MAPE": {
+            "alfnet": 5.809300783403955,
+            "best_baseline": "STBP",
+            "best_value": 5.847096812206769,
+            "gain_percent": 0.6464067556382513,
+            "first": true
+          },
+          "Ready/MAE": {
+            "alfnet": 2.3026562094386804,
+            "best_baseline": "Merlin",
+            "best_value": 2.3728103024886167,
+            "gain_percent": 2.9565824531509466,
+            "first": true
+          },
+          "Ready/RMSE": {
+            "alfnet": 3.874338131895841,
+            "best_baseline": "Merlin",
+            "best_value": 4.001744005395683,
+            "gain_percent": 3.183758714401941,
+            "first": true
+          },
+          "Ready/MAPE": {
+            "alfnet": 5.670451775878025,
+            "best_baseline": "STBP",
+            "best_value": 5.512582678436776,
+            "gain_percent": -2.8637955501107593,
+            "first": false
+          },
+          "Onset/MAE": {
+            "alfnet": 1.9344144512319599,
+            "best_baseline": "PatchSTG",
+            "best_value": 2.0865488041270517,
+            "gain_percent": 7.29119551836892,
+            "first": true
+          },
+          "Onset/RMSE": {
+            "alfnet": 3.153134234853543,
+            "best_baseline": "PatchSTG",
+            "best_value": 3.3852762913194607,
+            "gain_percent": 6.857403546681773,
+            "first": true
+          },
+          "Onset/MAPE": {
+            "alfnet": 4.520347234878521,
+            "best_baseline": "PatchSTG",
+            "best_value": 5.099701217251174,
+            "gain_percent": 11.360547563312629,
+            "first": true
+          },
+          "Decay/MAE": {
+            "alfnet": 2.2283387720480197,
+            "best_baseline": "PatchSTG",
+            "best_value": 2.351933460581788,
+            "gain_percent": 5.255024880814241,
+            "first": true
+          },
+          "Decay/RMSE": {
+            "alfnet": 3.624119409923896,
+            "best_baseline": "PatchSTG",
+            "best_value": 3.8376616874059217,
+            "gain_percent": 5.564385161485408,
+            "first": true
+          },
+          "Decay/MAPE": {
+            "alfnet": 5.401718041505603,
+            "best_baseline": "PatchSTG",
+            "best_value": 5.792320819257317,
+            "gain_percent": 6.743458968175675,
+            "first": true
+          },
+          "Outage/MAE": {
+            "alfnet": 2.8464455747707667,
+            "best_baseline": "PatchSTG",
+            "best_value": 2.7546404273830145,
+            "gain_percent": -3.3327452278397507,
+            "first": false
+          },
+          "Outage/RMSE": {
+            "alfnet": 4.417970340374344,
+            "best_baseline": "PatchSTG",
+            "best_value": 4.521351807584998,
+            "gain_percent": 2.2865167677777576,
+            "first": true
+          },
+          "Outage/MAPE": {
+            "alfnet": 6.7374172285236185,
+            "best_baseline": "PatchSTG",
+            "best_value": 6.8786116211238175,
+            "gain_percent": 2.0526583034081947,
+            "first": true
+          }
+        }
+      },
+      "PEMS04": {
+        "first_scenarios_of_12": 10,
+        "first_lifeavg_of_3": 3,
+        "first_phases_of_18": 17,
+        "first_all_of_33": 30,
+        "cells": {
+          "Unseen/MAE": {
+            "alfnet": 72.08306278431154,
+            "best_baseline": "MoGERNN",
+            "best_value": 70.6260428654716,
+            "gain_percent": -2.0630065903809225,
+            "first": false
+          },
+          "Unseen/RMSE": {
+            "alfnet": 92.62320121438852,
+            "best_baseline": "MoGERNN",
+            "best_value": 91.04617755286112,
+            "gain_percent": -1.7321140809143598,
+            "first": false
+          },
+          "Unseen/MAPE": {
+            "alfnet": 55.35102340160197,
+            "best_baseline": "SLPF",
+            "best_value": 66.69174987926186,
+            "gain_percent": 17.004691732022394,
+            "first": true
+          },
+          "Steady/MAE": {
+            "alfnet": 23.657171462920957,
+            "best_baseline": "STID",
+            "best_value": 24.15260627450427,
+            "gain_percent": 2.051268529584316,
+            "first": true
+          },
+          "Steady/RMSE": {
+            "alfnet": 33.11901170720807,
+            "best_baseline": "PatchSTG",
+            "best_value": 34.013384991682095,
+            "gain_percent": 2.6294744986208984,
+            "first": true
+          },
+          "Steady/MAPE": {
+            "alfnet": 14.36432438757887,
+            "best_baseline": "MetaDG",
+            "best_value": 15.221831410141505,
+            "gain_percent": 5.633402443225865,
+            "first": true
+          },
+          "Join/MAE": {
+            "alfnet": 25.48132396402428,
+            "best_baseline": "STID",
+            "best_value": 26.505923142650477,
+            "gain_percent": 3.865547987564799,
+            "first": true
+          },
+          "Join/RMSE": {
+            "alfnet": 36.15512048562985,
+            "best_baseline": "STID",
+            "best_value": 38.18983951052099,
+            "gain_percent": 5.327906718043662,
+            "first": true
+          },
+          "Join/MAPE": {
+            "alfnet": 18.053617498395237,
+            "best_baseline": "MetaDG",
+            "best_value": 20.080549281413095,
+            "gain_percent": 10.094005669924677,
+            "first": true
+          },
+          "Fault/MAE": {
+            "alfnet": 30.139058032279518,
+            "best_baseline": "PatchSTG",
+            "best_value": 31.960768801552575,
+            "gain_percent": 5.699834007699344,
+            "first": true
+          },
+          "Fault/RMSE": {
+            "alfnet": 40.900356482912514,
+            "best_baseline": "PatchSTG",
+            "best_value": 43.09833398131453,
+            "gain_percent": 5.099912909290094,
+            "first": true
+          },
+          "Fault/MAPE": {
+            "alfnet": 19.732805258341234,
+            "best_baseline": "MetaDG",
+            "best_value": 22.254269463688132,
+            "gain_percent": 11.330249278508663,
+            "first": true
+          },
+          "LifeAvg/MAE": {
+            "alfnet": 37.84015406088407,
+            "best_baseline": "STGCN",
+            "best_value": 44.49363591177244,
+            "gain_percent": 14.953783197403169,
+            "first": true
+          },
+          "LifeAvg/RMSE": {
+            "alfnet": 50.699422472534735,
+            "best_baseline": "STGCN",
+            "best_value": 58.96325367503829,
+            "gain_percent": 14.015222511375747,
+            "first": true
+          },
+          "LifeAvg/MAPE": {
+            "alfnet": 26.87544263647933,
+            "best_baseline": "MetaDG",
+            "best_value": 33.08619070975149,
+            "gain_percent": 18.771420765103876,
+            "first": true
+          },
+          "Cold/MAE": {
+            "alfnet": 29.82167217034937,
+            "best_baseline": "Merlin",
+            "best_value": 30.999180262229828,
+            "gain_percent": 3.798513644295176,
+            "first": true
+          },
+          "Cold/RMSE": {
+            "alfnet": 41.92542262314136,
+            "best_baseline": "Merlin",
+            "best_value": 44.86385198157206,
+            "gain_percent": 6.54965908776105,
+            "first": true
+          },
+          "Cold/MAPE": {
+            "alfnet": 22.328726140075712,
+            "best_baseline": "Merlin",
+            "best_value": 23.21626783134096,
+            "gain_percent": 3.8229301010522687,
+            "first": true
+          },
+          "Warm/MAE": {
+            "alfnet": 25.112421191234066,
+            "best_baseline": "STID",
+            "best_value": 25.991459465222693,
+            "gain_percent": 3.3820273738948914,
+            "first": true
+          },
+          "Warm/RMSE": {
+            "alfnet": 35.69876155145071,
+            "best_baseline": "STID",
+            "best_value": 37.527131338144635,
+            "gain_percent": 4.87212776862449,
+            "first": true
+          },
+          "Warm/MAPE": {
+            "alfnet": 17.72851305023472,
+            "best_baseline": "MetaDG",
+            "best_value": 19.490952715848763,
+            "gain_percent": 9.04234744862391,
+            "first": true
+          },
+          "Ready/MAE": {
+            "alfnet": 24.830003485601296,
+            "best_baseline": "MetaDG",
+            "best_value": 25.168401721702896,
+            "gain_percent": 1.3445360569312448,
+            "first": true
+          },
+          "Ready/RMSE": {
+            "alfnet": 34.948407689909715,
+            "best_baseline": "MetaDG",
+            "best_value": 36.02342753738735,
+            "gain_percent": 2.984224214539033,
+            "first": true
+          },
+          "Ready/MAPE": {
+            "alfnet": 17.029553338319932,
+            "best_baseline": "MetaDG",
+            "best_value": 18.129341812434987,
+            "gain_percent": 6.066345295341646,
+            "first": true
+          },
+          "Onset/MAE": {
+            "alfnet": 24.808261993773158,
+            "best_baseline": "MetaDG",
+            "best_value": 26.002046151509433,
+            "gain_percent": 4.591116217471114,
+            "first": true
+          },
+          "Onset/RMSE": {
+            "alfnet": 34.73263729015383,
+            "best_baseline": "MetaDG",
+            "best_value": 36.46623426326314,
+            "gain_percent": 4.753978600021691,
+            "first": true
+          },
+          "Onset/MAPE": {
+            "alfnet": 14.927084164047079,
+            "best_baseline": "MetaDG",
+            "best_value": 15.395406848022311,
+            "gain_percent": 3.0419636752593737,
+            "first": true
+          },
+          "Decay/MAE": {
+            "alfnet": 29.193785328485532,
+            "best_baseline": "MetaDG",
+            "best_value": 30.538683866408817,
+            "gain_percent": 4.403917810625146,
+            "first": true
+          },
+          "Decay/RMSE": {
+            "alfnet": 39.66627903580416,
+            "best_baseline": "PatchSTG",
+            "best_value": 41.71677577547873,
+            "gain_percent": 4.915280966847535,
+            "first": true
+          },
+          "Decay/MAPE": {
+            "alfnet": 18.615485414493566,
+            "best_baseline": "MetaDG",
+            "best_value": 18.815130424584723,
+            "gain_percent": 1.0610875693441435,
+            "first": true
+          },
+          "Outage/MAE": {
+            "alfnet": 44.9225811087257,
+            "best_baseline": "PatchSTG",
+            "best_value": 46.274693142318455,
+            "gain_percent": 2.921925445154905,
+            "first": true
+          },
+          "Outage/RMSE": {
+            "alfnet": 59.40885014675479,
+            "best_baseline": "PatchSTG",
+            "best_value": 62.3938695741875,
+            "gain_percent": 4.784154994399681,
+            "first": true
+          },
+          "Outage/MAPE": {
+            "alfnet": 35.71172479111207,
+            "best_baseline": "PatchSTG",
+            "best_value": 34.49395353331409,
+            "gain_percent": -3.5303904976327516,
+            "first": false
+          }
+        }
+      },
+      "PEMS08": {
+        "first_scenarios_of_12": 9,
+        "first_lifeavg_of_3": 3,
+        "first_phases_of_18": 18,
+        "first_all_of_33": 30,
+        "cells": {
+          "Unseen/MAE": {
+            "alfnet": 92.7777232822162,
+            "best_baseline": "MCPST",
+            "best_value": 81.30094755490701,
+            "gain_percent": -14.116410782984158,
+            "first": false
+          },
+          "Unseen/RMSE": {
+            "alfnet": 110.56489649801601,
+            "best_baseline": "MCPST",
+            "best_value": 99.61321582276442,
+            "gain_percent": -10.994204518743022,
+            "first": false
+          },
+          "Unseen/MAPE": {
+            "alfnet": 144.98207425855327,
+            "best_baseline": "MCPST",
+            "best_value": 130.3957927430576,
+            "gain_percent": -11.186159621144887,
+            "first": false
+          },
+          "Steady/MAE": {
+            "alfnet": 18.80915459529162,
+            "best_baseline": "STID",
+            "best_value": 19.209146049133384,
+            "gain_percent": 2.082296905956471,
+            "first": true
+          },
+          "Steady/RMSE": {
+            "alfnet": 26.13904285356864,
+            "best_baseline": "STID",
+            "best_value": 26.858415174628448,
+            "gain_percent": 2.678387076760047,
+            "first": true
+          },
+          "Steady/MAPE": {
+            "alfnet": 12.16929586757162,
+            "best_baseline": "MetaDG",
+            "best_value": 14.002724630023437,
+            "gain_percent": 13.093371546568422,
+            "first": true
+          },
+          "Join/MAE": {
+            "alfnet": 19.960478836545175,
+            "best_baseline": "STID",
+            "best_value": 20.79821487211227,
+            "gain_percent": 4.027922784326988,
+            "first": true
+          },
+          "Join/RMSE": {
+            "alfnet": 27.603422310209762,
+            "best_baseline": "STID",
+            "best_value": 28.900974195460478,
+            "gain_percent": 4.48964756853949,
+            "first": true
+          },
+          "Join/MAPE": {
+            "alfnet": 19.21145339483104,
+            "best_baseline": "Merlin",
+            "best_value": 23.374840268704855,
+            "gain_percent": 17.811402456717186,
+            "first": true
+          },
+          "Fault/MAE": {
+            "alfnet": 24.247849434510613,
+            "best_baseline": "PatchSTG",
+            "best_value": 28.53515485399323,
+            "gain_percent": 15.024643957320771,
+            "first": true
+          },
+          "Fault/RMSE": {
+            "alfnet": 32.8232195595243,
+            "best_baseline": "PatchSTG",
+            "best_value": 37.77158556587619,
+            "gain_percent": 13.100763264813454,
+            "first": true
+          },
+          "Fault/MAPE": {
+            "alfnet": 17.12785327568423,
+            "best_baseline": "Merlin",
+            "best_value": 25.498578335334443,
+            "gain_percent": 32.82820300632427,
+            "first": true
+          },
+          "LifeAvg/MAE": {
+            "alfnet": 38.9488015371409,
+            "best_baseline": "STID",
+            "best_value": 41.25555837042546,
+            "gain_percent": 5.591384347710548,
+            "first": true
+          },
+          "LifeAvg/RMSE": {
+            "alfnet": 49.28264530532967,
+            "best_baseline": "STID",
+            "best_value": 52.9612056967434,
+            "gain_percent": 6.945764060730064,
+            "first": true
+          },
+          "LifeAvg/MAPE": {
+            "alfnet": 48.37266919916004,
+            "best_baseline": "MCPST",
+            "best_value": 59.246364838025414,
+            "gain_percent": 18.35335495872724,
+            "first": true
+          },
+          "Cold/MAE": {
+            "alfnet": 21.33156960196639,
+            "best_baseline": "Merlin",
+            "best_value": 21.51745599725832,
+            "gain_percent": 0.8638864897207887,
+            "first": true
+          },
+          "Cold/RMSE": {
+            "alfnet": 28.98546336200391,
+            "best_baseline": "Merlin",
+            "best_value": 29.982228778212498,
+            "gain_percent": 3.3245207472131555,
+            "first": true
+          },
+          "Cold/MAPE": {
+            "alfnet": 32.9768818472482,
+            "best_baseline": "Merlin",
+            "best_value": 36.08698483276323,
+            "gain_percent": 8.61835090941534,
+            "first": true
+          },
+          "Warm/MAE": {
+            "alfnet": 19.789501029764413,
+            "best_baseline": "STID",
+            "best_value": 20.375586407430447,
+            "gain_percent": 2.8764098659379123,
+            "first": true
+          },
+          "Warm/RMSE": {
+            "alfnet": 27.380266398647976,
+            "best_baseline": "STID",
+            "best_value": 28.445523484657695,
+            "gain_percent": 3.7449023801030545,
+            "first": true
+          },
+          "Warm/MAPE": {
+            "alfnet": 18.1974290526873,
+            "best_baseline": "Merlin",
+            "best_value": 22.2867694300638,
+            "gain_percent": 18.348735514175374,
+            "first": true
+          },
+          "Ready/MAE": {
+            "alfnet": 20.29916613893158,
+            "best_baseline": "STID",
+            "best_value": 20.620233701436007,
+            "gain_percent": 1.5570510361483825,
+            "first": true
+          },
+          "Ready/RMSE": {
+            "alfnet": 28.452940374033457,
+            "best_baseline": "STID",
+            "best_value": 29.316445134266274,
+            "gain_percent": 2.9454620308773993,
+            "first": true
+          },
+          "Ready/MAPE": {
+            "alfnet": 15.58626836385124,
+            "best_baseline": "MetaDG",
+            "best_value": 19.918497203769885,
+            "gain_percent": 21.74977758411766,
+            "first": true
+          },
+          "Onset/MAE": {
+            "alfnet": 20.77472344423872,
+            "best_baseline": "Merlin",
+            "best_value": 22.026825855214224,
+            "gain_percent": 5.684443229386604,
+            "first": true
+          },
+          "Onset/RMSE": {
+            "alfnet": 28.847161409386842,
+            "best_baseline": "Merlin",
+            "best_value": 30.362223324488742,
+            "gain_percent": 4.989957088814112,
+            "first": true
+          },
+          "Onset/MAPE": {
+            "alfnet": 12.51874230731269,
+            "best_baseline": "Merlin",
+            "best_value": 13.913653075266454,
+            "gain_percent": 10.025481880336818,
+            "first": true
+          },
+          "Decay/MAE": {
+            "alfnet": 23.179324526004383,
+            "best_baseline": "Merlin",
+            "best_value": 25.33823100007797,
+            "gain_percent": 8.52035200905281,
+            "first": true
+          },
+          "Decay/RMSE": {
+            "alfnet": 31.470683684516207,
+            "best_baseline": "Merlin",
+            "best_value": 34.39479085330645,
+            "gain_percent": 8.501598923108865,
+            "first": true
+          },
+          "Decay/MAPE": {
+            "alfnet": 16.078205934896914,
+            "best_baseline": "Merlin",
+            "best_value": 19.051051203419146,
+            "gain_percent": 15.604625890610624,
+            "first": true
+          },
+          "Outage/MAE": {
+            "alfnet": 38.406224509844854,
+            "best_baseline": "MoGERNN",
+            "best_value": 46.75507425467649,
+            "gain_percent": 17.856563972832472,
+            "first": true
+          },
+          "Outage/RMSE": {
+            "alfnet": 50.32463645974263,
+            "best_baseline": "MoGERNN",
+            "best_value": 61.43224750406326,
+            "gain_percent": 18.081075486593512,
+            "first": true
+          },
+          "Outage/MAPE": {
+            "alfnet": 32.23343765192893,
+            "best_baseline": "MoGERNN",
+            "best_value": 47.35988518442946,
+            "gain_percent": 31.939366984516383,
+            "first": true
+          }
+        }
+      }
+    }
+  },
+  "ablation_seed32": {
+    "lifeavg": {
+      "METRLA": {
+        "ALFNet": {
+          "MAE": 3.842064993575,
+          "RMSE": 6.084566515784898,
+          "MAPE": 10.336537100888297
+        },
+        "w/o OS": {
+          "MAE": 4.301949169109535,
+          "RMSE": 6.484925179667808,
+          "MAPE": 11.597468134123497
+        },
+        "w/o SAHC": {
+          "MAE": 4.070179183060761,
+          "RMSE": 6.396044854640747,
+          "MAPE": 10.791060000818078
+        },
+        "w/o Spatial Context": {
+          "MAE": 4.4000861215937555,
+          "RMSE": 6.64458817502349,
+          "MAPE": 12.529448178172883
+        },
+        "w/o ALFTemporal–FiLM": {
+          "MAE": 4.263871781303178,
+          "RMSE": 6.5603210267844085,
+          "MAPE": 11.760052822967904
+        },
+        "w/o Adaptive Routing": {
+          "MAE": 3.920030289194712,
+          "RMSE": 6.127287108522652,
+          "MAPE": 10.601876948439802
+        }
+      },
+      "PEMSBAY": {
+        "ALFNet": {
+          "MAE": 2.7231643130220435,
+          "RMSE": 4.2005576779824185,
+          "MAPE": 6.2760725581623005
+        },
+        "w/o OS": {
+          "MAE": 2.784273357787166,
+          "RMSE": 4.28077549867162,
+          "MAPE": 6.469721588915403
+        },
+        "w/o SAHC": {
+          "MAE": 2.7308911514526684,
+          "RMSE": 4.259476602096633,
+          "MAPE": 6.43218174317635
+        },
+        "w/o Spatial Context": {
+          "MAE": 2.95788119620203,
+          "RMSE": 4.49265531146982,
+          "MAPE": 7.011469134012632
+        },
+        "w/o ALFTemporal–FiLM": {
+          "MAE": 2.8899805515928203,
+          "RMSE": 4.4869798586233,
+          "MAPE": 6.991586211554403
+        },
+        "w/o Adaptive Routing": {
+          "MAE": 2.7699126776305505,
+          "RMSE": 4.279762524486418,
+          "MAPE": 6.51432756977304
+        }
+      },
+      "PEMS04": {
+        "ALFNet": {
+          "MAE": 39.565385015580254,
+          "RMSE": 53.3460806421465,
+          "MAPE": 23.256803924557993
+        },
+        "w/o OS": {
+          "MAE": 41.68011726326286,
+          "RMSE": 55.47412613388429,
+          "MAPE": 25.76635719653189
+        },
+        "w/o SAHC": {
+          "MAE": 39.60885820111739,
+          "RMSE": 52.89359849490851,
+          "MAPE": 24.676433536796797
+        },
+        "w/o Spatial Context": {
+          "MAE": 40.29176039692343,
+          "RMSE": 54.69368328286466,
+          "MAPE": 24.876641738391857
+        },
+        "w/o ALFTemporal–FiLM": {
+          "MAE": 42.136837535593195,
+          "RMSE": 56.292915585581085,
+          "MAPE": 26.36065879956345
+        },
+        "w/o Adaptive Routing": {
+          "MAE": 39.82645328870356,
+          "RMSE": 53.400862644246494,
+          "MAPE": 23.414899260397302
+        }
+      },
+      "PEMS08": {
+        "ALFNet": {
+          "MAE": 36.77982222179956,
+          "RMSE": 46.56693155649837,
+          "MAPE": 42.99987771097422
+        },
+        "w/o OS": {
+          "MAE": 44.136458876936004,
+          "RMSE": 56.0792525506366,
+          "MAPE": 70.71546315399586
+        },
+        "w/o SAHC": {
+          "MAE": 39.64903228810018,
+          "RMSE": 50.30135863588893,
+          "MAPE": 63.1148280559437
+        },
+        "w/o Spatial Context": {
+          "MAE": 42.382165852925276,
+          "RMSE": 53.475339781270065,
+          "MAPE": 53.060810699796406
+        },
+        "w/o ALFTemporal–FiLM": {
+          "MAE": 40.90632407737539,
+          "RMSE": 51.874410449023,
+          "MAPE": 52.00319477761063
+        },
+        "w/o Adaptive Routing": {
+          "MAE": 38.78333080370538,
+          "RMSE": 49.5914729338091,
+          "MAPE": 58.377998281452065
+        }
       }
     },
-    "PEMSBAY": {
-      "first": 29,
-      "lifeavg_gain": {
-        "MAE": 11.9505225822105,
-        "RMSE": 10.49577157128978,
-        "MAPE": 15.487081540739256
-      }
-    },
-    "PEMS04": {
-      "first": 29,
-      "lifeavg_gain": {
-        "MAE": 8.65994131360015,
-        "RMSE": 7.513209061994508,
-        "MAPE": 21.423364399511602
-      }
-    },
-    "PEMS08": {
-      "first": 30,
-      "lifeavg_gain": {
-        "MAE": 7.859705430191555,
-        "RMSE": 8.86602989206211,
-        "MAPE": 20.87150781304531
+    "change_percent_vs_full": {
+      "METRLA": {
+        "w/o OS": {
+          "MAE": 11.969713586407016,
+          "RMSE": 6.579904465573327,
+          "MAPE": 12.198776252898469
+        },
+        "w/o SAHC": {
+          "MAE": 5.937280859830096,
+          "RMSE": 5.119154142662352,
+          "MAPE": 4.397245378152048
+        },
+        "w/o Spatial Context": {
+          "MAE": 14.523989806313043,
+          "RMSE": 9.203969712316473,
+          "MAPE": 21.215142517082764
+        },
+        "w/o ALFTemporal–FiLM": {
+          "MAE": 10.978647899854789,
+          "RMSE": 7.819037063121637,
+          "MAPE": 13.771688798536541
+        },
+        "w/o Adaptive Routing": {
+          "MAE": 2.029254990482765,
+          "RMSE": 0.7021139899929807,
+          "MAPE": 2.567009095615802
+        }
+      },
+      "PEMSBAY": {
+        "w/o OS": {
+          "MAE": 2.244045446427956,
+          "RMSE": 1.909694541505047,
+          "MAPE": 3.0855129375656043
+        },
+        "w/o SAHC": {
+          "MAE": 0.28374484762727636,
+          "RMSE": 1.402645282626236,
+          "MAPE": 2.4873706217915403
+        },
+        "w/o Spatial Context": {
+          "MAE": 8.619269944805819,
+          "RMSE": 6.9537822327367715,
+          "MAPE": 11.71746452953155
+        },
+        "w/o ALFTemporal–FiLM": {
+          "MAE": 6.125823468421254,
+          "RMSE": 6.818670343278188,
+          "MAPE": 11.400659357603304
+        },
+        "w/o Adaptive Routing": {
+          "MAE": 1.7166927601451887,
+          "RMSE": 1.885579310555796,
+          "MAPE": 3.7962437400580917
+        }
+      },
+      "PEMS04": {
+        "w/o OS": {
+          "MAE": 5.3449050144459775,
+          "RMSE": 3.98913184646692,
+          "MAPE": 10.790619726229611
+        },
+        "w/o SAHC": {
+          "MAE": 0.10987681661638327,
+          "RMSE": -0.8482012957489848,
+          "MAPE": 6.104147486661948
+        },
+        "w/o Spatial Context": {
+          "MAE": 1.8358860429568358,
+          "RMSE": 2.5261511708012607,
+          "MAPE": 6.9650061078401215
+        },
+        "w/o ALFTemporal–FiLM": {
+          "MAE": 6.499248064944507,
+          "RMSE": 5.523995217572586,
+          "MAPE": 13.346007839572248
+        },
+        "w/o Adaptive Routing": {
+          "MAE": 0.6598400925973635,
+          "RMSE": 0.1026917093825297,
+          "MAPE": 0.679781006677227
+        }
+      },
+      "PEMS08": {
+        "w/o OS": {
+          "MAE": 20.00182766184262,
+          "RMSE": 20.42720161322462,
+          "MAPE": 64.45503317314831
+        },
+        "w/o SAHC": {
+          "MAE": 7.8010438685590655,
+          "RMSE": 8.019482827335711,
+          "MAPE": 46.77908732711544
+        },
+        "w/o Spatial Context": {
+          "MAE": 15.232111774061764,
+          "RMSE": 14.835437925279482,
+          "MAPE": 23.39758511976997
+        },
+        "w/o ALFTemporal–FiLM": {
+          "MAE": 11.219471999323671,
+          "RMSE": 11.39752763414359,
+          "MAPE": 20.938006212837745
+        },
+        "w/o Adaptive Routing": {
+          "MAE": 5.447303605285869,
+          "RMSE": 6.495041172384619,
+          "MAPE": 35.76317280212431
+        }
       }
     }
   }

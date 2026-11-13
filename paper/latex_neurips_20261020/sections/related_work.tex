@@ -1,30 +1,26 @@
 \section{相关工作}\label{sec:related}
-本节前三小节对应引言提到的三类已有研究：未观测位置的归纳预测与部分感知（\ref{sec:2_1}）、不完整观测下的时空预测（\ref{sec:2_2}）、传感网络演化下的泛化与适应（\ref{sec:2_3}）；\ref{sec:2_4}节讨论贯穿三者的时空表示与条件化计算机制。各方向之间有交叉，部分方法同时涉及多个方向。
+本节按四个方向回顾已有研究：未观测位置的归纳预测（\ref{sec:2_1}）、不完整观测下的预测（\ref{sec:2_2}）、传感网络变化与跨路网泛化（\ref{sec:2_3}）、时空预测主干与条件化计算（\ref{sec:2_4}）。每个小节先按时间顺序介绍相关方法，再说明与 ALFNet 的区别；加粗的方法是本文实验中的比较方法。各方向之间有交叉，部分方法同时涉及多个方向。
 
-\subsection{未观测位置的归纳预测与部分感知}\label{sec:2_1}
+\subsection{未观测位置的归纳预测}\label{sec:2_1}
 
-这一方向的工作可以按目标位置在训练与推理时的观测条件来区分。同一时段的估计是它的任务边界：时空克里金利用已观测位置估计同一时段未观测位置的值，IGNNK、INCREASE 与 KITS 分别通过随机子图训练、异质空间关系建模和向训练图加入虚拟节点，使模型无需重新训练即可用于新位置~\citep{wu2021inductive,zheng2023increase,xu2025kits}，但它们不预测未来。
+这一方向关注训练时没有读数的位置。较早的工作是时空克里金，它利用已观测位置估计同一时段未观测位置的值：IGNNK、INCREASE 与 KITS 分别通过随机子图训练、异质空间关系建模和向训练图加入虚拟节点，使模型无需重新训练即可用于新位置~\citep{wu2021inductive,zheng2023increase,xu2025kits}。这些方法只做同一时段的估计，不预测未来。面向未来的工作中，FUNS 只在已观测位置上优化模型，预测完全没有传感器的位置~\citep{roth2022forecasting}；UIGNN 进一步给出预测的不确定性~\citep{mei2023uncertainty}；FRIGATE 在只有部分路段装有传感器的路网上做预测，并在冻结参数下检验了路网拓扑变化与历史快照缺失的影响~\citep{gupta2023frigate}。SCPT 在推理时利用新道路两天的数据生成其空间表示~\citep{prabowo2024traffic}；STSM 把对象扩展到连续的无观测区域，并借助道路与兴趣点等静态特征~\citep{su2024spatial}；ST-FiT 通过时间数据增强与图拓扑学习，泛化到只有输入历史而没有训练数据的节点~\citep{lei2025stfit}；GenCast 则为无观测区域的预测引入物理约束与天气信息~\citep{su2026generalising}。\textbf{MoGERNN} 以图专家混合为未观测节点构造表示，并在同一模型中考察了测试期新增与失效的传感器~\citep{zhou2025mogernn}；\textbf{SLPF} 利用未感知位置的临时观测学习向推理期的空间转移，用于长期的部分感知预测~\citep{liu2025spatiotemporal}。
 
-面向未来，最直接的情形是目标位置在训练与推理时都没有读数。FUNS 只在已观测位置上优化模型，预测完全没有传感器的位置~\citep{roth2022forecasting}；UIGNN 进一步给出预测的不确定性~\citep{mei2023uncertainty}；FRIGATE 在只有部分路段装有传感器的路网上以一小时历史预测一小时，并在冻结参数下检验了路网拓扑变化与历史快照缺失的影响~\citep{gupta2023frigate}；STSM 与 GenCast 把对象扩展到连续的无观测区域，分别借助道路与兴趣点等静态特征以及物理约束与天气信息~\citep{su2024spatial,su2026generalising}。MoGERNN 以图专家混合为未观测节点构造表示，并在同一模型中考察了测试期新增与失效的传感器~\citep{zhou2025mogernn}。另一种情形是目标位置在训练期没有信号、推理时有历史：ST-FiT 通过时间数据增强与图拓扑学习，泛化到只有输入历史而没有训练数据的节点~\citep{lei2025stfit}；SCPT 在推理时利用新道路两天的数据生成其空间表示~\citep{prabowo2024traffic}。还有工作允许训练期获得目标位置的临时观测：SLPF 利用未感知位置的临时观测学习向推理期的空间转移，用于长期部分感知预测~\citep{liu2025spatiotemporal}。
+在这些工作中，哪些位置有读数通常由评价配置事先确定，接入与失效作为事件及其持续时间较少被显式表示。ALFNet 用观测角色与状态进度表示这两类事件，并让同一组参数既处理全程没有读数的位置，也处理在窗口内刚开始有读数的位置。
 
-在这些工作中，哪些位置有观测通常按评价配置确定，训练时多在已知节点上遮蔽部分节点以模拟未观测；已观测位置的读数可以缺失，但接入与失效作为事件及其持续程度较少被显式表示。ALFNet 同样在已知节点上模拟不同的观测情形，区别在于用观测角色与状态进度表示接入与失效事件，并让同一组参数既处理全程没有读数的保留节点，也处理在窗口内开始积累读数的保留节点。
+\subsection{不完整观测下的预测}\label{sec:2_2}
 
-\subsection{不完整观测下的时空预测}\label{sec:2_2}
+这一方向处理输入中缺失的读数。GRU-D 把掩码与距上次观测的时间间隔引入循环更新~\citep{che2018recurrent}。GMN 把相邻时刻全网状态的转移视为图马尔可夫过程，逐步推断缺失状态并预测~\citep{cui2020graph}。GRIN 与 PriSTI 等插补方法可以先重建缺失序列，再交给预测器~\citep{cini2022filling,liu2023pristi}，但插补误差会传入预测，重建历史的目标也与预测未来不同；GSTAE 把插补与预测作为并行任务顺序训练~\citep{wang2023traffic}。GCN-M 把观测掩码与多尺度历史记忆、动态图卷积结合~\citep{zuo2023graph}；HD-TTS 对输入进行分层时空下采样，并依据观测与缺失的模式组合多尺度表示~\citep{marisca2024graph}。GinAR+ 以不同缺失率的数据构造对比样本，使一个模型适应变化的缺失率~\citep{yu2025ginarplus}；MAS-Mamba 以掩码与时间间隔调节状态空间模型的更新，使中断期间的状态得以保持或衰减~\citep{huang2026masmamba}。\textbf{GinAR} 以插值注意力与自适应图卷积，端到端地处理部分变量整段历史缺失下的预测~\citep{yu2024ginar}；\textbf{Merlin} 以完整观测的教师模型做知识蒸馏，并结合多视图对比学习，使一个模型适应不固定的缺失率~\citep{yu2025merlin}。
 
-这一方向的方法可以沿两条相互交叉的设计轴理解。第一条是插补与预测如何组织。GRIN 与 PriSTI 等插补方法可以先重建缺失序列，再交给预测器~\citep{cini2022filling,liu2023pristi}，但插补误差会传入预测，重建历史的目标也与预测未来不同。联合建模试图缓解这一问题：GMN 把相邻时刻全网状态的转移视为图马尔可夫过程，逐步推断缺失状态并预测~\citep{cui2020graph}；GSTAE 把插补与预测作为并行任务顺序训练~\citep{wang2023traffic}；GinAR 则以插值注意力与自适应图卷积，端到端地处理部分变量整段历史缺失下的预测~\citep{yu2024ginar}。
+这些研究说明，缺失信息本身可以作为调整计算的依据。它们大多在直推设置下进行，缺失的节点在训练期仍提供标签；本文的保留节点从未提供训练信号。此外，ALFNet 除掩码外还使用观测角色与状态进度，以区分“从未可读”与“曾经可读、随后失效”，并记录接入或失效已持续的比例。
 
-第二条是缺失信息如何参与计算。GCN-M 把观测掩码与多尺度历史记忆、动态图卷积结合~\citep{zuo2023graph}；GRU-D 把掩码与距上次观测的时间间隔引入循环更新~\citep{che2018recurrent}，MAS-Mamba 以二者调节状态空间模型的更新，使中断期间的状态得以保持或衰减~\citep{huang2026masmamba}；HD-TTS 对输入进行分层时空下采样，并以观测与缺失模式为条件组合多尺度表示~\citep{marisca2024graph}。GinAR+ 与 Merlin 则从训练方式入手，分别以不同缺失率的数据构造对比样本、以完整观测教师进行知识蒸馏与多视图对比学习，使一个模型适应变化的缺失率~\citep{yu2025merlin,yu2025ginarplus}。\ref{sec:2_1}节的 UIGNN 也以缺失数据的视角处理没有历史记录的位置。
+\subsection{传感网络变化与跨路网泛化}\label{sec:2_3}
 
-这些研究说明，缺失信息本身可以作为调整计算的依据。它们大多在直推设置下进行，缺失的节点在训练期仍提供标签；ALFNet 的保留节点从未提供训练信号，补全不能依赖目标节点自身的训练统计。在组织方式上，ALFNet 对全部节点只补全一次，结果由两个分支共享，且只通过预测损失训练；在信息使用上，ALFNet 除掩码外还使用观测角色与状态进度，区分"从未可读"与"曾经可读、随后失效"，并对接入与失效两个方向描述事件已持续的比例。
+真实的传感网络随时间扩张和变化，XXLTraffic 整理了跨度最长23年、节点逐年增加的交通数据~\citep{yin2025xxltraffic}。一类工作在网络扩张后利用新数据增量更新模型并缓解遗忘，如 TrafficStream、PECPM 与 EAC~\citep{chen2021trafficstream,wang2023pattern,chen2025expand}。另一类工作使用少量目标观测做适应：SC-SAMG 利用新传感器一至七天的数据~\citep{wang2026cold}；SIML-MSIGN 把不同的观测布局组织为任务，训练时同时监督观测与未观测节点，并报告了零步与少步适应的结果~\citep{zhao2026structure}。还有工作在不更新参数的条件下泛化到变化后的网络，如以上下文单元为中介进行集中式消息传递的 STOP~\citep{ma2025robust}。\textbf{STONE} 借助对结构偏移不敏感的空间嵌入，在测试期加入新节点时不更新参数~\citep{wang2024stone}；\textbf{MCPST} 面向跨城市的少样本预测，从扩散、同步与谱嵌入三个角度刻画交通动态并融合各自的预测，再以元学习适应数据很少的新城市~\citep{fofanah2026pimcst}；\textbf{STBP} 是带可扩展上下文模式库的持续预测主干~\citep{liu2026general}。
 
-\subsection{传感网络演化下的泛化与适应}\label{sec:2_3}
+ALFNet 属于不更新参数的设置，推理时不使用目标节点的标签。与上述工作的区别在于变化发生的尺度与表示方式：ALFNet 面对的是单个历史窗口内的接入与中断，并用观测角色与状态进度显式表示事件及其进度。持续学习与少步适应可以与之互补。
 
-真实的传感网络随时间扩张与演化，XXLTraffic 整理了跨度最长 23 年、节点逐年增加的交通数据~\citep{yin2025xxltraffic}。按是否更新参数、是否使用目标数据，已有工作可分为三种设置。持续学习在网络扩张后利用新数据增量更新模型并缓解遗忘，如 TrafficStream、PECPM、EAC 以及带可扩展上下文模式库的 STBP~\citep{chen2021trafficstream,wang2023pattern,liu2026general,chen2025expand}。少步适应使用少量目标观测，如利用新传感器一至七天支持数据的 SC-SAMG~\citep{wang2026cold}；SIML-MSIGN 则把不同观测布局组织为任务，训练时同时监督观测与未观测节点，并报告了零步与少步适应的结果~\citep{zhao2026structure}。固定参数的泛化不更新参数，如在测试期加入新节点的 STONE 与 STOP，分别借助对结构偏移不敏感的空间嵌入和以上下文单元为中介的集中式消息机制~\citep{wang2024stone,ma2025robust}；\ref{sec:2_1}节的 MoGERNN 与 FRIGATE 也在不重新训练的条件下考察了传感器或路网的变化。
+\subsection{时空预测主干与条件化计算}\label{sec:2_4}
 
-ALFNet 属于固定参数的设置，推理时不使用目标节点的标签，也不更新参数；这一设置与窗口内的读数缺失都不是 ALFNet 特有的。差异在于变化的刻画方式：ALFNet 面对的是单个历史窗口内的接入与中断，用观测角色与状态进度显式表示事件及其进度，并让它们决定图传播的组合，评价时再按事件持续的步数分阶段考察。持续学习与少步适应可与之互补。
+空间依赖建模是交通预测利用关联位置的基本途径。DCRNN 以扩散卷积刻画有向路网上的传播~\citep{li2018diffusion}，Graph WaveNet 与 AGCRN 以可学习的节点表示构造自适应邻接~\citep{wu2019graph,bai2020adaptive}。逐节点的可训练参数不利于迁移到训练中未出现的节点，Cini 等系统分析了全局共享参数与节点特定参数之间的取舍~\citep{cini2023taming}。PDFormer 在长程注意力中建模传播时延~\citep{jiang2023pdformer}。另一些工作让计算随条件变化：FiLM 提供了以条件特征缩放与平移中间表示的一般方式~\citep{perez2018film}；图专家混合使节点自适应地选择不同跳数的聚合专家~\citep{wang2023graph}；TESTAM 在恒等、静态图与动态图三类空间建模专家之间按交通状况路由~\citep{lee2024testam}；在多模态学习中，Flex-MoE 依据可用模态的组合组织专家~\citep{yun2024flexmoe}。\textbf{STGCN} 结合图卷积与时间卷积~\citep{yu2018spatio}；\textbf{STID} 表明，带有时空身份信息的简洁模型也能形成有竞争力的预测基线~\citep{shao2022spatial}；\textbf{PatchSTG} 通过空间分块组织块内与块间的交互，提高大规模路网上的效率~\citep{fang2025efficient}；\textbf{MetaDG} 由输入动态生成节点表示，并据此构造动态图与图卷积循环单元的参数~\citep{zou2026meta}。
 
-\subsection{时空表示与条件化计算}\label{sec:2_4}
-
-空间依赖建模是交通预测利用关联位置的基本途径。STGCN 结合图卷积与时间卷积~\citep{yu2018spatio}，DCRNN 以扩散卷积刻画有向路网上的传播~\citep{li2018diffusion}，Graph WaveNet 与 AGCRN 以可学习的节点表示构造自适应邻接~\citep{wu2019graph,bai2020adaptive}。学到的关系在推理时通常不随输入窗口变化，逐节点的可训练参数也不利于迁移到训练中未出现的节点，Cini 等系统分析了全局共享参数与节点特定参数之间的取舍~\citep{cini2023taming}。STID 表明，具有时空身份信息的简洁模型也能形成有竞争力的预测基线~\citep{shao2022spatial}。在交互范围与计算规模上，PDFormer 在长程注意力中建模传播时延~\citep{jiang2023pdformer}，PatchSTG 通过空间分块组织块内与块间交互，提高大规模路网上的效率~\citep{fang2025efficient}。
-
-另一类工作让计算随条件变化，它们贯穿上述三个方向。图专家混合使节点自适应地选择不同跳数的聚合专家~\citep{wang2023graph}；TESTAM 在恒等、静态图与动态图三类空间建模专家之间按交通状况路由~\citep{lee2024testam}；MoGERNN 以稀疏门控为未观测节点组合图聚合器~\citep{zhou2025mogernn}；在多模态学习中，Flex-MoE 依据可用模态的组合组织专家~\citep{yun2024flexmoe}；FiLM 提供了以条件特征缩放与平移中间表示的一般方式~\citep{perez2018film}；\ref{sec:2_2}节的 HD-TTS 与 GRU-D 则让计算依赖缺失信息。ALFNet 借鉴专家混合与特征调制的思想，但条件的来源与作用位置不同：图专家的路由只由 OS 决定、不读取信号值，编码时作用于每一步、每个门的传播，解码时沿用末步 OS；FiLM 的参数来自跨节点的时间上下文，OS 只经由其输入进入；空间分区注意力只用于生成条件特征，不直接输出预测。
+ALFNet 借鉴专家混合与特征调制的思想，但条件的来源与作用位置不同：图专家的路由只由 OS 决定、不读取信号值；FiLM 的参数来自跨节点的时间上下文；空间分区注意力只用于生成条件特征，不直接输出预测。

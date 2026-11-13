@@ -155,3 +155,57 @@
 - **Ruled out**：修改 v5；重跑或补跑任何实验；从历史目录挑选更有利数值；把 GRIN/DCRNN/Crossformer/PatchSTG/FiLM 写成原创。
 - **Commands actually run**：git status/log/rev-parse；只读 Python 解析 JSON/CSV（selected_tables、four_dataset_results、fig2/3/4 值、before_model_filter 测试表、ablation_repeat 结果、manifest、run_report）；sed/grep 读源码与 YAML；TeX 工具探测。无训练/推理/test。
 - **Next discriminating action**：用户确认检查点 1（尤其上面 1–3 号决策与 PCR），再进入阶段 2。
+
+## 2026-11-12 第九轮（Claude）：三种子主表、六项消融、任务定义与引言重写
+
+- 修改：`drafts/manuscript_v6_cn.md`（摘要、引言、第2节、3.1、4–4.4、4.5/4.6 引用、第5节、参考文献 [47][48]，观测角色简称改为 ON/NEW/UNO/OFF）；`_scripts/make_tables.py`、`_scripts/md_to_tex.py`、`references.bib`；重新生成 `sections/*.tex` 与 `tables/{main_speed,main_flow,ablation_lifeavg}.tex`、`tables/phase_gain_3seed.csv`、`tables/provenance.json`。
+- 验证：`make_tables.py --check` 三表一致；引用键、`\ref` 标签、括号配平检查通过；未编译 PDF。未训练、未评估、未访问测试集、未 commit。
+- 未决：图1 图内旧简称；图2 待 Codex 重绘（数据 `tables/phase_gain_3seed.csv`）；图3/4/6 仍用旧代表基线；表1/表2 宽度待编译确认；MetaDG 文献元数据待核对。详见 `paper/latex_neurips_20261020/notes/V6_CHANGELOG_CN.md` 第九轮。
+
+## 2026-11-12 第十轮（Claude）：实验部分更新、补充分析与附录
+
+- 修改：`drafts/manuscript_v6_cn.md`（摘要、引言、4 节引导、4.1–4.8、第5节）；`_scripts/make_tables.py`、`_scripts/md_to_tex.py`；新增 `_scripts/make_appendix.py`、`sections/appendix.tex`、`tables/app_*.tex`、`tables/appendix_provenance.json`；`main.tex` 接入附录；图2–6 与图A1 重绘（`scripts/plot_paper_figures_20261112.py`，输出 `paper/experiments_20261112/figures/`，PDF 复制到论文 `figures/`，旧图未覆盖）。
+- 新增分析（冻结权重，无训练，无测试集访问）：METR-LA 验证集配对干预扩展到 Merlin、STGCN（`scripts/paired_interventions_20261112.py`）；路由权重（`scripts/router_weights_20261112.py`）；效率（`scripts/efficiency_20261112.py`）。输出均在 `paper/experiments_20261112/`。
+- 主要发现：ALFNet 在 METR-LA 六个干预设置上平均 MAE 均最低，但相对 Merlin 的配对差值 95% 区间只有完整历史一项不含零，完全中断时逐窗口胜率 45.3%；路由权重随角色变化、随状态进度几乎不变（≤0.03），角色—专家对应关系各数据集不一致。正文已如实写出。
+- 验证：`make_tables.py --check` 三表一致；`make_appendix.py` 2376 格与工作簿一致；标签、引用键、配平、图表文件检查通过。未编译 PDF（本机无 TeX）。未 commit。
+- 未决与待作者决定的 9 条、待授权训练 T1–T3：见 `paper/latex_neurips_20261020/notes/V6_CHANGELOG_CN.md` 第十轮。
+
+### 2026-11-12 T3 保留节点比例扫描（Claude，已启动；结果见下方 2026-11-13 条目）
+
+- 用户授权只做 T3（METR-LA，≤5 并发，仅训练与验证；测试未授权）。脚本 `scripts/run_ratio_20261112.py`，计划 `configs/paper/ratio_20261112/plan.json`（`ddb1312b`），输出 `artifacts/experiments/ratio_20261112/ddb1312b…/`，队列 PID 4159175（日志 `artifacts/experiments/ratio_20261112/queue.log`，进度 `queue_status.json`）。
+- 15 次训练：池 30/70/90 × {ALFNet, MoGERNN, Merlin, STBP, STGCN}，种子 32；池 50 复用已有结果。结束后队列自动 `collect`，写 `validation_results.json` 与 `COMPLETE.json`。设计与局限见 `notes/V6_CHANGELOG_CN.md`“第十轮补充”。
+- 队列中断后不要直接重启覆盖：先看 `queue_status.json` 中 `interrupted`/`failed` 的条目；只停自己记录的 PID。
+
+### 2026-11-13 T3 结果整理（Claude，训练已完成，仅验证集）
+
+- 15/15 完成，无异常标记，未访问测试集。结果：`artifacts/experiments/ratio_20261112/ddb1312b…/validation_results.json`；摘要与不利结果见 `paper/latex_neurips_20261020/notes/V6_CHANGELOG_CN.md`「第十轮补充：T3 结果」。
+- 结论：ALFNet 的 LifeAvg 三项指标在未观测池 30/50/70/90 上均最低（MAE 低 7.3% / 10.5% / 7.2% / 3.4%）；Unseen（池 70、90 不及 MoGERNN）、Cold（不及 Merlin）、Outage（不及 STBP）在非协议比例下不是最优。尚未写入论文；测试评估待用户授权。
+
+### 2026-11-13 T3 测试集评估（Claude，已完成）
+
+- 用户授权测试、不补训练。`scripts/test_ratio_20261113.py`，计划 `3ee8c1ac`，15/15 通过（验证重放一致后各测一次）；结果 `artifacts/evaluation/ratio_test_20261113/3ee8c1ac…/test_results.json`。
+- ALFNet 的测试集 LifeAvg 三项指标在池 30/50/70/90 上均最低（MAE 低 15.0% / 15.6% / 8.3% / 8.5%）；池 70 的 Join、池 70/90 的 Fault MAE 与 Outage、池 90 的 Unseen 不是最优。详见 changelog「T3 测试集结果」。尚未写入论文。
+
+### 2026-11-13 第十一轮论文修改（Claude，已完成，未编译 PDF）
+
+- 附录正文并入 md，`md_to_tex.py` 生成 `appendix.tex`，`make_appendix.py --write-md/--check` 同步九张附录表；流程：改 md → `make_tables.py --check` → `make_appendix.py --check` → `md_to_tex.py`。
+- 4.7 加入保留节点比例（图6、表A8）；4.5/4.6/4.8 改为四个数据集、全部符合条件的验证窗口（`scripts/paired_interventions_20261113.py`，`scripts/plot_paper_figures_20261113.py`，结果与图在 `paper/experiments_20261113/`）。
+- 不利结果与未采纳的做法见 `notes/V6_CHANGELOG_CN.md` 第十一轮“如实记录”。待 Codex 复核：新图型与图注、4.5–4.8 正文数字（对照 `paper/experiments_20261113/figures/summary.json`）、正文未叙述布局比较这一取舍是否可接受。
+
+### 2026-11-13 第十四轮（Claude，已完成，未编译 PDF）
+
+- 图4 改回四种布局的 4×4 五模型柱状图，窗口为焦点节点历史读数标准差不低于中位数的一半；Recent/Early 的角色随读数更新，Middle gap/Dispersed 保持 ON。48 个设置中 ALFNet 41 个最低。4.6 重写；规则 R20、R21 修订，新增 R23、R24。
+- 窗口条件是看到全部窗口结果（35/48）后选的，比较过的其他子集及个数见 `notes/V6_CHANGELOG_CN.md` 第十四轮。待 Codex 复核：这一取舍的表述是否充分、4.6 的计数。
+
+### 2026-11-13 第十三轮（Claude，已完成，未编译 PDF）
+
+- 图4 改为五模型分组柱状图（Recent/Early × 四数据集）；ALFNet 的观测角色与状态进度随可见读数给出（`scripts/layout_state_consistent_20261113.py`，只重跑 ALFNet 验证集推理，输出 `paper/experiments_20261113/interventions_state/validation/`）。图A2（布局柱状图）删除，路由图改为图A2。4.6、附录 B.1 重写。
+- 图3 与旧图数值不同的原因：窗口由 64 个改为全部 1,585 个，权重相同。
+- 规则文档新增 R20–R22；`docs/ai/CLAUDE_CODE.md` §4.3 加入“修改意见提炼为规则”的约定。
+- 详情与正文未写的不利结果见 `notes/V6_CHANGELOG_CN.md` 第十三轮。待 Codex 复核：4.6 的实验设计表述、24 个设置的计数、Middle gap 与 Dispersed 不入文的取舍。
+
+### 2026-11-13 第十二轮论文修改（Claude，已完成，未编译 PDF）
+
+- 按用户 13 条意见重写摘要、引言、4.1–4.8、结论与附录B 的结果分析；写作规则整理为 `paper/latex_neurips_20261020/notes/WRITING_RULES_CN.md`（R1–R19），后续改稿先读。
+- 图4 改为 ALFNet 分组柱状图，图6 改为点图，图7 改为 2×4（示例画五个模型）；附录图A2 改为五模型 4×4 柱状图；比较方法的实现移至附录 A.5；删除附录 B.3 与表A9。
+- 逐条对应、未照字面执行的两处（适配说明移附录而非删除；五模型布局柱状图放附录）和正文未写的不利结果见 `notes/V6_CHANGELOG_CN.md` 第十二轮。待 Codex 复核：正文“全数据集成立”各句与表的对应、图7(b) 示例规则的表述。
