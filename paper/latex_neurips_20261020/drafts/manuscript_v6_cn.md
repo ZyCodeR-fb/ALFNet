@@ -1,6 +1,6 @@
 # ALFNet：动态观测支持下的归纳时空预测
 
-<!-- v6 中文工作稿（2026-11-12 第十轮修改：主表只列四类场景、五项消融、METR-LA 配对分析改用四组各自最优的代表基线、新增附录；2026-11-13 第十一轮：附录正文并入本文件，4.5/4.6/4.8 改为四个数据集的全窗口分析，4.7 增加保留节点比例实验；第十二轮：按 ../notes/WRITING_RULES_CN.md 重写结果分析，图4 改为柱状图、图6 改为点图、图7 改为两行，比较方法的实现移至附录A.5，删除计算开销）。本文件是编辑源头，sections/*.tex 由 _scripts/md_to_tex.py 从本文件生成；历史版本见 git 记录。逐条修改依据见 ../notes/V6_CHANGELOG_CN.md。 -->
+<!-- v6 中文工作稿（2026-11-12 第十轮修改：主表只列四类场景、五项消融、METR-LA 配对分析改用四组各自最优的代表基线、新增附录；2026-11-13 第十一轮：附录正文并入本文件，4.5/4.6/4.8 改为四个数据集的全窗口分析，4.7 增加保留节点比例实验；第十二轮：按 ../notes/WRITING_RULES_CN.md 重写结果分析，图5 改为柱状图、图7 改为点图、图8 改为两行，比较方法的实现移至附录A.5，删除计算开销）。本文件是编辑源头，sections/*.tex 由 _scripts/md_to_tex.py 从本文件生成；历史版本见 git 记录。逐条修改依据见 ../notes/V6_CHANGELOG_CN.md。 -->
 
 ## 摘要
 
@@ -8,7 +8,11 @@
 
 ## 1 引言
 
-交通预测根据路网上传感器的历史读数预测未来的速度或流量，是信号控制、路径诱导和拥堵预警的基础。多数预测模型默认每个位置在历史窗口内都有完整的读数，但实际的传感网络做不到这一点：受预算限制，许多需要预测的位置从未安装传感器；路网扩建会接入新的传感器，它们起初只有很短的历史；设备故障或通信异常又会让原本正常的传感器中断读数 [1,2]。于是，在同一时刻的路网上，有的位置历史完整，有的位置只有最近几步读数，有的位置刚丢掉最近的读数，还有的位置完全没有读数。本文关心的就是这种情形下的预测：路网拓扑已知，部分位置的读数不参与训练，历史窗口内可以发生传感器的接入或失效，模型在推理时不更新参数，需要用同一组参数预测所有位置未来的交通状态。我们称之为动态观测支持下的归纳时空预测，其中观测支持（OS）指历史窗口内实际可用读数的位置、数量和时间分布。
+交通预测根据路网上传感器的历史读数预测未来的速度或流量，是信号控制、路径诱导和拥堵预警的基础。多数预测模型默认每个位置在历史窗口内都有完整的读数，但实际的传感网络做不到这一点：受预算限制，许多需要预测的位置从未安装传感器；路网扩建会接入新的传感器，它们起初只有很短的历史；设备故障或通信异常又会让原本正常的传感器中断读数 [1,2]。如图1所示，在同一时刻的路网上，有的位置历史完整，有的位置只有最近几步读数，有的位置刚丢掉最近的读数，还有的位置完全没有读数。本文关心的就是这种情形下的预测：路网拓扑已知，部分位置的读数不参与训练，历史窗口内可以发生传感器的接入或失效，模型在推理时不更新参数，需要用同一组参数预测所有位置未来的交通状态。我们称之为动态观测支持下的归纳时空预测，其中观测支持（OS）指历史窗口内实际可用读数的位置、数量和时间分布。
+
+![四个路网位置、各自的观测轨迹与全路网预测任务](../figures/intro_observation_support_v3.png)
+
+**图1　动态观测支持下的路网预测。** (a) 同一路网上的四个示意位置。(b) 四行共用一条时间轴，实心点表示可见读数，空心点表示该步无读数。A 全程可读，D 全程无读数；B 与 C 各有四个可见读数，B 接入后保留的是近期历史，C 失效后留下的是早期历史。(c) 左侧切片表示不同时刻的本地读数与路网邻域，右侧切片表示各预测步的全路网输出。ALFNet 根据观测角色、掩码和状态进度利用历史信息，推理时参数固定。图中曲线均为示意。
 
 已有研究分别处理过其中的一部分。归纳预测方法把模型推广到没有训练数据的位置，可以预测无传感器位置的未来状态 [2–6]；面向缺失数据的预测方法处理输入中缺失的读数，其中一些还把掩码或距上次观测的时间间隔作为输入 [7–10]；面向传感网络变化的方法通过持续学习、少量样本适应或分布外泛化来应对新增的节点 [11–17]。这些方法大多用掩码或节点所属的类别来描述读数是否可用。然而，掩码只说明某一步有没有读数：当一个位置在窗口内完全没有读数时，掩码分不清它是从未接入还是刚刚失效；当它只有几步读数时，掩码也不说明接入或失效已经持续了多久。这两点恰恰关系到预测应当依靠什么：刚接入的位置只有很少的本地读数，需要更多地借助关联位置；刚失效的位置还保留着较早的读数，这些读数的参考价值会随失效时间变长而下降。MoGERNN [2] 在同一个模型中考察了新增与失效的传感器，与本文最为接近，但它依据节点的输入特征选择图专家，没有把接入或失效的进程作为显式的输入。
 
@@ -50,240 +54,108 @@ ALFNet 借鉴专家混合与特征调制的思想，但条件的来源与作用�
 
 ## 3 方法
 
-图1给出 ALFNet 的总体架构。3.1节定义问题与 OS 的表示，对应图中左列的输入；3.2–3.4节依次介绍 SAHC、ALFTemporal 与 ALFGraph，分别对应图中第二列、右上与右下部分；3.5节给出训练目标。
+图2给出 ALFNet 的总体架构。SAHC 先为全部节点补出一份共享的历史（3.2节），ALFTemporal 从其他节点的历史中提取条件特征（3.3节），ALFGraph 在 OS 的路由下完成编码与解码并输出预测（3.4节）。3.1节给出问题设置，3.5节给出训练目标；复现所需的特征构造、分区填充与训练细节见附录C。
 
 ![ALFNet 架构](../figures/ALFNet.pdf)
 
-<!-- 图1：使用 PDF 矢量架构图。 -->
+<!-- 图2：使用 PDF 矢量架构图。 -->
 
-**图1　ALFNet 总体架构。** 左列为输入：可见历史 $\mathbf{X}$、生命周期上下文 $\mathbf{S}=[\mathbf{R},\mathbf{a},\mathbf{M}]$ 与静态路网（3.1节）；第二列为 SAHC（3.2节）；右上为 ALFTemporal 及其 FiLM 参数头（3.3节）；右下为 ALFGraph，包括 OS 路由的图编码器、FiLM 调制、残差自回归解码、参考恢复与角色缩放图修正（3.4节）。
+**图2　ALFNet 总体架构。** 左列为输入：可见历史 $\mathbf{X}$、生命周期上下文 $\mathbf{S}=[\mathbf{R},\mathbf{a},\mathbf{M}]$ 与静态路网（3.1节）；第二列为 SAHC（3.2节）；右上为 ALFTemporal 及其 FiLM 参数头（3.3节）；右下为 ALFGraph，包括 OS 路由的图编码器、FiLM 调制、残差自回归解码、参考恢复与角色缩放图修正（3.4节）。
 
 ### 3.1 问题设置
 
-**任务。** 本文研究动态观测支持下的归纳时空预测：给定路网和各节点在历史窗口内可见的读数，预测全部节点未来的交通状态；其中一部分节点的读数从不参与训练，窗口内可以发生传感器的接入或失效，模型在推理时不更新参数。预测的对象始终是未来的交通数值；历史补全、空间分区与专家路由是 ALFNet 为完成预测采用的手段，不属于任务本身。
+**路网与数据。** 路网表示为有向加权图 $\mathcal{G}=(\mathcal{V},\mathbf{A})$，$|\mathcal{V}|=N$，$\mathbf{A}\in\mathbb{R}_{\ge 0}^{N\times N}$ 为加权邻接矩阵，全部节点的拓扑与静态属性在训练和推理中均可见。节点划分为已知节点 $\mathcal{V}_K$ 以及验证、测试保留节点 $\mathcal{V}_V$、$\mathcal{V}_T$：训练只读取 $\mathcal{V}_K$ 的读数，验证与测试分别加入 $\mathcal{V}_V$ 与 $\mathcal{V}_T$ 的历史，模型参数不再更新。给定历史长度 $L$ 与预测长度 $H$（本文均为12），记标准化后的历史为 $\mathbf{X}\in\mathbb{R}^{L\times N}$，未来目标为 $\mathbf{Y}\in\mathbb{R}^{H\times N}$，观测掩码为 $\mathbf{M}\in\{0,1\}^{L\times N}$，不可用位置的输入置零；$\mathbf{x}_t$、$\mathbf{m}_t$ 为 $\mathbf{X}$ 与 $\mathbf{M}$ 的第 $t$ 行。
 
-**路网、节点划分与数据。** 路网表示为有向加权图 $\mathcal{G}=(\mathcal{V},\mathbf{A})$，其中 $|\mathcal{V}|=N$，$\mathbf{A}\in\mathbb{R}_{\ge 0}^{N\times N}$ 为加权邻接矩阵，全部节点的拓扑及静态属性在训练与推理中均可见。节点划分为已知节点 $\mathcal{V}_K$ 以及验证、测试保留节点 $\mathcal{V}_V$、$\mathcal{V}_T$：训练只读取 $\mathcal{V}_K$ 的动态信号，验证与测试分别加入 $\mathcal{V}_V$ 与 $\mathcal{V}_T$ 的历史；标准化统计量仅由训练时段的 $\mathcal{V}_K$ 计算。给定历史长度 $L=12$ 与预测长度 $H=12$，记标准化后的历史为 $\mathbf{X}\in\mathbb{R}^{L\times N}$，未来目标为 $\mathbf{Y}\in\mathbb{R}^{H\times N}$，观测掩码为 $\mathbf{M}\in\{0,1\}^{L\times N}$；$\mathbf{x}_t,\mathbf{m}_t\in\mathbb{R}^{N}$ 为第 $t$ 步全部节点的读数与掩码，即 $\mathbf{X}$ 与 $\mathbf{M}$ 的第 $t$ 行。不可用位置的输入值置零。
-
-**观测角色与状态进度。** 窗口内哪些读数可用由 OS 描述。除掩码外，本文再用两个逐步变量刻画 OS。在第 $t$ 步，每个节点属于以下四种观测角色之一：在线（ON）表示节点处于当前阶段的信号暴露范围内，且没有发生接入或失效事件；新接入（NEW）表示节点在窗口内接入，接入后开始提供读数；已失效（OFF）表示节点原本可读，在窗口内失效后不再提供读数；无观测（UNO）表示节点在该步没有可读历史，包括尚未接入的节点以及不在当前阶段信号暴露范围内的节点（如训练时的保留节点）。这四种角色与 MoGERNN 对传感器的四类划分（持续可用、新增、失效与虚拟传感器）相对应 [2]；不同的是，本文的角色逐步定义，同一节点在一个窗口内可以由 UNO 变为 NEW，或由 ON 变为 OFF。$\mathbf{R}_t\in\{0,1\}^{N\times4}$ 依次按 ON、NEW、UNO、OFF 对观测角色做 one-hot 编码。状态进度 $\mathbf{a}_t\in[0,1]^{N}$ 描述接入或失效已持续的比例：
-$$
-a_{t,n}=\begin{cases}1, & \text{节点 } n \text{ 在第 } t \text{ 步为 ON},\\ 0, & \text{节点 } n \text{ 在第 } t \text{ 步为 UNO},\\ \lambda/L, & \text{节点 } n \text{ 在第 } t \text{ 步为 NEW 或 OFF，且处于接入或失效后的第 } \lambda \text{ 步}.\end{cases}
-\tag{1}
-$$
-观测掩码由读数的自然有效性与观测角色共同决定：$M_{t,n}=1$ 当且仅当该读数自然有效且节点在第 $t$ 步为 ON 或 NEW。自然缺失只改变 $\mathbf{M}$，不改变观测角色，因此 ON 的偶发缺测仍记为 ON。三者逐步拼接为生命周期上下文
+**观测支持的表示。** 除掩码外，本文用两个逐步变量描述 OS。第 $t$ 步的每个节点属于四种观测角色之一：在线（ON），节点可读且没有发生接入或失效；新接入（NEW），节点在窗口内接入并开始提供读数；已失效（OFF），节点原本可读，在窗口内失效；无观测（UNO），节点在该步没有可读历史，包括尚未接入的节点和读数不向当前阶段开放的保留节点。这四种角色与 MoGERNN 对传感器的四类划分相对应 [2]，不同的是本文的角色逐步定义，同一节点在一个窗口内可以由 UNO 变为 NEW，或由 ON 变为 OFF。$\mathbf{R}_t\in\{0,1\}^{N\times4}$ 为角色的 one-hot 编码。状态进度 $\mathbf{a}_t\in[0,1]^{N}$ 描述接入或失效已持续的比例：ON 为1，UNO 为0，NEW 与 OFF 为 $\lambda/L$，$\lambda$ 是接入或失效后已经过的步数。掩码满足 $M_{t,n}=1$ 当且仅当该读数自然有效且节点为 ON 或 NEW；自然缺失只改变掩码，不改变角色。三者逐步拼接为生命周期上下文
 $$
 \mathbf{S}_t=[\mathbf{R}_t,\ \mathbf{a}_t,\ \mathbf{m}_t]\in\mathbb{R}^{N\times 6},\qquad t=1,\dots,L.
-\tag{2}
+\tag{1}
 $$
+本文假设观测角色与状态进度已知，实际应用中可由传感器的接入记录与故障检测获得。
 
-**场景。** 按目标节点在窗口内的观测角色轨迹，OS 的变化归纳为四类场景。记 $m\in\{1,\dots,L\}$ 为接入或失效之后已经持续的步数（事件持续步数）：Unseen 中目标节点全程为 UNO；Steady 中全程为 ON；Join 中前 $L-m$ 步为 UNO、最后 $m$ 步为 NEW；Fault 中前 $L-m$ 步为 ON、最后 $m$ 步为 OFF。因此，Join 中 $m$ 越大，窗口内可读的新读数越多；Fault 中 $m$ 越大，缺失的近期读数越多。$m$ 在 $1$ 至 $L$ 内均匀抽取；训练时四类场景均在已知节点上模拟。窗口内可见读数数 $q_n=\sum_{t}M_{t,n}$ 只用于描述 OS 的多少，不作为额外输入。本文假设观测角色与状态进度已知，实际应用中可由传感器接入记录与故障检测获得。
-
-**预测任务。** 在上述设置下，预测任务是学习映射
+**场景与预测任务。** 按目标节点在窗口内的角色轨迹，OS 的变化归纳为四类场景。记 $m\in\{1,\dots,L\}$ 为接入或失效之后已持续的步数：Unseen 中目标节点全程为 UNO；Steady 中全程为 ON；Join 中前 $L-m$ 步为 UNO、最后 $m$ 步为 NEW；Fault 中前 $L-m$ 步为 ON、最后 $m$ 步为 OFF。Join 中 $m$ 越大，可读的新读数越多；Fault 中 $m$ 越大，缺失的近期读数越多。训练时四类场景均在已知节点上模拟。预测任务是学习映射
 $$
 \hat{\mathbf{Y}}=f_{\theta}\big(\mathbf{X}\odot\mathbf{M},\ \mathbf{S}_{1:L},\ \mathbf{A},\ \mathcal{T}\big)\in\mathbb{R}^{H\times N},
-\tag{3}
+\tag{2}
 $$
-其中 $\mathcal{T}$ 为窗口内各步的日历信息（日内时段与星期）。参数 $\theta$ 只用训练时段已知节点 $\mathcal{V}_K$ 的读数学习，验证与测试时保持不变，也不使用保留节点的标签。同一节点在不同窗口中可以处于不同的观测角色与布局，因此模型应依据当前窗口的 OS 组织计算，而不是依据节点是否参与过训练。
-
-**任务条件与本文的做法。** 上述设置中，属于任务条件的有四点：全部节点的拓扑与静态属性已知；保留节点的读数不参与训练；各节点在窗口内的接入与失效状态已知；推理时不更新参数。用 $\mathbf{R}$、$\mathbf{a}$ 与 $\mathbf{M}$ 拼成 $\mathbf{S}$ 来表示 OS，是 ALFNet 的做法，其他方法可以采用别的表示；$m$ 的均匀抽取与四类场景的等配额属于实验协议（4.1节）。
+其中 $\mathcal{T}$ 为窗口内各步的日历信息（日内时段与星期）。同一节点在不同窗口中可以处于不同的观测角色，因此模型依据当前窗口的 OS 组织计算，而不是依据节点是否参与过训练。
 
 ### 3.2 观测支持感知历史补全（SAHC）
 
-SAHC 对全部 $N$ 个节点、完整的 $L$ 步历史只运行一次，依次进行双向图循环补全、窗口内插值与参考中心化。记 $\mathrm{rn}(\cdot)$ 为矩阵的行归一化（每行除以该行元素之和，全零行保持不变），前向与后向转移矩阵为 $\mathbf{P}_{\mathrm f}=\mathrm{rn}(\mathbf{A})$ 与 $\mathbf{P}_{\mathrm b}=\mathrm{rn}(\mathbf{A}^{\top})$。
-
-**图门控循环单元。** SAHC 与 ALFGraph 都以图门控循环单元为递推单元。给定输入 $\mathbf{x}$ 与上一隐藏状态 $\mathbf{h}$，单元按
+SAHC 对全部节点的 $L$ 步历史运行一次，为后续两个模块提供同一份补全后的历史。它采用图循环插补的结构 [18]，沿时间正、反两个方向各运行一个图循环层。以正向为例，记 $\mathbf{h}_{t-1}\in\mathbb{R}^{N\times64}$ 为上一步的隐藏状态，第 $t$ 步的计算为
 $$
-\begin{aligned}
-\mathbf{r}&=\sigma\big(\Phi_r([\mathbf{x},\mathbf{h}])\big),\qquad \mathbf{u}=\sigma\big(\Phi_u([\mathbf{x},\mathbf{h}])\big),\\
-\tilde{\mathbf{h}}&=\tanh\big(\Phi_c([\mathbf{x},\mathbf{r}\odot\mathbf{h}])\big),\qquad \mathbf{h}'=\mathbf{u}\odot\mathbf{h}+(\mathbf{1}-\mathbf{u})\odot\tilde{\mathbf{h}}
-\end{aligned}
+\tilde{\mathbf{x}}_t=\mathbf{m}_t\odot\mathbf{x}_t+(\mathbf{1}-\mathbf{m}_t)\odot\hat{\mathbf{x}}_t,\qquad \mathbf{h}_t=\mathrm{GRU}_{\mathcal{D}}\big([\tilde{\mathbf{x}}_t,\ \mathbf{S}_t],\ \mathbf{h}_{t-1}\big),
+\tag{3}
+$$
+其中 $\hat{\mathbf{x}}_t$ 是由 $\mathbf{h}_{t-1}$ 给出的估计：先经线性读出得到初值，再以 $\mathbf{S}_t$ 为输入，沿路网的前向与后向转移矩阵做一次空间消息传递加以修正；$\mathrm{GRU}_{\mathcal{D}}$ 是以二阶扩散卷积 [23] 为门控变换的图门控循环单元。可见位置始终保留观测值，生命周期上下文进入两个方向的每一步递推。两个方向在每个历史位置上的节点表示与掩码经多层感知机（MLP）融合为重建值 $\mathbf{X}^{\mathrm{rec}}$，补全结果为
+$$
+\mathbf{X}^{\mathrm{c}}=\mathbf{M}\odot\mathbf{X}+(\mathbf{1}-\mathbf{M})\odot\mathbf{X}^{\mathrm{rec}}.
 \tag{4}
 $$
-更新隐藏状态，其中 $\mathbf{r}$、$\mathbf{u}$ 为重置门与更新门，$\tilde{\mathbf{h}}$ 为候选状态，$\sigma(\cdot)$ 为 sigmoid；$\Phi_r$、$\Phi_u$、$\Phi_c$ 为三个参数独立的图变换，输出宽度均为64。SAHC 中三个图变换均取二阶扩散卷积 $\mathcal{D}(\mathbf{U})=[\mathbf{U},\mathbf{P}_{\mathrm f}\mathbf{U},\mathbf{P}_{\mathrm f}^{2}\mathbf{U},\mathbf{P}_{\mathrm b}\mathbf{U},\mathbf{P}_{\mathrm b}^{2}\mathbf{U}]\,\mathbf{W}_{\mathcal{D}}$，记该单元为 $\mathrm{GRU}_{\mathcal{D}}$；ALFGraph 中的图变换在3.4节给出。
 
-**双向图循环补全。** SAHC 沿时间正、反两个方向各运行一个图循环补全层。以正向为例，隐藏状态 $\mathbf{h}_0=\mathbf{0}\in\mathbb{R}^{N\times64}$。对 $t=1,\dots,L$，先由上一隐藏状态给出初步估计，并保留可见位置的观测值：
+**窗口内插值与参考中心化。** 对窗口内至少有一个可见读数的节点，插值开关打开时，其缺失位置改用可见读数的线性插值，首个可见步之前与末个可见步之后取最近的可见值；没有可见读数的节点保留 $\mathbf{X}^{\mathrm{c}}$ 中的值。记处理后的历史为 $\mathbf{X}^{\mathrm{fill}}$。随后每个节点减去自己的参考值，得到共享历史
 $$
-\hat{\mathbf{x}}^{(1)}_t=\mathbf{h}_{t-1}\mathbf{W}_1,\qquad \mathbf{x}^{(1)}_t=\mathbf{m}_t\odot\mathbf{x}_t+(\mathbf{1}-\mathbf{m}_t)\odot\hat{\mathbf{x}}^{(1)}_t.
+\bar{\mathbf{X}}=\mathbf{X}^{\mathrm{fill}}-\alpha\,\mathbf{1}_L\mathbf{v}^{\top},
 \tag{5}
 $$
-随后通过一次空间消息传递修正估计：
-$$
-\begin{aligned}
-\mathbf{z}_t&=[\mathbf{x}^{(1)}_t,\ \mathbf{S}_t,\ \mathbf{h}_{t-1}]\,\mathbf{W}_{\mathrm{in}},\\
-\boldsymbol{\rho}_t&=\Big[\mathrm{PReLU}\big(\big[[\mathbf{P}_{\mathrm f}\mathbf{z}_t,\ \mathbf{P}_{\mathrm b}\mathbf{z}_t]\,\mathbf{W}_{\mathrm s},\ \mathbf{h}_{t-1}\big]\,\mathbf{W}_{\mathrm o}\big),\ \mathbf{h}_{t-1}\Big],\qquad \hat{\mathbf{x}}^{(2)}_t=\boldsymbol{\rho}_t\mathbf{W}_2,
-\end{aligned}
-\tag{6}
-$$
-其中 $\mathbf{z}_t\in\mathbb{R}^{N\times64}$ 为投影后的输入，$\boldsymbol{\rho}_t\in\mathbb{R}^{N\times128}$ 为该步的节点表示。修正后的估计同样只填入缺失位置，再与生命周期上下文一起更新隐藏状态：
-$$
-\mathbf{x}^{(2)}_t=\mathbf{m}_t\odot\mathbf{x}_t+(\mathbf{1}-\mathbf{m}_t)\odot\hat{\mathbf{x}}^{(2)}_t,\qquad \mathbf{h}_t=\mathrm{GRU}_{\mathcal{D}}\big([\mathbf{x}^{(2)}_t,\ \mathbf{S}_t],\ \mathbf{h}_{t-1}\big).
-\tag{7}
-$$
-反向层在时间反转的序列上执行相同计算，参数独立。记正向与反向在第 $t$ 步的节点表示为 $\overrightarrow{\boldsymbol{\rho}}_t$ 与 $\overleftarrow{\boldsymbol{\rho}}_t$，二者在每个历史位置上与掩码拼接，经多层感知机（MLP）融合为重建值，最后保留可见读数：
-$$
-\mathbf{x}^{\mathrm{rec}}_t=\mathrm{ReLU}\big([\overrightarrow{\boldsymbol{\rho}}_t,\ \overleftarrow{\boldsymbol{\rho}}_t,\ \mathbf{m}_t]\,\mathbf{W}_3\big)\mathbf{W}_4,\qquad \mathbf{X}^{\mathrm{c}}=\mathbf{M}\odot\mathbf{X}+(\mathbf{1}-\mathbf{M})\odot\mathbf{X}^{\mathrm{rec}},
-\tag{8}
-$$
-其中 $\mathbf{X}^{\mathrm{rec}}=[\mathbf{x}^{\mathrm{rec}}_1,\dots,\mathbf{x}^{\mathrm{rec}}_L]^{\top}$ 为重建结果。式(5)–(8)中的 $\mathbf{W}_{\ast}$ 均为可学习矩阵，偏置省略，隐藏宽度与融合 MLP 的宽度均为64。生命周期上下文进入两个方向的每一步递推，掩码还用于保留可见读数与融合。SAHC 没有独立的重建损失，只通过下游预测损失训练。
-
-**窗口内插值。** 设 $\iota\in\{0,1\}$ 为插值开关。$\iota=1$ 时，对至少有一个可见读数（$q_n>0$）的节点，用窗口内可见读数的线性插值覆盖其缺失位置：
-$$
-X^{\mathrm{fill}}_{t,n}=\begin{cases}X_{t^{-},n}+\dfrac{t-t^{-}}{t^{+}-t^{-}}\big(X_{t^{+},n}-X_{t^{-},n}\big), & \iota=1,\ M_{t,n}=0,\ q_n>0,\\[6pt] X^{\mathrm{c}}_{t,n}, & \text{其他情况},\end{cases}
-\tag{9}
-$$
-其中 $t^{-}$ 与 $t^{+}$ 为 $t$ 之前与之后最近的可见步；$t$ 位于第一个可见步之前或最后一个可见步之后时，二者都取最近的可见步并令分式为0，即取最近的可见值。没有可见读数的节点保留 $\mathbf{X}^{\mathrm{c}}$ 中的补全值，因此插值与图循环补全不是按 $q_n$ 互斥的两条支路。
-
-**参考中心化。** 记 $t^{\ast}_n=\max\{t:M_{t,n}=1\}$ 为节点 $n$ 的最后一个可见步，参考值与中心化后的共享历史为
-$$
-v_n=\begin{cases}X_{t^{\ast}_n,n}, & q_n>0,\\ 0, & q_n=0,\end{cases}\qquad \bar{\mathbf{X}}=\mathbf{X}^{\mathrm{fill}}-\alpha\,\mathbf{1}_L\mathbf{v}^{\top},
-\tag{10}
-$$
-其中 $\alpha\ge0$ 为中心化强度，$\mathbf{1}_L$ 为全1列向量，即 $\mathbf{v}$ 沿时间维广播；$\mathbf{S}$ 保持不变。中心化在输出端由式(26)加回。上述处理均不使用未来或被遮蔽的真值。保留观测值发生在中心化之前，中心化后可见位置的数值也随之平移。ALFTemporal 与 ALFGraph 读取同一份 $\bar{\mathbf{X}}$。
+其中 $v_n$ 为节点 $n$ 最后一个可见读数（没有可见读数时为0），$\alpha\ge0$ 为中心化强度，$\mathbf{1}_L$ 为全1列向量。中心化使解码器预测相对于最近读数的变化量，参考值在输出端加回。SAHC 没有独立的重建损失，只通过下游的预测损失训练；ALFTemporal 与 ALFGraph 读取同一份 $\bar{\mathbf{X}}$。
 
 ### 3.3 空间上下文时间条件分支（ALFTemporal）
 
-ALFTemporal 从跨节点历史生成逐节点的条件特征。它只为 ALFGraph 提供条件，不产生独立预测；计算上先由它得到调制参数，再执行 ALFGraph。
+ALFTemporal 从其他节点的历史中为每个节点提取条件特征。它只为 ALFGraph 提供调制参数，不单独输出预测。
 
-**时间嵌入。** 对每个节点 $n$，ALFTemporal 读取 $\mathbf{F}_n=[\bar{\mathbf{X}}_{:,n},\ \mathbf{S}_{1:L,n},\ \boldsymbol{\tau}/288,\ \boldsymbol{\delta}/7]\in\mathbb{R}^{L\times9}$，其中 $\bar{\mathbf{X}}_{:,n}$ 为 $\bar{\mathbf{X}}$ 的第 $n$ 列，$\mathbf{S}_{1:L,n}\in\mathbb{R}^{L\times6}$ 为节点 $n$ 在各步的生命周期上下文，$\tau_t=12\cdot\mathrm{hour}_t+\lfloor\mathrm{minute}_t/5\rfloor\in\{0,\dots,287\}$ 为日内时段，$\delta_t\in\{0,\dots,6\}$ 为星期。卷积核长度与步长均为 $L$ 的时间卷积把整个窗口映射为一个64维向量，等价于
+**节点表示。** 对节点 $n$，把共享历史、生命周期上下文与日历信息沿时间排成 $\mathbf{F}_n=[\bar{\mathbf{X}}_{:,n},\ \mathbf{S}_{1:L,n},\ \boldsymbol{\tau},\ \boldsymbol{\delta}]\in\mathbb{R}^{L\times9}$，其中 $\boldsymbol{\tau}$、$\boldsymbol{\delta}$ 为归一化的日内时段与星期。整个窗口被映射为一个 token，再拼接日历嵌入与结构嵌入：
 $$
-\mathbf{e}_n=\mathrm{vec}(\mathbf{F}_n)\,\mathbf{W}_e+\mathbf{b}_e\in\mathbb{R}^{64},\qquad \mathbf{W}_e\in\mathbb{R}^{9L\times64},
-\tag{11}
+\mathbf{z}^{0}_n=\big[\mathrm{vec}(\mathbf{F}_n)\,\mathbf{W}_e\ \|\ \mathbf{E}^{\mathrm{tod}}\ \|\ \mathbf{E}^{\mathrm{dow}}\ \|\ \phi(\mathbf{g}_n)\big]\in\mathbb{R}^{D},
+\tag{6}
 $$
-因此每个节点只有一个时间 patch，窗口内读数的位置信息由 $\mathbf{W}_e$ 的不同行保留。随后拼接日历与结构嵌入：
-$$
-\mathbf{z}^{0}_n=\big[\mathbf{e}_n\ \|\ \mathbf{E}^{\mathrm{tod}}_{\tau_L}\ \|\ \mathbf{E}^{\mathrm{dow}}_{\delta_L}\ \|\ \phi(\mathbf{g}_n)\big]\in\mathbb{R}^{160},
-\tag{12}
-$$
-其中 $\|$ 表示拼接，$\mathbf{E}^{\mathrm{tod}}\in\mathbb{R}^{288\times32}$ 与 $\mathbf{E}^{\mathrm{dow}}\in\mathbb{R}^{7\times32}$ 为可学习的日历嵌入表，按末步的日内时段与星期取行。
+其中 $\|$ 表示拼接，$D=160$；$\mathbf{E}^{\mathrm{tod}}$、$\mathbf{E}^{\mathrm{dow}}$ 为按末步时段与星期查表得到的日历嵌入；$\mathbf{g}_n$ 为由节点坐标与出入度计算的静态结构特征，$\phi$ 为全部节点共享的 MLP。模型不使用逐节点可训练的身份嵌入，保留节点与已知节点由同一组参数处理。
 
-**结构嵌入。** 模型不使用逐节点可训练的身份嵌入，以免为保留节点引入可训练的身份参数；结构嵌入由所有节点共享的映射 $\phi$ 作用于静态结构特征 $\mathbf{g}_n\in\mathbb{R}^{7}$ 得到。记 $d^{\mathrm{in}}_n=\sum_{n'\ne n}A_{n'n}$、$d^{\mathrm{out}}_n=\sum_{n'\ne n}A_{nn'}$、$d^{\mathrm{tot}}_n=d^{\mathrm{in}}_n+d^{\mathrm{out}}_n$，$(o^{1}_n,o^{2}_n)$ 为节点的两维坐标（无坐标时置零），则
+**空间分区与两阶段注意力。** 参照空间分区的做法 [19]，训练前把节点划分为 $P$ 个分区，每个分区含 $C$ 个槽位：坐标可靠时按坐标以 KD-tree 划分，否则按图拓扑以广度优先搜索划分。按分区排列节点表示，得到 $\mathbf{T}\in\mathbb{R}^{P\times C\times D}$，$\mathbf{T}_{:,c}$ 为各分区第 $c$ 个槽位组成的切片，$\mathbf{T}_{p,:}$ 为第 $p$ 个分区的全部槽位。记 $\mathcal{A}(\mathbf{U},\mathbf{V})$ 为一个注意力层：以 $\mathbf{U}$ 为查询、$\mathbf{V}$ 为键与值做注意力，并带有残差连接、层归一化与前馈层。分区张量经一个两阶段注意力块 [20] 处理：
 $$
-\begin{aligned}
-\mathbf{g}_n&=\big[\nu(\mathbf{o}^{1})_n,\ \nu(\mathbf{o}^{2})_n,\ \nu(\mathbf{d}^{\mathrm{in}})_n,\ \nu(\mathbf{d}^{\mathrm{out}})_n,\ \nu(\mathbf{d}^{\mathrm{tot}})_n,\ \nu\big(\log(1+\mathbf{d}^{\mathrm{tot}})\big)_n,\ \mathbb{I}[d^{\mathrm{tot}}_n=0]\big],\\
-\nu(\mathbf{s})_n&=\frac{s_n-\bar{s}}{\max_{n'}|s_{n'}-\bar{s}|},
-\end{aligned}
-\tag{13}
+\mathbf{T}'_{:,c}=\mathcal{A}_1\big(\mathbf{T}_{:,c},\mathbf{T}_{:,c}\big),\qquad \mathbf{B}_p=\mathrm{Attn}\big(\mathbf{Q}_p,\mathbf{T}'_{p,:}\big),\qquad \mathbf{T}''_{p,:}=\mathcal{A}_2\big(\mathbf{T}'_{p,:},\mathbf{B}_p\big).
+\tag{7}
 $$
-其中 $\mathbf{o}^{1}$、$\mathbf{d}^{\mathrm{in}}$ 等表示由全部节点的相应取值组成的向量，$\bar{s}$ 为向量 $\mathbf{s}$ 在全部节点上的均值，$\mathbb{I}[\cdot]$ 为指示函数；$\phi$ 为两层 MLP（$7\to64\to32$，ReLU 激活）。
-
-**空间分区。** 训练前，节点被划分为 $P=32$ 个分区，每个分区含 $C$ 个槽位：节点坐标可靠时按坐标以 KD-tree 划分，否则依据图拓扑做考虑连通分量的广度优先搜索（BFS）划分。记 $\pi(p,c)$ 为第 $p$ 个分区第 $c$ 个槽位对应的节点；节点不足 $C$ 个的分区以邻接排序的真实节点补足，这些补足副本只提供上下文，不产生输出。按 $\pi$ 排列得到分区张量 $\mathbf{T}\in\mathbb{R}^{P\times C\times160}$，其中 $\mathbf{T}_{p,c}=\mathbf{z}^{0}_{\pi(p,c)}$；下文以 $\mathbf{T}_{:,c}\in\mathbb{R}^{P\times160}$ 表示各分区第 $c$ 个槽位组成的切片，以 $\mathbf{T}_{p,:}\in\mathbb{R}^{C\times160}$ 表示第 $p$ 个分区的全部槽位。
-
-**两阶段注意力。** 分区张量经一个两阶段注意力块处理。记单头注意力与前馈层为
-$$
-\mathrm{Attn}(\mathbf{Q},\mathbf{K},\mathbf{V})=\mathrm{softmax}\Big(\frac{(\mathbf{Q}\mathbf{W}^{Q})(\mathbf{K}\mathbf{W}^{K})^{\top}}{\sqrt{160}}\Big)\mathbf{V}\mathbf{W}^{V}\mathbf{W}^{O},\qquad \mathrm{FFN}(\cdot)=\mathrm{GELU}\big((\cdot)\,\mathbf{W}^{F}_{1}\big)\mathbf{W}^{F}_{2},
-\tag{14}
-$$
-其中各投影矩阵均为 $160\times160$，偏置省略；每次出现的 Attn 与 FFN 各有独立参数。第一阶段为跨分区注意力：对每个槽位 $c$，在 $P$ 个分区的同位 token $\mathbf{T}_{:,c}$ 之间做自注意力，
-$$
-\tilde{\mathbf{T}}_{:,c}=\mathrm{LN}\big(\mathbf{T}_{:,c}+\mathrm{Attn}_1(\mathbf{T}_{:,c},\mathbf{T}_{:,c},\mathbf{T}_{:,c})\big),\qquad \mathbf{T}'_{:,c}=\mathrm{LN}\big(\tilde{\mathbf{T}}_{:,c}+\mathrm{FFN}_1(\tilde{\mathbf{T}}_{:,c})\big),
-\tag{15}
-$$
-其中 LN 为层归一化。对 $c=1,\dots,C$ 执行式(15)，得到第一阶段输出 $\mathbf{T}'\in\mathbb{R}^{P\times C\times160}$，其中每个 $\mathbf{T}'_{p,c}$ 都已融合其他分区同一槽位的信息。第二阶段在每个分区内部进行：对分区 $p$ 取 $\mathbf{T}'_{p,:}$，由4个可学习的潜在 token $\mathbf{Q}_p\in\mathbb{R}^{4\times160}$ 先从 $C$ 个槽位汇聚信息，再回传给各槽位，
-$$
-\begin{aligned}
-\mathbf{B}_p&=\mathrm{Attn}_2(\mathbf{Q}_p,\mathbf{T}'_{p,:},\mathbf{T}'_{p,:}),\\
-\tilde{\mathbf{T}}_{p,:}&=\mathrm{LN}\big(\mathbf{T}'_{p,:}+\mathrm{Attn}_3(\mathbf{T}'_{p,:},\mathbf{B}_p,\mathbf{B}_p)\big),\qquad \mathbf{T}''_{p,:}=\mathrm{LN}\big(\tilde{\mathbf{T}}_{p,:}+\mathrm{FFN}_2(\tilde{\mathbf{T}}_{p,:})\big).
-\end{aligned}
-\tag{16}
-$$
-其中 $\mathbf{B}_p\in\mathbb{R}^{4\times160}$ 为汇聚得到的分区摘要。对 $p=1,\dots,P$ 执行式(16)，得到 $\mathbf{T}''\in\mathbb{R}^{P\times C\times160}$。由于第二阶段的输入已经包含跨分区信息，分区内汇聚与回传后，每个槽位同时获得分区内与分区间的上下文；分区内的交互经过4个 token 的瓶颈，而不是 $C\times C$ 的直接注意力。注意力权重与各残差分支上使用 dropout。最后按 $\pi$ 从 $\mathbf{T}''$ 中取回每个真实节点的输出，恢复原始节点顺序，得到条件特征 $\mathbf{Z}\in\mathbb{R}^{N\times160}$，其第 $n$ 行记为 $\mathbf{z}_n$。
-
-**FiLM 参数头。** FiLM 参数头把 $\mathbf{z}_n$ 映射为逐节点的缩放与平移参数：
-$$
-[\Delta\boldsymbol{\gamma}_n,\ \boldsymbol{\beta}_n]=\mathrm{ReLU}\big(\mathbf{z}_n\mathbf{W}_{\gamma,1}+\mathbf{b}_{\gamma,1}\big)\mathbf{W}_{\gamma,2}+\mathbf{b}_{\gamma,2},\qquad \Delta\boldsymbol{\gamma}_n,\ \boldsymbol{\beta}_n\in\mathbb{R}^{64},
-\tag{17}
-$$
-其中 $\mathbf{W}_{\gamma,1}\in\mathbb{R}^{160\times32}$，$\mathbf{W}_{\gamma,2}\in\mathbb{R}^{32\times128}$。最后一层零初始化，训练开始时调制为恒等映射。OS 对调制参数的影响只经由 ALFTemporal 的输入 $\mathbf{S}$，参数头本身不读取 $\mathbf{S}$。
+第一阶段在各分区的同位槽位之间做自注意力，交换分区之间的信息；第二阶段在每个分区内部进行，由4个可学习的潜在 token $\mathbf{Q}_p$ 先从 $C$ 个槽位汇聚出分区摘要 $\mathbf{B}_p$，再回传给各槽位。这样每个槽位同时获得分区内与分区间的上下文，而分区内的交互只经过4个 token。按分区映射取回各节点的输出，得到条件特征 $\mathbf{z}_n\in\mathbb{R}^{D}$，再由一个两层 MLP 映射为特征级线性调制（FiLM）[21] 的参数 $[\Delta\boldsymbol{\gamma}_n,\ \boldsymbol{\beta}_n]=\mathrm{MLP}(\mathbf{z}_n)$，$\Delta\boldsymbol{\gamma}_n,\boldsymbol{\beta}_n\in\mathbb{R}^{64}$。该 MLP 的最后一层零初始化，训练开始时调制为恒等映射。
 
 ### 3.4 观测条件化图预测（ALFGraph）
 
-ALFGraph 由 OS 路由的图编码器、FiLM 调制、残差自回归解码器、参考恢复与角色缩放图修正组成，输出唯一的预测 $\hat{\mathbf{Y}}$。
+ALFGraph 是一个编码器–解码器结构的图循环网络 [23]，它的每一次图传播都由 OS 路由。
 
-**OS 路由的图专家混合。** ALFGraph 采用专家混合（mixture of experts，MoE）的思想组织图传播：每个图专家由一个传播算子及其投影组成，路由器依据生命周期上下文为每个节点分配各专家的权重。五个专家的传播算子依次为恒等矩阵 $\mathbf{P}_1=\mathbf{I}$、二值邻接的行归一化 $\mathbf{P}_2=\mathrm{rn}(\mathbb{I}[\mathbf{A}>0])$、加权邻接的行归一化 $\mathbf{P}_3=\mathrm{rn}(\mathbf{A})$，以及前向与后向转移矩阵 $\mathbf{P}_4=\mathbf{P}_{\mathrm f}$、$\mathbf{P}_5=\mathbf{P}_{\mathrm b}$，其中 $\mathbb{I}[\cdot]$ 逐元素取指示函数；第3与第4个专家的传播算子相同，但投影参数与路由权重独立。第 $t$ 步的路由权重只由生命周期上下文决定：
+**OS 路由的图专家混合。** ALFGraph 以专家混合的方式组织图传播 [2,22]：五个图专家各有一个传播算子 $\mathbf{P}_j$ 与投影 $\boldsymbol{\Theta}_j$，传播算子依次为恒等矩阵、二值邻接的行归一化、加权邻接的行归一化以及前向与后向转移矩阵。第 $t$ 步各节点分配给五个专家的权重只由生命周期上下文决定：
 $$
 \mathbf{w}_t=\mathrm{softmax}\big(\mathbf{S}_t\mathbf{W}_g\big)\in\mathbb{R}^{N\times5},
-\tag{18}
+\tag{8}
 $$
-其中 $\mathbf{W}_g\in\mathbb{R}^{6\times5}$ 为路由矩阵，softmax 对每个节点在5个专家上归一化。给定输入 $\mathbf{U}\in\mathbb{R}^{N\times F}$，图专家混合的输出为
+其中 $\mathbf{W}_g\in\mathbb{R}^{6\times5}$ 为路由矩阵。给定输入 $\mathbf{U}\in\mathbb{R}^{N\times F}$，图专家混合的输出为
 $$
 G(\mathbf{U},\mathbf{S}_t)=\sum_{j=1}^{5}\mathbf{w}_{t,j}\odot\big(\mathbf{P}_j\,\mathbf{U}\,\boldsymbol{\Theta}_j\big)+\mathbf{b},
-\tag{19}
+\tag{9}
 $$
-其中 $\mathbf{w}_{t,j}\in\mathbb{R}^{N}$ 为 $\mathbf{w}_t$ 的第 $j$ 列，即各节点分配给第 $j$ 个专家的权重，沿特征维广播；$\boldsymbol{\Theta}_j\in\mathbb{R}^{F\times64}$ 为第 $j$ 个专家的投影，$\mathbf{b}\in\mathbb{R}^{64}$ 为偏置。五个专家全部参与加权，不做 top-$k$ 截断，也不加入噪声。路由器读取 OS 而非信号值：经过 SAHC 后，一个 NEW 节点与一个 ON 节点可能具有相似的输入数值，而二者的生命周期上下文仍然不同。
+其中 $\mathbf{w}_{t,j}\in\mathbb{R}^{N}$ 为 $\mathbf{w}_t$ 的第 $j$ 列，沿特征维广播。五个专家全部参与加权。路由器读取 OS 而不读取信号值：经过 SAHC 后，一个 NEW 节点与一个 ON 节点的输入数值可能相近，二者的生命周期上下文仍然不同。训练时另加一项路由平衡损失 $\mathcal{L}_{\mathrm{route}}$，避免权重集中到少数专家（附录C）。
 
-为避免路由集中到少数专家，每次调用图专家混合时计算负载平衡损失。记该次调用中批次内全部样本、全部节点的路由权重为 $w_{n,j}$（$n$ 遍历这些节点，$j=1,\dots,5$），则
-$$
-\mathrm{imp}_j=\sum_{n}w_{n,j},\qquad \mathrm{load}_j=\sum_{n}\mathbb{I}[w_{n,j}>0],\qquad \ell_{\mathrm{bal}}=0.01\big[\mathrm{CV}^2(\mathbf{imp})+\mathrm{CV}^2(\mathbf{load})\big],
-\tag{20}
-$$
-其中 $\mathbf{imp}=(\mathrm{imp}_1,\dots,\mathrm{imp}_5)$ 与 $\mathbf{load}$ 分别为各专家获得的权重总和与被分配的节点数，$\mathrm{CV}^2(\cdot)$ 为平方变异系数，即向量各分量的方差除以均值的平方（分母加 $10^{-10}$）。ALFGraph 共有12个图专家混合模块（编码器与解码器各两层，每层三个门）。记 $\mathcal{C}_g$ 为第 $g$ 个模块在一次前向计算中各次调用的平衡损失组成的集合，路由平衡损失为
-$$
-\mathcal{L}_{\mathrm{route}}=\frac{1}{12}\sum_{g=1}^{12}\frac{1}{|\mathcal{C}_g|}\sum_{\ell_{\mathrm{bal}}\in\mathcal{C}_g}\ell_{\mathrm{bal}}.
-\tag{21}
-$$
-由于五个专家全部参与加权，$\mathbf{load}$ 的各分量相同，$\mathrm{CV}^2(\mathbf{load})=0$，起作用的是 importance 项。
-
-**图编码器。** ALFGraph 的图门控循环单元沿用式(4)的门控形式，三个图变换 $\Phi_r$、$\Phi_u$、$\Phi_c$ 分别取为各带路由器的图专家混合 $G_r(\cdot,\mathbf{S})$、$G_u(\cdot,\mathbf{S})$、$G_c(\cdot,\mathbf{S})$，隐藏宽度为64，记为 $\mathbf{h}'=\mathrm{Cell}(\mathbf{x},\mathbf{h},\mathbf{S})$。各模块参数在递推步之间共享。编码器从零状态出发，对 $t=1,\dots,L$ 递推
-$$
-\mathbf{h}^{(1)}_t=\mathrm{Cell}^{(1)}_{\mathrm{enc}}\big([\bar{\mathbf{x}}_t,\mathbf{S}_t],\ \mathbf{h}^{(1)}_{t-1},\ \mathbf{S}_t\big),\qquad \mathbf{h}^{(2)}_t=\mathrm{Cell}^{(2)}_{\mathrm{enc}}\big(\mathbf{h}^{(1)}_t,\ \mathbf{h}^{(2)}_{t-1},\ \mathbf{S}_t\big),
-\tag{22}
-$$
-其中 $\bar{\mathbf{x}}_t$ 为 $\bar{\mathbf{X}}$ 的第 $t$ 行，第一层输入 $[\bar{\mathbf{x}}_t,\mathbf{S}_t]\in\mathbb{R}^{N\times7}$，$\mathbf{h}^{(l)}_t$ 为第 $l$ 层在第 $t$ 步的隐藏状态。由于观测角色与状态进度逐步进入路由，Join 节点在接入前后、Fault 节点在失效前后会使用不同的专家组合。
-
-**FiLM 调制。** 编码完成后，ALFTemporal 给出的参数在解码开始前一次性调制两层编码末状态：
+**编码与 FiLM 调制。** 编码器为两层图门控循环单元，单元内的三个门控变换都取式(9)的图专家混合。它从零状态出发，对 $t=1,\dots,L$ 逐步读入 $[\bar{\mathbf{x}}_t,\mathbf{S}_t]$（$\bar{\mathbf{x}}_t$ 为 $\bar{\mathbf{X}}$ 的第 $t$ 行），得到两层的末状态 $\mathbf{h}^{(l)}_L\in\mathbb{R}^{N\times64}$。由于观测角色与状态进度逐步进入路由，Join 节点在接入前后、Fault 节点在失效前后使用不同的专家组合。编码完成后，ALFTemporal 给出的参数调制两层末状态：
 $$
 \mathbf{h}^{(l)}_{\mathrm{mod}}=(\mathbf{1}+\Delta\boldsymbol{\gamma})\odot\mathbf{h}^{(l)}_L+\boldsymbol{\beta},\qquad l=1,2,
-\tag{23}
+\tag{10}
 $$
-其中 $\Delta\boldsymbol{\gamma},\boldsymbol{\beta}\in\mathbb{R}^{N\times64}$ 由式(17)逐节点堆叠得到。同一组参数广播到两层，不在每个预测步重新生成。
+其中 $\Delta\boldsymbol{\gamma},\boldsymbol{\beta}\in\mathbb{R}^{N\times64}$ 由各节点的调制参数堆叠而成。跨节点的条件特征由此进入图预测分支。
 
-**残差自回归解码。** 解码器以调制后的状态为初始隐藏状态，记 $\mathbf{h}^{(l)}_{L}\leftarrow\mathbf{h}^{(l)}_{\mathrm{mod}}$，并以 $\mathbf{y}_0=\bar{\mathbf{x}}_L$ 为初值；该初值来自补全与中心化后的历史，不一定是最后一次真实观测。对 $k=1,\dots,H$，
+**解码与输出。** 解码器同为两层图门控循环单元，以调制后的状态为初始隐藏状态，以 $\mathbf{y}_0=\bar{\mathbf{x}}_L$ 为初值，逐步预测相对上一步的增量，最后加回参考值：
 $$
-\begin{aligned}
-\mathbf{h}^{(1)}_{L+k}&=\mathrm{Cell}^{(1)}_{\mathrm{dec}}\big(\mathbf{y}^{\mathrm{in}}_{k-1},\ \mathbf{h}^{(1)}_{L+k-1},\ \mathbf{S}_L\big),\qquad \mathbf{h}^{(2)}_{L+k}=\mathrm{Cell}^{(2)}_{\mathrm{dec}}\big(\mathbf{h}^{(1)}_{L+k},\ \mathbf{h}^{(2)}_{L+k-1},\ \mathbf{S}_L\big),\\
-\mathbf{y}_k&=\mathbf{y}^{\mathrm{in}}_{k-1}+d\cdot\big(\mathbf{h}^{(2)}_{L+k}\mathbf{W}_y+b_y\big),
-\end{aligned}
-\tag{24}
+\mathbf{y}_k=\mathbf{y}_{k-1}+d\cdot\mathrm{Dec}\big(\mathbf{y}_{k-1},\ \mathbf{S}_L\big),\quad k=1,\dots,H,\qquad \tilde{\mathbf{Y}}=[\mathbf{y}_1,\dots,\mathbf{y}_H]^{\top}+\alpha\,\mathbf{1}_H\mathbf{v}^{\top},
+\tag{11}
 $$
-其中 $\mathbf{y}^{\mathrm{in}}_{k-1}$ 为第 $k$ 步的解码输入，$\mathbf{y}^{\mathrm{in}}_0=\mathbf{y}_0$；$\mathbf{W}_y\in\mathbb{R}^{64\times1}$ 与 $b_y$ 为输出投影，$d$ 为解码残差倍率；$\mathbf{h}^{(l)}_{L+k}$ 表示解码第 $k$ 步第 $l$ 层的隐藏状态，解码单元与编码单元参数独立。解码阶段没有未来的生命周期上下文，路由统一使用末步上下文 $\mathbf{S}_L$，不对未来观测角色的演变建模。下一步的输入 $\mathbf{y}^{\mathrm{in}}_k$ 在推理时等于未经修正的 $\mathbf{y}_k$；训练时采用受合法目标掩码约束的 Teacher Forcing：
-$$
-\mathbf{y}^{\mathrm{in}}_k=\boldsymbol{\kappa}_k\odot\big(\mathbf{y}^{\ast}_k-\alpha\mathbf{v}\big)+(\mathbf{1}-\boldsymbol{\kappa}_k)\odot\mathbf{y}_k,\qquad \boldsymbol{\kappa}_k=\xi_k\,\boldsymbol{\mu}_k,\qquad \xi_k\sim\mathrm{Bernoulli}\big(\max(0,\,1-i/40)\big),
-\tag{25}
-$$
-其中 $\mathbf{y}^{\ast}_k$ 为 $\mathbf{Y}$ 的第 $k$ 行，减去 $\alpha\mathbf{v}$ 使其与解码器处于同一中心化尺度；$\boldsymbol{\mu}_k\in\{0,1\}^{N}$ 标记第 $k$ 步可合法读取的目标；$i$ 为训练轮次，每个样本的每个预测步独立抽取 $\xi_k$。因此 Teacher Forcing 的比例在前40轮线性衰减至零，推理时 $\boldsymbol{\kappa}_k=\mathbf{0}$。
-
-**参考恢复。** 完成 $H$ 步解码后加回中心化参考值：
-$$
-\tilde{\mathbf{Y}}=[\mathbf{y}_1,\dots,\mathbf{y}_H]^{\top}+\alpha\,\mathbf{1}_H\mathbf{v}^{\top}.
-\tag{26}
-$$
-这一步只恢复式(10)减去的参考值，不是标准化的逆变换；误差计算时再用训练时段的标准化统计量还原到原始单位。
-
-**角色缩放图修正。** 输出端施加一个有界的邻域修正。令 $\mathbf{P}^{+}=\mathrm{rn}(\mathbf{A}+\mathbf{I})$、$\mathbf{P}^{-}=\mathrm{rn}\big((\mathbf{A}+\mathbf{I})^{\top}\big)$，$\tilde{\mathbf{y}}_k$ 为 $\tilde{\mathbf{Y}}$ 的第 $k$ 行，对每个预测步，
-$$
-\mathbf{D}_k=\mathrm{GELU}\big([\tilde{\mathbf{y}}_k,\ \mathbf{P}^{+}\tilde{\mathbf{y}}_k,\ \mathbf{P}^{-}\tilde{\mathbf{y}}_k]\,\mathbf{W}_{r,1}+\mathbf{b}_{r,1}\big)\mathbf{W}_{r,2}+\mathbf{b}_{r,2},\qquad \hat{\mathbf{y}}_k=\tilde{\mathbf{y}}_k+0.05\cdot s(\mathbf{R}_L)\odot\tanh(\mathbf{D}_k),
-\tag{27}
-$$
-其中拼接沿每个节点的特征维进行，$\mathbf{W}_{r,1}\in\mathbb{R}^{3\times32}$，$\mathbf{W}_{r,2}\in\mathbb{R}^{32\times1}$ 与 $\mathbf{b}_{r,2}$ 零初始化；$s(\mathbf{R}_L)=\mathbf{R}_L\boldsymbol{\varsigma}$ 按末步观测角色取固定倍率，$\boldsymbol{\varsigma}=(0,1,1,0.25)^{\top}$ 依次对应 ON、NEW、UNO、OFF。最终预测为 $\hat{\mathbf{Y}}=[\hat{\mathbf{y}}_1,\dots,\hat{\mathbf{y}}_H]^{\top}$。由于 tanh 有界，修正量的绝对值在标准化单位下不超过0.05。末步为 ON 的节点自身不被修正，但仍作为邻居参与其他节点的修正。该模块只读取末步观测角色，不读取状态进度与掩码，也没有独立的路由器；修正结果不回送解码器。
+其中 $\mathrm{Dec}$ 表示解码单元的一步更新及输出投影，$d$ 为解码残差倍率。解码阶段没有未来的生命周期上下文，路由统一使用末步的 $\mathbf{S}_L$；训练的前40轮采用比例线性衰减的 Teacher Forcing。最后，输出端对 $\tilde{\mathbf{Y}}$ 施加一个有界的邻域修正，得到最终预测 $\hat{\mathbf{Y}}$：修正量由节点自身及其前向、后向邻居的预测经 MLP 得到，在标准化单位下不超过0.05，并按末步观测角色缩放，ON、NEW、UNO 与 OFF 的倍率依次为0、1、1和0.25。
 
 ### 3.5 训练目标
 
-令 $\hat{y}$ 与 $y$ 为原始单位下的预测值与真实值，$e=|\hat{y}-y|$ 为绝对误差，$\sigma_{\mathrm{data}}$ 为训练时段目标变量的标准差。逐元素损失为
+令 $e$ 为原始单位下预测值与真实值的绝对误差，$\sigma_{\mathrm{data}}$ 为训练时段目标变量的标准差，逐元素损失取 $\ell(e)=\frac{e}{\sigma_{\mathrm{data}}}\tanh(0.1\,e)$，它在小误差处近似平方误差，在大误差处趋近标准化的绝对误差。训练目标为
 $$
-\ell(e)=\frac{e}{\sigma_{\mathrm{data}}}\tanh(0.1\,e).
-\tag{28}
+\mathcal{L}=(1-\beta)\,\mathcal{L}_{\mathrm{mean}}+\beta\,\mathcal{L}_{\mathrm{role}}+\lambda\,\mathcal{L}_{\mathrm{route}},
+\tag{12}
 $$
-该损失在小误差附近近似 $0.1e^2/\sigma_{\mathrm{data}}$，大误差时趋近标准化 MAE；权重项参与梯度计算。记 $\Omega$ 为一个批次内真值可用的目标元素，$\Omega_r$ 为其中末步观测角色为 $r$ 的节点所对应的元素，$\mathcal{R}_b$ 为该批次实际出现的观测角色集合，则
-$$
-\mathcal{L}_{\mathrm{mean}}=\frac{1}{|\Omega|}\sum_{\Omega}\ell(e),\qquad
-\mathcal{L}_{\mathrm{role}}=\frac{1}{|\mathcal{R}_b|}\sum_{r\in\mathcal{R}_b}\frac{1}{|\Omega_r|}\sum_{\Omega_r}\ell(e),
-\tag{29}
-$$
-其中 $\mathcal{L}_{\mathrm{mean}}$ 为全部目标元素上的平均损失；$\mathcal{L}_{\mathrm{role}}$ 先在每个观测角色内部平均，再对批次中出现的角色取平均，使样本较少的角色在优化中获得与其他角色相同的权重。总训练目标为
-$$
-\mathcal{L}=0.9\,\mathcal{L}_{\mathrm{mean}}+0.1\,\mathcal{L}_{\mathrm{role}}+\mathcal{L}_{\mathrm{route}},
-\tag{30}
-$$
-其中 $\mathcal{L}_{\mathrm{route}}$ 为式(21)的路由平衡损失。训练目标不含独立的重建损失或额外预测头。
+其中 $\mathcal{L}_{\mathrm{mean}}$ 为 $\ell$ 在全部可用目标元素上的平均；$\mathcal{L}_{\mathrm{role}}$ 先在末步观测角色相同的元素内平均，再对批次中出现的角色取平均，使样本较少的角色在优化中获得相同的权重；$\mathcal{L}_{\mathrm{route}}$ 为路由平衡损失。$\beta$ 与 $\lambda$ 为两项的权重，四个数据集均取 $\beta=0.1$、$\lambda=0.01$。训练目标不含独立的重建损失或额外的预测头。
 
 ## 4 实验
 
@@ -308,7 +180,7 @@ $$
 
 **评价指标。** MAE、均方根误差（RMSE）与平均绝对百分比误差（MAPE）均在原速度（流量）尺度上计算，MAPE 以百分比表示，其分母为目标值的绝对值并以 $10^{-6}$ 为下限，因此流量数据的 MAPE 对低流量目标很敏感，部分基线的 MAPE 超过100%。各场景内按日历与事件进展分层平衡汇总，再对四类场景等权平均得到 LifeAvg；LifeAvg RMSE 是场景级 RMSE 的平均。三项指标分别反映绝对误差、大残差和相对误差。
 
-**训练与实现。** 四个数据集的 ALFNet 采用相同的网络结构，均含1,037,529个参数，训练目标见3.5节。模型使用 AdamW 优化器训练，批大小为64，最多训练100轮，第40轮起以耐心值10提前停止，并按验证集 LifeAvg MAE 保存权重。图预测分支的学习率为 $5\times10^{-4}$，其余模块使用较小的固定学习率，各数据集再统一乘以下表中的学习率倍率。数据集之间只在下表所列的设置上不同，这些设置在训练前确定：分区数与分区容量对应3.3节的 $P$ 与 $C$，窗口插值对应式(9)中的开关 $\iota$，解码残差倍率与中心化强度分别对应式(24)中的 $d$ 与式(10)中的 $\alpha$。ALFTemporal 的 dropout 均为0.1。
+**训练与实现。** 四个数据集的 ALFNet 采用相同的网络结构，均含1,037,529个参数，训练目标见3.5节。模型使用 AdamW 优化器训练，批大小为64，最多训练100轮，第40轮起以耐心值10提前停止，并按验证集 LifeAvg MAE 保存权重。图预测分支的学习率为 $5\times10^{-4}$，其余模块使用较小的固定学习率，各数据集再统一乘以下表中的学习率倍率。数据集之间只在下表所列的设置上不同，这些设置在训练前确定：分区数与分区容量对应3.3节的 $P$ 与 $C$，窗口插值按3.2节所述执行，解码残差倍率与中心化强度分别对应式(11)中的 $d$ 与式(5)中的 $\alpha$。ALFTemporal 的 dropout 均为0.1。
 
 | 数据集 | 分区数 | 分区容量 | 学习率倍率 | 权重衰减 | 窗口插值 | 解码残差倍率 | 中心化强度 |
 |---|---:|---:|---:|---:|---|---:|---:|
@@ -397,15 +269,17 @@ $$
 
 **分场景结果。** ALFNet 在四类场景上都有优势。四个数据集、四类场景、三项指标共48项结果中，ALFNet 有41项最低，其余7项为次低，即每一项都位列前两名。在本地读数随接入而增加、随失效而中断的 Join 与 Fault 场景下，ALFNet 的三项指标在四个数据集上全部最低：Join 的 MAE 比最强的比较方法低3.86%–6.55%，Fault 的 MAE 低4.57%–15.02%。这两类场景正是本文关注的观测变化，结果与引言的设想一致：用观测角色与状态进度描述接入和失效的进程之后，模型在读数增减时的预测更准确。在读数完整的 Steady 场景下，ALFNet 的 MAE 与 RMSE 在四个数据集上同样最低，MAE 低0.34%–4.32%，说明对观测变化的建模同时保持了常规条件下的精度。在全程没有本地读数的 Unseen 场景下，ALFNet 的三项指标在四个数据集上均位列前两名，在 METR-LA 上比最强的比较方法低4.00%–8.97%。
 
+PEMS04 与 PEMS08 缺少传感器的 WGS-84 坐标，ALFTemporal 依据路网拓扑以广度优先搜索（BFS）分区；在具备坐标的两个速度数据集上，单独将 KD-tree 分区换为 BFS 后，种子32的 Unseen 测试 MAE 分别上升7.34%和5.26%，提示分区方式可能是流量数据上 Unseen 精度受限的因素之一（附录图A3）。
+
 各场景上最强的比较方法并不相同。以 METR-LA 的 MAE 为例，Unseen 场景下是 MoGERNN，Steady 与 Fault 场景下是 STBP，Join 场景下是 MetaDG。ALFNet 用同一组参数在四类场景上都位列前两名，因此四类场景平均后的降幅（5.59%–14.95%）大于多数单个场景的降幅。
 
 ### 4.3 接入与失效各阶段的预测性能（RQ1）
 
-Join 与 Fault 场景按事件持续步数 $m$ 各分为三个阶段（4.1节），用来观察预测如何随本地读数的增加或减少而变化。图2给出 ALFNet 在每个阶段、每项指标上相对最强比较方法的误差降幅，由三个种子的均值计算；各方法在每个阶段的均值与样本标准差见附录表A2–A5。
+Join 与 Fault 场景按事件持续步数 $m$ 各分为三个阶段（4.1节），用来观察预测如何随本地读数的增加或减少而变化。图3给出 ALFNet 在每个阶段、每项指标上相对最强比较方法的误差降幅，由三个种子的均值计算；各方法在每个阶段的均值与样本标准差见附录表A2–A5。
 
 ![四数据集阶段性能](../../experiments_20261112/figures/fig2_phase_gain.png)
 
-**图2　四个数据集上各阶段的误差降幅（测试集，三个种子的均值）。** 每个面板为一个数据集，行为阶段，列为指标；上三行为 Join 的三个阶段（Cold、Warm、Ready），下三行为 Fault 的三个阶段（Onset、Decay、Outage）。数值为 $100\times(1-E_{\mathrm{ALFNet}}/\min_b E_b)$，其中 $E$ 为三个种子的平均误差，$\min_b E_b$ 为十一个比较方法在该格的最低平均误差；正值表示 ALFNet 的误差更低。四个面板共用对称的色标，正负值全部保留。
+**图3　四个数据集上各阶段的误差降幅（测试集，三个种子的均值）。** 每个面板为一个数据集，行为阶段，列为指标；上三行为 Join 的三个阶段（Cold、Warm、Ready），下三行为 Fault 的三个阶段（Onset、Decay、Outage）。数值为 $100\times(1-E_{\mathrm{ALFNet}}/\min_b E_b)$，其中 $E$ 为三个种子的平均误差，$\min_b E_b$ 为十一个比较方法在该格的最低平均误差；正值表示 ALFNet 的误差更低。四个面板共用对称的色标，正负值全部保留。
 
 四个数据集、六个阶段、三项指标共72项结果中，ALFNet 有68项最低；六个阶段的 RMSE 在四个数据集上全部最低，METR-LA 与 PEMS08 的18项全部最低。ALFNet 在 Join 与 Fault 场景的各个阶段都有优势。
 
@@ -450,11 +324,11 @@ Join 与 Fault 场景按事件持续步数 $m$ 各分为三个阶段（4.1节）
 
 条件平均无法区分交通目标变化和观测变化的影响。为隔离 OS 的变化，我们在四个数据集的验证集上做配对干预：取 Fault 场景中焦点节点的历史与未来读数都自然完整的全部窗口（METR-LA、PEMS-BAY、PEMS04 与 PEMS08 分别为1,585、2,600、843和887个；一个窗口有多个符合条件的节点时按固定随机规则取一个，不依据预测误差筛选），保持预测目标、图结构和其他节点的输入不变，只改变焦点节点的可用读数。加入干预只保留最近3步或6步读数，以完整的12步为参照；中断干预删除最近3步、6步或全部读数；两种干预都同步更新观测角色与状态进度。模型参数固定，因此结果反映模型对可用读数的响应，而不是在线学习的效果。
 
-4.5、4.6与4.8节的对比模型取自四组比较方法：在每个数据集上，每组取验证集 LifeAvg MAE 最低的方法。MoGERNN（未观测位置的归纳预测）、Merlin（不完整观测下的预测）和 STBP（传感网络变化与跨路网泛化）在四个数据集上都入选；时空预测主干一组在 METR-LA 与 PEMS-BAY 上是 STGCN，在 PEMS04 与 PEMS08 上是 PatchSTG。各模型均使用种子32的最终权重，即表1、表2所用三个种子之一。图3给出各模型在六个干预设置下的平均 MAE。
+4.5、4.6与4.8节的对比模型取自四组比较方法：在每个数据集上，每组取验证集 LifeAvg MAE 最低的方法。MoGERNN（未观测位置的归纳预测）、Merlin（不完整观测下的预测）和 STBP（传感网络变化与跨路网泛化）在四个数据集上都入选；时空预测主干一组在 METR-LA 与 PEMS-BAY 上是 STGCN，在 PEMS04 与 PEMS08 上是 PatchSTG。各模型均使用种子32的最终权重，即表1、表2所用三个种子之一。图4给出各模型在六个干预设置下的平均 MAE。
 
 ![四数据集观测轨迹响应](../../experiments_20261113/figures/fig3_response.png)
 
-**图3　固定目标下的观测加入与中断（验证集，种子32）。** 每列为一个数据集。(a) 加入：只保留最近3步或6步读数，12为完整历史。(b) 中断：删除最近3步、6步或全部12步读数，0为完整历史。点为全部配对窗口、12个预测步上的平均 MAE；连线只为便于辨认同一模型。灰色标记在 METR-LA 与 PEMS-BAY 上为 STGCN，在 PEMS04 与 PEMS08 上为 PatchSTG。各比较方法与 ALFNet 的配对差值及其区间见附录图A1。
+**图4　固定目标下的观测加入与中断（验证集，种子32）。** 每列为一个数据集。(a) 加入：只保留最近3步或6步读数，12为完整历史。(b) 中断：删除最近3步、6步或全部12步读数，0为完整历史。点为全部配对窗口、12个预测步上的平均 MAE；连线只为便于辨认同一模型。灰色标记在 METR-LA 与 PEMS-BAY 上为 STGCN，在 PEMS04 与 PEMS08 上为 PatchSTG。各比较方法与 ALFNet 的配对差值及其区间见附录图A1。
 
 四个数据集各有六个干预设置，共24个；ALFNet 在其中21个上平均 MAE 最低。使用完整历史以及删除最近3步、6步读数时，ALFNet 在四个数据集上都最低；在 PEMS-BAY、PEMS04 与 PEMS08 上六个设置全部最低，比最强的代表方法分别低3.59%–10.31%、2.16%–7.75%和1.20%–13.15%。在同一批窗口上逐一比较（附录图A1），四个代表方法在24个设置上共有96个与 ALFNet 的配对 MAE 之差，其中82个的95%区间整体大于零（ALFNet 更低），没有一个整体小于零。
 
@@ -462,11 +336,11 @@ ALFNet 的预测随本地读数的增减而有序变化。加入干预下，只�
 
 ### 4.6 观测数量与时间布局（RQ3）
 
-引言指出，只统计有多少读数不足以描述预测所处的条件。为检验这一点，我们让焦点节点保留相同数量的读数（$q=3$、6或9步），但分布在12步历史的不同位置，共四种布局：Recent 保留最近的 $q$ 步，对应节点在窗口内接入；Early 保留最早的 $q$ 步，对应节点在窗口内失效；Middle Gap 保留两端、去掉中间连续的一段，Dispersed 等间隔保留 $q$ 步，二者对应在线传感器的通信丢包。按3.1节的定义，接入与失效同步更新观测角色与状态进度，通信丢包保持 ON 角色、只改变观测掩码。读数的布局在交通状态变化时才影响预测，因此本节在4.5节的配对窗口中取焦点节点历史读数波动较大的一半：12步历史读数的标准差不低于该数据集全部配对窗口的中位数（METR-LA、PEMS-BAY、PEMS04 与 PEMS08 分别为793、1,300、422和444个）。这一条件只依据输入的历史读数，与预测结果无关。其余输入、图结构与预测目标保持不变，所有设置只删除自然存在的读数。图4给出五个模型在12个数量与布局设置下的 MAE。
+引言指出，只统计有多少读数不足以描述预测所处的条件。为检验这一点，我们让焦点节点保留相同数量的读数（$q=3$、6或9步），但分布在12步历史的不同位置，共四种布局：Recent 保留最近的 $q$ 步，对应节点在窗口内接入；Early 保留最早的 $q$ 步，对应节点在窗口内失效；Middle Gap 保留两端、去掉中间连续的一段，Dispersed 等间隔保留 $q$ 步，二者对应在线传感器的通信丢包。按3.1节的定义，接入与失效同步更新观测角色与状态进度，通信丢包保持 ON 角色、只改变观测掩码。读数的布局在交通状态变化时才影响预测，因此本节在4.5节的配对窗口中取焦点节点历史读数波动较大的一半：12步历史读数的标准差不低于该数据集全部配对窗口的中位数（METR-LA、PEMS-BAY、PEMS04 与 PEMS08 分别为793、1,300、422和444个）。这一条件只依据输入的历史读数，与预测结果无关。其余输入、图结构与预测目标保持不变，所有设置只删除自然存在的读数。图5给出五个模型在12个数量与布局设置下的 MAE。
 
 ![四数据集观测数量与时间布局](../../experiments_20261113/figures/fig4_layout.png)
 
-**图4　不同观测数量与时间布局下的预测误差（验证集，种子32）。** 每行为一个数据集，每列为一种布局，横轴为可见读数的步数 $q$。柱为历史读数波动较大的一半配对窗口上的平均 MAE，误差线为窗口自助法95%区间；同一行的面板共用纵轴。灰色柱在 METR-LA 与 PEMS-BAY 上为 STGCN，在 PEMS04 与 PEMS08 上为 PatchSTG。
+**图5　不同观测数量与时间布局下的预测误差（验证集，种子32）。** 每行为一个数据集，每列为一种布局，横轴为可见读数的步数 $q$。柱为历史读数波动较大的一半配对窗口上的平均 MAE，误差线为窗口自助法95%区间；同一行的面板共用纵轴。灰色柱在 METR-LA 与 PEMS-BAY 上为 STGCN，在 PEMS04 与 PEMS08 上为 PatchSTG。
 
 ALFNet 在读数的数量和布局变化时都保持优势。四个数据集、四种布局、三种数量共48个设置中，ALFNet 在41个上平均 MAE 最低。保留9步读数时，四个数据集、四种布局的16个设置全部最低；四种布局各自的12个设置中，Recent、Early、Middle Gap 与 Dispersed 分别有11、10、11和9个最低。在 PEMS04 上12个设置全部最低，比最强的代表方法低2.36%–7.50%；在 PEMS-BAY 上12个设置中有11个最低，降幅为2.46%–14.31%。与设置最接近的 MoGERNN 相比，ALFNet 在全部48个设置上 MAE 都更低。在同一批窗口上逐一比较，四个代表方法在48个设置上共有192个与 ALFNet 的配对 MAE 之差，其中162个的95%区间整体大于零。
 
@@ -474,7 +348,7 @@ ALFNet 在读数的数量和布局变化时都保持优势。四个数据集、�
 
 ### 4.7 超参数与保留节点比例的敏感性
 
-在各数据集固定锚点上，每次只改变分区容量、学习率倍率、ALFTemporal dropout 或 AdamW 权重衰减中的一项，其余设置不变。所有配置以相同种子训练，并按验证集 LifeAvg MAE 选择检查点。速度数据复用已完成的固定锚点实验，流量数据使用最终插值、倍率与中心化方案下的单因素实验。各参数取值见下表，结果见图5。
+在各数据集固定锚点上，每次只改变分区容量、学习率倍率、ALFTemporal dropout 或 AdamW 权重衰减中的一项，其余设置不变。所有配置以相同种子训练，并按验证集 LifeAvg MAE 选择检查点。速度数据复用已完成的固定锚点实验，流量数据使用最终插值、倍率与中心化方案下的单因素实验。各参数取值见下表，结果见图6。
 
 | 数据集 | 锚点（容量／LR／dropout／权重衰减） | 容量候选 | LR 候选 | dropout 候选 | 权重衰减候选 |
 |---|---|---|---|---|---|
@@ -485,29 +359,29 @@ ALFNet 在读数的数量和布局变化时都保持优势。四个数据集、�
 
 ![四数据集单因素超参数敏感性](../../experiments_20261112/figures/fig5_hparams.png)
 
-**图5　单因素敏感性（验证集）。** 行为数据集、列为参数；每个参数值用三种颜色表示 LifeAvg MAE、RMSE、MAPE 相对本数据集锚点的百分比变化。零线与灰色底为锚点，负值更优；线段连接零线与实测值，不表示参数间插值或置信区间。
+**图6　单因素敏感性（验证集）。** 行为数据集、列为参数；每个参数值用三种颜色表示 LifeAvg MAE、RMSE、MAPE 相对本数据集锚点的百分比变化。零线与灰色底为锚点，负值更优；线段连接零线与实测值，不表示参数间插值或置信区间。
 
 在速度数据上，ALFNet 对这些超参数的变化比较稳健，MAE 的变化多在3%以内，两个数据集均在 dropout 0.1 下取得三项指标的最低值。PEMS-BAY 的锚点容量16为所测最大值，较小容量在三项指标上均变差，说明该数据集上更大的分区容量有利。流量数据则呈现更明显的容量—误差尺度取舍：PEMS04 增大容量降低 MAE 与 RMSE，却使 MAPE 上升（容量18时约上升9.5%）；PEMS08 对正则化更敏感，权重衰减 $10^{-3}$ 将三项指标分别降低8.60%、7.56%和6.99%。
 
-**保留节点比例。** 表1、表2的协议把约四分之一的节点留作保留节点（METR-LA 为207个中的50个，占24.2%）。为检验结论是否依赖这一比例，我们在 METR-LA 上把保留节点改为30、70和90个（占14.5%、33.8%和43.5%），相应地，可用于训练的已知节点从177个减少到117个。各比例的保留节点按嵌套方式抽取，其余设置不变；ALFNet 与4.5节的四个代表方法都沿用协议比例下的配置，不重新调参，以种子32重新训练并按验证集选择检查点（构造细节见附录A.4）。图6给出测试集上的 MAE，三项指标的完整结果见附录表A8。
+**保留节点比例。** 表1、表2的协议把约四分之一的节点留作保留节点（METR-LA 为207个中的50个，占24.2%）。为检验结论是否依赖这一比例，我们在 METR-LA 上把保留节点改为30、70和90个（占14.5%、33.8%和43.5%），相应地，可用于训练的已知节点从177个减少到117个。各比例的保留节点按嵌套方式抽取，其余设置不变；ALFNet 与4.5节的四个代表方法都沿用协议比例下的配置，不重新调参，以种子32重新训练并按验证集选择检查点（构造细节见附录A.4）。图7给出测试集上的 MAE，三项指标的完整结果见附录表A8。
 
 ![METR-LA 保留节点比例](../../experiments_20261113/figures/fig6_ratio.png)
 
-**图6　不同保留节点比例下的预测误差（METR-LA 测试集，种子32）。** 五个面板依次为四类场景的平均（LifeAvg）与四类场景，横轴为 MAE；每行为一个保留节点比例，24.2%为表1所用的协议比例。标记为各方法的 MAE，灰色线段标出同一比例下五个方法的范围，越靠左误差越低。每个比例下各方法在相同的样本与目标上比较。
+**图7　不同保留节点比例下的预测误差（METR-LA 测试集，种子32）。** 五个面板依次为四类场景的平均（LifeAvg）与四类场景，横轴为 MAE；每行为一个保留节点比例，24.2%为表1所用的协议比例。标记为各方法的 MAE，灰色线段标出同一比例下五个方法的范围，越靠左误差越低。每个比例下各方法在相同的样本与目标上比较。
 
 在四个比例下，ALFNet 的 LifeAvg 三项指标都是五个方法中最低的：MAE 比最强的比较方法低15.04%、15.63%、8.25%和8.46%，RMSE 低4.31%–10.56%，MAPE 低10.08%–16.56%。分场景看，Unseen 场景的 MAPE 与 Fault 场景的 RMSE 在四个比例下也都是最低的。保留节点增加到43.5%、已知节点减少约四分之一时，ALFNet 的 LifeAvg MAE 仍比最强的比较方法低8.46%。可见，ALFNet 在综合误差上的优势在保留节点更少或更多时同样成立，对保留节点的比例是稳健的。
 
 ### 4.8 样本层面的预测行为（RQ4）
 
-前面各节比较的都是平均误差。为观察本地历史完全不可用时各窗口上的预测，图7使用4.5节的全部配对窗口，在完全中断干预（删除焦点节点的全部12步读数）下给出四个数据集上的窗口误差分布和预测示例。
+前面各节比较的都是平均误差。为观察本地历史完全不可用时各窗口上的预测，图8使用4.5节的全部配对窗口，在完全中断干预（删除焦点节点的全部12步读数）下给出四个数据集上的窗口误差分布和预测示例。
 
 ![四数据集误差分布及预测案例](../../experiments_20261113/figures/fig7_cases.png)
 
-**图7　完全中断干预下的误差分布与案例（验证集，种子32）。** 每列为一个数据集。(a) 全部配对窗口 MAE 的经验累积分布，横轴为对数刻度；同一误差阈值下曲线越高，表示越多的窗口达到该精度。(b) 示例窗口上五个模型的预测：在 ALFNet 误差为五个模型中最低的窗口里，取它相对最强比较方法的收益最接近中位数的一个；点线为被删除的焦点节点历史，黑线为真值。示例用于展示有代表性的一种情形。
+**图8　完全中断干预下的误差分布与案例（验证集，种子32）。** 每列为一个数据集。(a) 全部配对窗口 MAE 的经验累积分布，横轴为对数刻度；同一误差阈值下曲线越高，表示越多的窗口达到该精度。(b) 示例窗口上五个模型的预测：在 ALFNet 误差为五个模型中最低的窗口里，取它相对最强比较方法的收益最接近中位数的一个；点线为被删除的焦点节点历史，黑线为真值。该轨迹展示 ALFNet 占优时的预测行为；各模型在全部配对窗口上的误差分布见(a)。
 
 完全中断时，ALFNet 的平均 MAE 在 PEMS-BAY、PEMS04 与 PEMS08 上是五个模型中最低的（2.563、45.857和34.370）。MoGERNN 是与本文设置最接近的方法，同样面向没有本地读数的位置。与它逐窗口比较，ALFNet 在四个数据集上都在多数窗口上误差更低：METR-LA、PEMS-BAY、PEMS04 与 PEMS08 上分别有60.9%、67.9%、57.3%和64.9%的窗口。平均每个窗口的 MAE 比 MoGERNN 低0.607、1.055、3.852和10.373，相当于 MoGERNN 平均 MAE 的12.6%、29.2%、7.7%和23.2%；四个差值的95%配对自助区间都整体大于零。窗口 MAE 的中位数同样在四个数据集上都低于 MoGERNN（2.510对2.976、1.437对2.106、32.015对38.091、23.236对31.143），可见优势来自大多数窗口，而非少数窗口。
 
-图7(a)中，ALFNet 的误差分布在 PEMS04 与 PEMS08 上整体位于其他模型的左侧，第10、25、50与75百分位都是五个模型中最低的；Merlin 与 STBP 在读数全部中断后误差大幅上升，在这两个数据集上的平均 MAE 达到 ALFNet 的1.83–2.45倍。图7(b)的示例中，焦点节点的历史全部被删除，各模型只能依靠其他节点。ALFNet 的预测最接近真值；在 PEMS04 的示例上，Merlin、STBP 与 PatchSTG 的预测明显高于真值，MAE 为130.978、203.705和95.933，ALFNet 为7.963。这与4.4节的消融一致：ALFTemporal 从其他节点的历史中提取条件特征，为本地读数不可用的节点提供了参考。
+图8(a)中，ALFNet 的误差分布在 PEMS04 与 PEMS08 上整体位于其他模型的左侧，第10、25、50与75百分位都是五个模型中最低的；Merlin 与 STBP 在读数全部中断后误差大幅上升，在这两个数据集上的平均 MAE 达到 ALFNet 的1.83–2.45倍。图8(b)的示例中，焦点节点的历史全部被删除，各模型只能依靠其他节点。ALFNet 的预测最接近真值；在 PEMS04 的示例上，Merlin、STBP 与 PatchSTG 的预测明显高于真值，MAE 为130.978、203.705和95.933，ALFNet 为7.963。这与4.4节的消融一致：ALFTemporal 从其他节点的历史中提取条件特征，为本地读数不可用的节点提供了参考。
 
 4.5、4.6与本节的配对分析使用四个数据集的验证集和种子32的权重，区间由对窗口做自助重采样得到，与表1、表2的测试集三种子结果互为补充。
 
@@ -664,7 +538,7 @@ LifeAvg 是 Unseen、Steady、Join 和 Fault 四类场景指标的等权平均�
 
 ### A.2 分阶段完整结果
 
-表A2–A5给出各方法在 Join 的 Cold、Warm、Ready 阶段和 Fault 的 Onset、Decay、Outage 阶段的全部指标，是正文图2的数据来源。
+表A2–A5给出各方法在 Join 的 Cold、Warm、Ready 阶段和 Fault 的 Onset、Decay、Outage 阶段的全部指标，是正文图3的数据来源。
 
 **表A2　METR-LA 的分阶段结果。** 测试集，种子32、42、52的均值±样本标准差。上半部分为 Join 的三个阶段，下半部分为 Fault 的三个阶段。
 
@@ -958,3 +832,21 @@ ALFGraph 的路由器把 OS 表示线性映射为五个传播专家的权重（s
 ![OS 路由权重](../../experiments_20261112/figures/figA1_router_gates.png)
 
 **图A2　不同观测角色下 OS 路由器分配给五个传播专家的平均权重。** 四个数据集，三个种子的均值；NEW 与 OFF 对12个状态进度取值取平均。由最终模型参数直接计算，不涉及测试数据。
+
+### B.3 空间分区对 Unseen 预测的影响
+
+表2中，ALFNet 的 Unseen MAE 和 RMSE 在 PEMS04 上高于 MoGERNN，在 PEMS08 上高于 MCPST。这两个流量数据集缺少传感器的 WGS-84 坐标，无法直接比较地理分区与拓扑分区。为检验分区方式对无本地读数节点的影响，我们在 METR-LA 与 PEMS-BAY 上分别以原 KD-tree 分区和按路网连通分量构建的 BFS 分区训练 ALFNet。两种设置使用相同的节点划分、初始参数、分区容量和训练配置，节点的静态结构特征均保留坐标，仅改变分区成员。
+
+![分区方式与 Unseen 误差](../figures/figA3_partition_unseen.png)
+
+**图A3　空间分区对 Unseen 预测误差的影响（测试集，种子32）。** 每行连接同一数据集、同一指标下的两种分区结果。空心圆为 KD-tree 参照值（0%），实心菱形为改用 BFS 后的相对变化，向右表示误差增大。
+
+在 METR-LA 上，改用 BFS 后，Unseen 测试 MAE 从4.849升至5.205，三项指标中 MAPE 的相对增幅最大（10.50%）。在 PEMS-BAY 上，MAE 从4.540升至4.778，三项指标的相对增幅接近（4.51%–5.26%）。在这两个速度数据集的测试节点上，保留相同的坐标输入、仅替换分区成员，均使无本地读数时的预测误差上升。流量数据集缺少对应的地理分区结果，分区方式对表2中模型间差距的贡献仍无法量化。
+
+## 附录C 模型实现细节
+
+**节点表示与分区。** 式(6)的160维表示由64维历史特征、两个32维日历嵌入和32维结构嵌入拼接而成。日内时段与星期分别按288和7归一化，查表时使用窗口末步的时段与星期。结构特征包括两个坐标分量、加权入度与出度、两者之和、总度加1后的对数，以及孤立节点标记。连续特征在全图上减去各自均值，再按最大绝对偏差缩放；缺失的坐标分量置零。所有节点共用宽度依次为7、64和32的两层感知机。分区未满时，按邻接关系选取真实节点补足槽位；补入的副本参与注意力计算，输出时只取节点在原分区中的表示。FiLM 参数头的隐藏宽度为32，末层权重与偏置初始为零。
+
+**图传播与路由平衡。** SAHC 的二阶扩散沿行归一化的正向与反向邻接分别传播一跳、两跳，再与节点自身特征拼接。ALFGraph 的加权邻接专家与前向转移专家使用相同的传播矩阵，各自学习投影与路由权重。式(12)中的 $\mathcal{L}_{\mathrm{route}}$ 计算如下：每次图传播先在批次内对全部节点的权重求和，得到五个专家各自的权重总量，再计算这五个总量的平方变异系数（分母加 $10^{-10}$）。五个专家均参与传播，按非零权重计数的负载项为零。先对同一模块各递推步的损失取平均，再对编码器与解码器共12个门控模块等权平均。
+
+**解码训练与输出修正。** 第 $i$ 轮训练时，每个样本在每个预测步以 $\max(0,1-i/40)$ 的概率使用真值作为下一步输入，只替换目标掩码允许的位置，并先减去与预测相同的参考值。推理时逐步回送解码器自身的预测。完成整个预测窗口后，将各步预测与加自环后的前向、后向邻域均值拼接，经隐藏宽度为32的感知机和双曲正切得到有界修正。修正层的输出投影零初始化，修正量按3.4节的角色倍率缩放。

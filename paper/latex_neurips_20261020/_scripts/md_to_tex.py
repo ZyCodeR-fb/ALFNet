@@ -31,25 +31,27 @@ CITE = {
     1: "yin2025xxltraffic", 2: "zhou2025mogernn", 3: "roth2022forecasting", 4: "mei2023uncertainty", 5: "gupta2023frigate", 6: "lei2025stfit", 7: "yu2024ginar", 8: "yu2025merlin", 9: "marisca2024graph", 10: "che2018recurrent", 11: "chen2021trafficstream", 12: "wang2023pattern", 13: "liu2026general", 14: "wang2026cold", 15: "zhao2026structure", 16: "wang2024stone", 17: "ma2025robust", 18: "cini2022filling", 19: "fang2025efficient", 20: "zhang2023crossformer", 21: "perez2018film", 22: "wang2023graph", 23: "li2018diffusion", 24: "wu2021inductive", 25: "zheng2023increase", 26: "xu2025kits", 27: "su2024spatial", 28: "su2026generalising", 29: "prabowo2024traffic", 30: "liu2025spatiotemporal", 31: "liu2023pristi", 32: "cui2020graph", 33: "wang2023traffic", 34: "zuo2023graph", 35: "huang2026masmamba", 36: "yu2025ginarplus", 37: "chen2025expand", 38: "yu2018spatio", 39: "wu2019graph", 40: "bai2020adaptive", 41: "cini2023taming", 42: "shao2022spatial", 43: "jiang2023pdformer", 44: "lee2024testam", 45: "yun2024flexmoe", 46: "guo2019attention", 47: "fofanah2026pimcst", 48: "zou2026meta",
 }
 FIG = {
-    1: ("fig:arch", "figures/ALFNet.pdf", r"\textwidth"),
-    2: ("fig:condition", "figures/fig2_phase_gain_3seed.pdf", r"\textwidth"),
-    3: ("fig:trajectory", "figures/fig3_response_4ds_val.pdf", r"\textwidth"),
-    4: ("fig:layout", "figures/fig4_layout_4ds_val.pdf", r"\textwidth"),
-    5: ("fig:hparam", "figures/fig5_hparams_val.pdf", r"\textwidth"),
-    6: ("fig:ratio", "figures/fig6_ratio_test.pdf", r"\textwidth"),
-    7: ("fig:cases", "figures/fig7_cases_4ds_val.pdf", r"\textwidth"),
+    1: ("fig:intro-support", "figures/intro_observation_support_v3.png", r"\textwidth"),
+    2: ("fig:arch", "figures/ALFNet.pdf", r"\textwidth"),
+    3: ("fig:condition", "figures/fig2_phase_gain_3seed.pdf", r"\textwidth"),
+    4: ("fig:trajectory", "figures/fig3_response_4ds_val.pdf", r"\textwidth"),
+    5: ("fig:layout", "figures/fig4_layout_4ds_val.pdf", r"\textwidth"),
+    6: ("fig:hparam", "figures/fig5_hparams_val.pdf", r"\textwidth"),
+    7: ("fig:ratio", "figures/fig6_ratio_test.pdf", r"\textwidth"),
+    8: ("fig:cases", "figures/fig7_cases_4ds_val.pdf", r"\textwidth"),
     "A1": ("fig:app-traj-diff", "figures/figA_trajectory_diff_val.pdf", r"\linewidth"),
     "A2": ("fig:app-router", "figures/figA1_router_gates.pdf", r"\linewidth"),
+    "A3": ("fig:app-partition", "figures/figA3_partition_unseen.pdf", r"\linewidth"),
 }
 TAB = {1: ("tab:main_speed", "tables/main_speed"), 2: ("tab:main_flow", "tables/main_flow"),
        3: ("tab:ablation", "tables/ablation_lifeavg")}
-# appendix: the text is in the draft (sections "附录A", "附录B"); the tabular files come from make_appendix.py
+# appendix: the text is in the draft (sections "附录A", "附录B", "附录C"); the tabular files come from make_appendix.py
 APP_TAB = {1: "tab:app-lifeavg", 2: "tab:app-phase-metrla", 3: "tab:app-phase-pemsbay", 4: "tab:app-phase-pems04",
            5: "tab:app-phase-pems08", 6: "tab:app-abl-scenario", 7: "tab:app-abl-phase", 8: "tab:app-ratio"}
 APP_TAB_FILE = {1: "app_lifeavg", 2: "app_phase_metrla", 3: "app_phase_pemsbay", 4: "app_phase_pems04",
                 5: "app_phase_pems08", 6: "app_ablation_scenario", 7: "app_ablation_phase", 8: "app_ratio"}
 APP_TAB_NO_RESIZE = set()
-APP_FIG = {n: FIG[f"A{n}"][0] for n in (1, 2)}
+APP_FIG = {n: FIG[f"A{n}"][0] for n in (1, 2, 3)}
 PIPE_TABLES = ["tables/datasets", "tables/settings", "tables/hparam_grid"]
 FILES = {"摘要": "abstract", "1": "introduction", "2": "related_work", "3": "method",
          "4": "experiments", "5": "conclusion"}
@@ -96,7 +98,7 @@ def inline(text):
                        + APP_TAB[int(m.group(2))] + "}", chunk)
         chunk = re.sub(r"表A([1-9])(?![\d])", lambda m: "表\\ref{" + APP_TAB[int(m.group(1))] + "}", chunk)
         chunk = re.sub(r"图A([1-9])(?![\d])", lambda m: "图\\ref{" + APP_FIG[int(m.group(1))] + "}", chunk)
-        chunk = re.sub(r"图([1-7])(?![\d])", lambda m: "图\\ref{" + FIG[int(m.group(1))][0] + "}", chunk)
+        chunk = re.sub(r"图([1-8])(?![\d])", lambda m: "图\\ref{" + FIG[int(m.group(1))][0] + "}", chunk)
         chunk = re.sub(r"表([1-3])(?![\d])", lambda m: "表\\ref{" + TAB[int(m.group(1))][0] + "}", chunk)
         chunk = re.sub(r"式\((\d+)\)", lambda m: "式~\\eqref{eq:" + m.group(1) + "}", chunk)
         pieces.append(chunk)
@@ -181,7 +183,7 @@ def convert_block(lines, pipe_counter):
             out += ["\\begin{center}", "\\small", f"\\resizebox{{\\linewidth}}{{!}}{{\\input{{{path}}}}}",
                     "\\end{center}"]
             continue
-        heading = re.match(r"^(#{2,3}) (?:([\dAB])(?:\.(\d))? )?(.+)$", line)
+        heading = re.match(r"^(#{2,3}) (?:([\dABC])(?:\.(\d))? )?(.+)$", line)
         if heading:
             level, major, minor, title = heading.groups()
             if level == "###":

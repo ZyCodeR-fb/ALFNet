@@ -1,5 +1,17 @@
 # Experiment evidence index
 
+## 2026-11-20 Supplement test complete
+
+Test plan `15c992e9` completed 10/10, seed 32, validation replay max difference 0. BFS increased all six speed-dataset test Unseen errors. Test LifeAvg firsts after OS decomposition: no role 9, Full 2, no mask 1 (same winners with other Table 3 ablations). [Test values and split comparison](../../paper/latex_neurips_20261020/results_supplement_20261116/TEST_CN.md).
+
+## 2026-11-20 Supplement validation collected
+
+Plan `dc82f8e1`, seed 32, 10/10 completed. Switching to BFS raised all three Unseen errors on METR-LA and lowered all three on PEMS-BAY. Full ranked first in 7/12 validation LifeAvg cells after splitting OS representation. [Results, ranking sets and sources](../../paper/latex_neurips_20261020/results_supplement_20261116/VALIDATION_CN.md). Supplement test results are pending.
+
+## 2026-11-16 Supplement: OS decomposition and partition algorithm (running)
+
+Plan `dc82f8e1` (`configs/paper/supplement_20261116/plan.json`; 10 trainings, seed 32, final anchors, paired initialization, max 5 concurrent, first-fit on free GPU memory): w/o Observation Role and w/o Observation Mask on four datasets, BFS partition on METR-LA/PEMS-BAY (KD-tree replaced by the graph-native BFS; coordinates still feed structural features). Code: `experiments/alfnet_supplement_20261116_adapter.py`, `scripts/run_supplement_20261116.py`, `scripts/test_supplement_20261116.py` (study-only; production ALFNet and `data_v4/` unchanged). Preflight 10/10: paired initial parameters equal the anchors; role audit (output invariant to role channels), mask audit (no learned path sees the mask; role/progress kept), layout audit (BFS membership, 201/207 and 313/325 nodes change part). Output `artifacts/experiments/supplement_20261116/dc82f8e1bafecb98ac9da2fc5e682caf42cac78ba7a65ec02e51840688db6c6b/` (`queue_status.json` holds PIDs, logs per run). Superseded draft plans `e041cbb1`, `e3132c48` (preflight only) and `4f6fe7d4` (queue stopped by Claude after 5 minutes to replace head-of-line blocking by first-fit; its two partial runs are not used). Test authorized by the user for these runs only (plan to be frozen after collection); loss-weight sensitivity (beta, lambda) not run by decision.
+
 ## 2026-11-12 Three-seed study complete (ALFNet + 12 comparison methods)
 
 Plans `d6f66d20` (24 trainings) + recovery `694a8c24` (MetaDG PEMS-BAY seed 42, guard limit 10%), test plan `d7dda3a8` (24 tests, replay difference 0). Comparison set 8 baselines + Merlin + STONE + MCPST + MetaDG (HD-TTS, STOP excluded). ALFNet test first cells, three-seed mean vs mean: 33/28/30/30 = 121/132 (every dataset ≥27); matched seeds 32/42/52: 118/104/102; seeds 42/52 only: 31/22/25/28. LifeAvg MAE/RMSE/MAPE first on all four datasets (35/36 per seed). Lost cells concentrate on Unseen (PEMS08 vs UIGNN 15–18%). Validation mean vs mean 29/25/30/31. Results: `paper/latex_neurips_20261020/results_seeds2_20261110/` (`seeds_analysis_20261112.xlsx`, `seeds_overview_20261110b.xlsx`).

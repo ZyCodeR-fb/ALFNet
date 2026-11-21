@@ -3,6 +3,7 @@
 from pathlib import Path
 from html import escape
 from generate_gallery import CATEGORIES
+from generate_gallery_ext import EXT_CATEGORIES
 ROOT=Path(__file__).resolve().parent
 
 CN=[
@@ -29,10 +30,10 @@ ALL=[(slug,en,caption,cat) for cat,items in CATEGORIES for slug,en,caption,_ in 
 assert len(CN)==len(CAUTION)==len(ALL)==75,(len(CN),len(CAUTION),len(ALL))
 extra={slug:(cn,caution) for (slug,en,caption,cat),cn,caution in zip(ALL,CN,CAUTION)}
 
-intro='''# 深度学习论文实验结果可视化图鉴：75 种图形与选型指南
+intro='''# 深度学习论文实验结果可视化图鉴：123 种图形与选型指南
 
 > **用途**：科研写作、超参数敏感性分析、算法性能比较、时空预测与强化学习实验展示。  
-> **覆盖范围**：8 大类、75 种图形；**每种图形均包含 1 张实际绘制的示意图**，附有 PNG 和 SVG。  
+> **覆盖范围**：12 大类、123 种图形（第 1–8 类 75 种为 2026-10-12 版；第 9–12 类 48 种为 2026-11-16 补充，覆盖三维/多维图、组合图、结构与注意力图、时间序列个例图）；**每种图形均包含 1 张实际绘制的示意图**，附有 PNG 和 SVG。  
 > **重要说明**：所有示例图均采用**模拟/演示数据（Synthetic Data）**，不是任何论文或真实数据集的实验结论。部分流程图、SHAP、t-SNE、UMAP、CKA 和 CD 图仅示意视觉形式，不代表已计算真实方法输出或统计显著性。
 
 ## 快速导航
@@ -45,8 +46,13 @@ intro='''# 深度学习论文实验结果可视化图鉴：75 种图形与选型
 6. [预测质量与诊断](#6-预测质量与诊断)
 7. [表示学习与可解释性](#7-表示学习与可解释性)
 8. [时空预测与动态决策](#8-时空预测与动态决策)
-9. [论文实验图快速选择表](#9-论文实验图快速选择表)
-10. [科研作图原则与常见误区](#10-科研作图原则与常见误区)
+9. [三维与多维参数空间](#9-三维与多维参数空间)
+10. [组合图与多面板](#10-组合图与多面板)
+11. [结构、关系与注意力](#11-结构关系与注意力)
+12. [时间序列与时空个例](#12-时间序列与时空个例)
+13. [论文实验图快速选择表](#13-论文实验图快速选择表)
+14. [科研作图原则与常见误区](#14-科研作图原则与常见误区)
+15. [补充依据与外部资源](#15-补充依据与外部资源)
 
 ## 图形类型全局概览
 
@@ -60,7 +66,15 @@ intro='''# 深度学习论文实验结果可视化图鉴：75 种图形与选型
 | 预测质量与诊断 | 11 | 错误从哪里来？预测有没有偏差或失准？ |
 | 表示学习与可解释性 | 10 | 模型特征、归因与决策机制怎样？ |
 | 时空预测与动态决策 | 10 | 何时、何处修正有效？如何受预算影响？ |
-| **总计** | **75** |  |
+| 三维与多维参数空间 | 17 | 多个参数或多个维度如何共同影响结果？ |
+| 组合图与多面板 | 13 | 如何在一张图里同时给出均值、波动、显著性或局部细节？ |
+| 结构、关系与注意力 | 8 | 模型学到了怎样的节点关系、注意力或组成结构？ |
+| 时间序列与时空个例 | 10 | 具体的时间段、节点或缺失模式下模型表现如何？ |
+| **总计** | **123** |  |
+
+第 9–12 类的预览：
+
+![第 9–12 类图形预览](overview_ext.png)
 
 ### 与三种基础图的区别
 
@@ -72,13 +86,16 @@ intro='''# 深度学习论文实验结果可视化图鉴：75 种图形与选型
 article='''
 ---
 
-## 9. 论文实验图快速选择表
+## 13. 论文实验图快速选择表
 
 | 论文实验内容 | 主要推荐 | 适合补充 | 你要证明的结论 |
 |---|---|---|---|
 | Main Results（总体性能） | Table、Dot、Dumbbell | Forest、CD | 相对基线的优势及跨数据集普遍性 |
 | Ablation Study（消融） | Table、Waterfall | Lollipop、Forest | 模块贡献和叠加效果 |
-| Hyperparameter Sensitivity（参数敏感性） | Contour、Small Multiples | Parallel Coordinates、Ternary | 超参数容忍度及交互影响 |
+| Hyperparameter Sensitivity（参数敏感性） | Contour、Small Multiples、Annotated Heatmap | Parallel Coordinates、Ternary、3D Scatter with Drop Lines、3D Bar、Dual-Axis Bar–Line | 超参数容忍度及交互影响 |
+| 三个损失权重 / 三个超参数 | 3D Scatter with Drop Lines | Ternary Contour（和为 1 时）、Slice Plot、数值表 | 最优区域在哪里、对取值是否敏感 |
+| Case Study（个例） | Forecast Case Study、Stacked Panels | Missingness Pattern、Time–Space Diagram | 模型在具体时段与缺失模式下的行为 |
+| Learned Structure（学到的结构） | Adjacency Comparison、Attention Map | Arc / Chord Diagram、Partition Map | 学到的关系是否合理、与先验图有何不同 |
 | Convergence（收敛） | Learning Curve | Ribbon、Spaghetti | 收敛速度与多种子稳定性 |
 | Robustness（鲁棒性） | ECDF、Raincloud | Ridge、Box、Forest | 尾部风险、波动性和异常场景表现 |
 | Efficiency（效率） | Pareto Frontier | Cost Breakdown、Roofline | 性能改进与时间/FLOPs 的代价 |
@@ -99,7 +116,7 @@ article='''
 
 注意：这些只是图形表达建议，不能替代合理的实验设计、真实指标计算以及独立测试集评估。
 
-## 10. 科研作图原则与常见误区
+## 14. 科研作图原则与常见误区
 
 **一、图形与指标语义匹配。** 例如 MAE 越低越好，Accuracy 越高越好；增益符号需定义清楚，如 $\\Delta\\mathrm{MAE}=\\mathrm{MAE}_{base}-\\mathrm{MAE}_{proposed}$，正值代表误差减少。
 
@@ -121,19 +138,30 @@ article='''
 
 ```text
 deep_learning_visualization_atlas/
-├── README.md                   # 本图鉴，75 种图形及用途说明
-├── figures/                   # 75 张 PNG 示例图
-├── figures_svg/               # 75 张 SVG 矢量示例图
-├── generate_gallery.py        # 重新绘制全部示例图
+├── README.md                   # 本图鉴，123 种图形及用途说明
+├── figures/                   # 123 张 PNG 示例图
+├── figures_svg/               # 123 张 SVG 矢量示例图
+├── generate_gallery.py        # 重新绘制第 1–8 类的 75 张示例图（需要 seaborn）
+├── generate_gallery_ext.py    # 重新绘制第 9–12 类的 48 张示例图（只需 numpy、matplotlib、scipy）
 └── build_markdown.py          # 重新生成图鉴文档
 ```
 
 - 推荐通过 **VS Code / Typora / Obsidian / GitHub Markdown Preview** 阅读 `README.md`。
 - 复制科研论文中的图形风格时，优先使用 `figures_svg/` 下的矢量文件；投稿时应从真实实验数据重新生成图形，而不是修改示意数值。
-- 需要重新生成示例图时，可在 Python 环境中安装：`numpy matplotlib scipy seaborn networkx pandas`，随后运行 `python generate_gallery.py`。
+- 需要重新生成示例图时，可在 Python 环境中安装：`numpy matplotlib scipy seaborn networkx pandas`，随后运行 `python generate_gallery.py` 与 `python generate_gallery_ext.py`；两个脚本互不覆盖对方的图。每种图的绘制代码是对应脚本中的一个函数（第 9–12 类为 `d_<文件名>` 或文末 `EXT_CATEGORIES` 表中登记的函数），可直接复制改用真实数据。
 - 为确保图片能够显示，**不要将 README.md 和 figures/ 分开保存**；整个文件夹移动、压缩或上传时应保持相对路径不变。
 
-*图鉴版本：2026-10-12。所有示例均为教学/论文排版演示用途。*
+## 15. 补充依据与外部资源
+
+2026-11-16 的补充按两类依据确定图型（记录的是检索到的条目，不是系统综述）：
+
+- **图库与工具**：matplotlib 官方图库的 mplot3d 部分（`plot_surface`、`plot_wireframe`、`plot_trisurf`、`bar3d`、`scatter`、`contour` 投影等，<https://matplotlib.org/stable/gallery/mplot3d/index.html>）；The Python Graph Gallery（按图型分类并附代码，<https://python-graph-gallery.com/>，其三维部分提醒三维图多数情况下不如二维图易读）；SciencePlots（论文用 matplotlib 样式，<https://github.com/garrettj403/SciencePlots>）；损失地形可视化的做法见 Li 等人的 *Visualizing the Loss Landscape of Neural Nets*（<https://arxiv.org/abs/1712.09913>）。
+- **论文中的图**：查看了 15 篇时空预测与时间序列论文 arXiv 源码中的图注（DCRNN、Graph WaveNet、IGNNK、GRIN、STID、TimesNet、PatchTST、iTransformer、GinAR、PatchSTG、MegaCRN、ST-SSL、STAEformer、TESTAM 等；只看了图注，未通读全文）。出现较多而原图鉴没有的样式：学习到的邻接矩阵、注意力图、预测个例、传感器或分区的空间分布、消融的分组柱状图、超参数的柱状/折线/三维柱状图、嵌入可视化、缺失率敏感性曲线、计算开销对比。
+- 用户提供的参考图（三个损失权重的三维散点图，颜色表示得分）对应 9.1。
+
+三维图的使用建议：只有当第三个维度确实是独立变量、且二维图（带数值的热力图、分面折线图）无法表达时才使用；使用时加垂线或投影、固定并说明视角、同时在正文或附录给出数值表。
+
+*图鉴版本：2026-11-16（第 1–8 类为 2026-10-12 版，未改动）。所有示例均为教学/论文排版演示用途。*
 '''
 
 sections=[]
@@ -149,6 +177,19 @@ for idx,(cat,items) in enumerate(CATEGORIES,1):
             slug,en,cap,fn=item
             cn,_=extra[slug]
             lines.extend(['  <td width="50%" valign="top">', f'    <b>{escape(en)} · {escape(cn)}</b><br>',f'    <img src="figures/{slug}.png" alt="{escape(en)} 示例图" width="430"><br>',f'    <small>{escape(cap)}</small><br>',f'    <a href="figures_svg/{slug}.svg">下载 SVG 矢量版</a>','  </td>'])
+        if len(items[j:j+2])<2:lines.append('  <td width="50%"></td>')
+        lines.append('</tr>')
+    lines.extend(['</table>','','---',''])
+    sections.append('\n'.join(lines))
+for idx,(cat,question,items) in enumerate(EXT_CATEGORIES,len(CATEGORIES)+1):
+    lines=[f'## {idx}. {cat}', '',f'本类共有 **{len(items)}** 种展示形式，回答的问题是：{question}','','| 编号 | 图形（英文 / 中文） | 主要用途 | 使用时注意 |','|---:|---|---|---|']
+    for n,(slug,en,cn,cap,warning,fn) in enumerate(items,1):
+        lines.append(f'| {idx}.{n} | **{en}**（{cn}） | {cap} | {warning} |')
+    lines.extend(['','### 对应图形示例', '', '> 以下图片均为模拟数据绘制，仅用于理解图形形式；绘制代码见 `generate_gallery_ext.py` 中的同名函数。','','<table>'])
+    for j in range(0,len(items),2):
+        lines.append('<tr>')
+        for slug,en,cn,cap,warning,fn in items[j:j+2]:
+            lines.extend(['  <td width="50%" valign="top">', f'    <b>{escape(en)} · {escape(cn)}</b><br>',f'    <img src="figures/{slug}.png" alt="{escape(en)} 示例图" width="430"><br>',f'    <small>{escape(cap)}（代码：<code>{fn.__name__}</code>）</small><br>',f'    <a href="figures_svg/{slug}.svg">下载 SVG 矢量版</a>','  </td>'])
         if len(items[j:j+2])<2:lines.append('  <td width="50%"></td>')
         lines.append('</tr>')
     lines.extend(['</table>','','---',''])

@@ -192,6 +192,11 @@
 - 4.7 加入保留节点比例（图6、表A8）；4.5/4.6/4.8 改为四个数据集、全部符合条件的验证窗口（`scripts/paired_interventions_20261113.py`，`scripts/plot_paper_figures_20261113.py`，结果与图在 `paper/experiments_20261113/`）。
 - 不利结果与未采纳的做法见 `notes/V6_CHANGELOG_CN.md` 第十一轮“如实记录”。待 Codex 复核：新图型与图注、4.5–4.8 正文数字（对照 `paper/experiments_20261113/figures/summary.json`）、正文未叙述布局比较这一取舍是否可接受。
 
+### 2026-11-16 第十五轮（Claude，已完成，已编译）
+
+- 第3节精炼：编号公式 30 → 12，约18,300 → 7,700字符；细节原文移入新增的附录C“模型细节”（式13–31）。规则 R25–R27。服务器已有用户级 TeX（`~/.texlive-alfnet`），`latexmk -xelatex` 编译通过，29页，无警告；PDF 在 `paper/latex_neurips_20261020/build/main_20261116.pdf`。
+- 待复核：式(3)、(7)、(11) 的概括写法与附录C 的展开是否一致。详见 `notes/V6_CHANGELOG_CN.md` 第十五轮。
+
 ### 2026-11-13 第十四轮（Claude，已完成，未编译 PDF）
 
 - 图4 改回四种布局的 4×4 五模型柱状图，窗口为焦点节点历史读数标准差不低于中位数的一半；Recent/Early 的角色随读数更新，Middle gap/Dispersed 保持 ON。48 个设置中 ALFNet 41 个最低。4.6 重写；规则 R20、R21 修订，新增 R23、R24。
@@ -209,3 +214,16 @@
 - 按用户 13 条意见重写摘要、引言、4.1–4.8、结论与附录B 的结果分析；写作规则整理为 `paper/latex_neurips_20261020/notes/WRITING_RULES_CN.md`（R1–R19），后续改稿先读。
 - 图4 改为 ALFNet 分组柱状图，图6 改为点图，图7 改为 2×4（示例画五个模型）；附录图A2 改为五模型 4×4 柱状图；比较方法的实现移至附录 A.5；删除附录 B.3 与表A9。
 - 逐条对应、未照字面执行的两处（适配说明移附录而非删除；五模型布局柱状图放附录）和正文未写的不利结果见 `notes/V6_CHANGELOG_CN.md` 第十二轮。待 Codex 复核：正文“全数据集成立”各句与表的对应、图7(b) 示例规则的表述。
+
+### 2026-11-16 第十六轮：导师三条意见（Claude，实验运行中）
+
+- 式(12) 改写为带 $\beta$、$\lambda$ 的形式（已完成，已编译）；损失权重敏感性经文献抽样后决定不做。
+- 补充实验计划 `dc82f8e1`（10 次训练，种子32）：w/o Observation Role、w/o Observation Mask（四个数据集），METR-LA 与 PEMS-BAY 改用 BFS 分区。状态看 `artifacts/experiments/supplement_20261116/dc82f8e1bafecb98ac9da2fc5e682caf42cac78ba7a65ec02e51840688db6c6b/queue_status.json`；全部完成后会生成 `COMPLETE.json` 与 `validation_results.json`。
+- 待办：训练完成后运行 `scripts/test_supplement_20261116.py freeze` 与 `queue`（用户已授权测试），再更新表3（OS 表示组加 w/o State Progress、w/o Observation Role、w/o Observation Mask）、4.4 节正文和附录的分区对比表。详见 `notes/V6_CHANGELOG_CN.md` 第十六轮。
+- 训练队列于 2026-11-16 启动，队列 PID 182699（`python -u scripts/run_supplement_20261116.py queue`，日志 `outputs_v4/supplement_20261116/queue2.log`）；各训练进程的 PID 记录在 `queue_status.json`。只可停止这些 PID，停止前核对命令行。
+
+### 2026-11-20 第十六轮结果复核（Codex）
+
+分支 `paper/final`，HEAD `15ec7d0`，工作区含未提交修改。计划 `dc82f8e1` 的完成记录确认训练 10/10，通过 ReaCH Python 离线核对各运行验证表并复算排名。BFS 的 Unseen 变化在两个速度数据集方向相反，Full 在细分 OS 组中取得 7/12 个 LifeAvg 第一。[结果与来源](../../../../paper/latex_neurips_20261020/results_supplement_20261116/VALIDATION_CN.md)。本次仅整理已有结果；补充测试及据此更新表 3 仍待后续任务。
+
+随后用户授权共享 GPU、最多 5 个并发。通过 ReaCH 执行 `scripts/test_supplement_20261116.py freeze` 和 `queue`，计划 `15c992e9` 的 10 项测试全部完成，验证重放差均为 0。BFS 的测试 Unseen 在两个速度数据集均上升；OS 组测试 LifeAvg 第一为去角色 9 格、Full 2 格、去掩码 1 格。[完整结果](../../../../paper/latex_neurips_20261020/results_supplement_20261116/TEST_CN.md)。论文表 3 与正文尚待同步。
